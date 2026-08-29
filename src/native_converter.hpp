@@ -36,6 +36,25 @@ struct BatchConversionResult {
 
 using StatusCallback = std::function<void(const std::wstring&)>;
 
+// Coarse amp gain classification derived from the fitted PK nonlinearity shaper
+// (kp/kn -- saturation steepness). Validated against 21 real NAM captures spanning
+// clean Fender through extreme high-gain djent, including three same-amp
+// clean-vs-crunch pairs that classified in the correct relative order. Does NOT
+// distinguish bass from guitar -- bass amps can score in the Clean range (e.g. a
+// clean-voiced Ampeg SVT) just as a clean guitar amp does, since kp/kn tracks gain
+// character, not instrument type. Bass reference selection is therefore always an
+// explicit user choice (ToneMatchReferenceMode::Bass), never picked by Auto.
+enum class AmpGainBucket { Clean, Moderate, High };
+AmpGainBucket classifyGainBucket(float kp, float kn);
+
+// Resolves the bundled reference clip for a gain bucket or ToneMatchReferenceMode::Bass.
+// Clips live in resources/reference_clips (next to the exe, same convention as
+// nam_input_wav.wav) as clean_*.wav / moderate_*.wav / high_*.wav / bass_*.wav; when
+// more than one matches a bucket, one is chosen deterministically (not randomly) so
+// repeated conversions of the same NAM are reproducible. Returns an empty path if the
+// clips folder or a matching clip isn't found.
+fs::path resolveNamedReferenceClip(ToneMatchReferenceMode mode, float kp = 0.0f, float kn = 0.0f);
+
 // Which A2 SlimmableContainer submodel to render/fit from. GP-200.exe itself always
 // selects Full (highest max_value); Lite is an experimental option for comparing
 // fit quality, since a lower-capacity submodel may leave less residual error once
@@ -85,6 +104,25 @@ struct QualityExperimentResult {
     // favor a candidate that doesn't generalize to real playing.
     double gp5TruncatedHeldOutLoss = -1.0;
     double gp5DirectFitHeldOutLoss = -1.0;
+
+    // Which candidate the dynamic pick chose ("direct-fit" or "truncated"), and how
+    // that chosen candidate scores against held-out validationClips before and after
+    // applying the GP-5/GP-50 Tone Match correction (the same correction reuse
+    // convertNamToClo ships when Tone Match is enabled). Computed only when
+    // validationClips is non-empty; -1 otherwise. Scored in the 44.1kHz device-storage
+    // domain (matching what actually ships), so these two are only comparable to each
+    // other, not to gp5TruncatedHeldOutLoss/gp5DirectFitHeldOutLoss above, which are
+    // scored in the NAM trainer-rate domain.
+    std::wstring gp5ChosenStrategy;
+    double gp5ChosenDeviceHeldOutLoss = -1.0;
+    double gp5PostToneMatchHeldOutLoss = -1.0;
+
+    // Fitted PK nonlinearity shaper (pp/pn = positive/negative saturation ceiling,
+    // kp/kn = positive/negative saturation steepness) -- a cheap, already-computed
+    // proxy for how "hot"/high-gain the amp is, independent of any filename or
+    // metadata guess. Same values shared by both GP-5/GP-50 candidates (PK doesn't
+    // depend on B tap count).
+    float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f;
 };
 
 // Loops the conversion over both A2 submodels (Full, Lite) and, for each, scores both
@@ -101,11 +139,18 @@ struct QualityExperimentResult {
 // gp5*HeldOutLoss -- a held-out check that the in-sample fit loss alone cannot give,
 // since a candidate can fit the synthetic conversion stimulus well without generalizing
 // to real playing.
+//
+// toneMatchReferenceWav, when non-empty, replaces the default Tone Match target: its
+// first 20 seconds become the tail of the conversion stimulus (mirroring
+// CloRefineConfig::referenceWav in convertNamToClo), so the Tone Match before/after
+// columns reflect analysis against real playing content instead of the same synthetic
+// stimulus the model was already fit against.
 std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& inputNam,
                                                             const fs::path& outputDirectory,
                                                             StimulusConfig stimulus = {},
                                                             NativeConverterConfig converter = {},
                                                             const std::vector<fs::path>& validationClips = {},
+                                                            const fs::path& toneMatchReferenceWav = {},
                                                             const StatusCallback& status = {});
 
 } // namespace ntc

@@ -65,6 +65,7 @@ constexpr int IDC_GP5_RESCAN = 135;
 constexpr int IDC_GP5_UPLOAD = 136;
 constexpr int IDC_GP5_DEVICE = 137;
 constexpr int IDC_GP5_PROGRESS = 138;
+constexpr int IDC_REFINE_MODE = 139;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -124,6 +125,7 @@ HWND gCorrectiveCheck = nullptr;
 HWND gCorrectiveEdit = nullptr;
 HWND gBrowseCorrectiveButton = nullptr;
 HWND gRefineCheck = nullptr;
+HWND gRefineModeCombo = nullptr;
 HWND gRefineTargetEdit = nullptr;
 HWND gBrowseRefineTargetButton = nullptr;
 HWND gVersion = nullptr;
@@ -246,7 +248,7 @@ void showConversionUi(HWND hwnd, bool show) {
         gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
         gConvertButton, gOpenButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
         gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineCheck,
-        gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
+        gRefineModeCombo, gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
     };
     for (HWND h : controls) showControl(h, show);
     for (int id : {1002,1003,1005,1006,1008,1009,1010})
@@ -492,8 +494,11 @@ void updateTailControls() {
 
     EnableWindow(gRefineCheck, TRUE);
     const bool refineEnabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    EnableWindow(gRefineTargetEdit, refineEnabled ? TRUE : FALSE);
-    EnableWindow(gBrowseRefineTargetButton, refineEnabled ? TRUE : FALSE);
+    EnableWindow(gRefineModeCombo, refineEnabled ? TRUE : FALSE);
+    const int refineModeSel = static_cast<int>(SendMessageW(gRefineModeCombo, CB_GETCURSEL, 0, 0));
+    const bool refineCustom = refineModeSel == 6; // "Custom WAV..." is the last item
+    EnableWindow(gRefineTargetEdit, (refineEnabled && refineCustom) ? TRUE : FALSE);
+    EnableWindow(gBrowseRefineTargetButton, (refineEnabled && refineCustom) ? TRUE : FALSE);
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -534,7 +539,23 @@ void startConversion(HWND hwnd) {
     ntc::CloRefineConfig refine;
     refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     refine.passes = 4;
-    refine.referenceWav = fs::path(getText(gRefineTargetEdit));
+    const int refineModeSel = static_cast<int>(SendMessageW(gRefineModeCombo, CB_GETCURSEL, 0, 0));
+    static constexpr ntc::ToneMatchReferenceMode kRefineModes[] = {
+        ntc::ToneMatchReferenceMode::Default, ntc::ToneMatchReferenceMode::Auto,
+        ntc::ToneMatchReferenceMode::Clean, ntc::ToneMatchReferenceMode::Moderate,
+        ntc::ToneMatchReferenceMode::High, ntc::ToneMatchReferenceMode::Bass,
+        ntc::ToneMatchReferenceMode::Custom
+    };
+    refine.referenceMode = (refineModeSel >= 0 && refineModeSel < 7)
+        ? kRefineModes[refineModeSel] : ntc::ToneMatchReferenceMode::Default;
+    if (refine.referenceMode == ntc::ToneMatchReferenceMode::Custom)
+        refine.referenceWav = fs::path(getText(gRefineTargetEdit));
+    if (refine.enabled && refine.referenceMode == ntc::ToneMatchReferenceMode::Custom
+        && refine.referenceWav.empty()) {
+        MessageBoxW(hwnd, L"Select a Custom Tone Match reference WAV, or choose a different option.",
+                    L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
 
     enableControls(false);
     ntc::NativeConverterConfig nativeConfig;
@@ -761,8 +782,11 @@ void layoutControls(HWND hwnd) {
     moveCtrl(GetDlgItem(hwnd, 1009), contentX, gUi.sectionRefine.top + 7, 360, 22);
     moveCtrl(gRefineCheck, contentX, gUi.sectionRefine.top + 32, 560, 24);
     moveCtrl(GetDlgItem(hwnd, 1010), contentX, gUi.sectionRefine.top + 58, 430, 20);
-    const int refineTargetEditW = (gUi.sectionRefine.right - sectionRightInset - 124 - 8) - contentX;
-    moveCtrl(gRefineTargetEdit, contentX, gUi.sectionRefine.top + 78, refineTargetEditW, 28);
+    constexpr int refineModeComboW = 210;
+    moveCtrl(gRefineModeCombo, contentX, gUi.sectionRefine.top + 78, refineModeComboW, 300);
+    const int refineTargetEditX = contentX + refineModeComboW + 12;
+    const int refineTargetEditW = (gUi.sectionRefine.right - sectionRightInset - 124 - 8) - refineTargetEditX;
+    moveCtrl(gRefineTargetEdit, refineTargetEditX, gUi.sectionRefine.top + 78, refineTargetEditW, 28);
     moveCtrl(gBrowseRefineTargetButton, gUi.sectionRefine.right - sectionRightInset - 124, gUi.sectionRefine.top + 76, 124, 32);
 
     const int center = rc.right / 2;
@@ -840,7 +864,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
     createSectionLabel(hwnd, 1009, L"Tone Match");
-    createSectionLabel(hwnd, 1010, L"Tone Match reference WAV (optional; first 20 s used)");
+    createSectionLabel(hwnd, 1010, L"Reference audio (Auto picks by gain; Custom uses your own WAV, first 20 s)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -888,6 +912,15 @@ void createUi(HWND hwnd) {
                                  WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                  0, 0, 520, 24, hwnd, controlId(IDC_REFINE_CLO), nullptr, nullptr);
     applyFont(gRefineCheck);
+    gRefineModeCombo = CreateWindowW(L"COMBOBOX", L"",
+                                     WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                     0, 0, 100, 300, hwnd, controlId(IDC_REFINE_MODE), nullptr, nullptr);
+    applyFont(gRefineModeCombo);
+    for (const wchar_t* item : {L"Default (standard stimulus)", L"Auto (recommended)", L"Clean",
+                                 L"Moderate", L"High Gain", L"Bass", L"Custom WAV..."}) {
+        SendMessageW(gRefineModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
+    }
+    SendMessageW(gRefineModeCombo, CB_SETCURSEL, 1, 0); // Auto by default
     gRefineTargetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                         0, 0, 100, 30, hwnd, controlId(IDC_REFINE_TARGET_PATH), nullptr, nullptr);
@@ -1207,6 +1240,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_REFINE_CLO:
             if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
             return 0;
+        case IDC_REFINE_MODE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
+            return 0;
         case IDC_TAIL_MODE:
             if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
             return 0;
@@ -1392,7 +1428,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 namespace {
 // Headless entry point:
-//   NamToClo.exe --quality-experiment <input.nam> <outputDir> [validationClipsDir]
+//   NamToClo.exe --quality-experiment <input.nam> <outputDir> [validationClipsDir] [toneMatchReferenceWav]
 // Loops the conversion over the Full and Lite A2 submodels and, for each, scores both
 // GP-5/GP-50 Block-B strategies (truncated-from-2048 vs. directly fit at the device tap
 // budget), printing progress and a final summary to the console and writing
@@ -1426,10 +1462,15 @@ bool runHeadlessQualityExperimentIfRequested(int& exitCode) {
             std::sort(validationClips.begin(), validationClips.end());
             std::wcout << L"Found " << validationClips.size() << L" validation clip(s) in " << clipsDir.wstring() << L"\n";
         }
+        fs::path toneMatchReferenceWav;
+        if (argc >= 6) {
+            toneMatchReferenceWav = argv[5];
+            std::wcout << L"Tone Match reference WAV: " << toneMatchReferenceWav.wstring() << L"\n";
+        }
         std::wcout << L"Quality experiment: " << inputNam.wstring() << L" -> " << outputDir.wstring() << L"\n";
         ntc::NativeConverterConfig converter;
         auto results = ntc::runQualityExperiments(inputNam, outputDir, ntc::StimulusConfig{}, converter, validationClips,
-            [](const std::wstring& s) { std::wcout << s << L"\n"; });
+            toneMatchReferenceWav, [](const std::wstring& s) { std::wcout << s << L"\n"; });
         std::wcout << L"\n==== Summary (lower loss is better) ====\n";
         for (const auto& r : results) {
             std::wcout << r.label << L": GP-200 fit loss=" << r.conversion.fitLoss
@@ -1438,6 +1479,10 @@ bool runHeadlessQualityExperimentIfRequested(int& exitCode) {
             if (r.gp5TruncatedHeldOutLoss >= 0.0) {
                 std::wcout << L" | held-out: truncated=" << r.gp5TruncatedHeldOutLoss
                            << L", direct-fit=" << r.gp5DirectFitHeldOutLoss;
+            }
+            if (r.gp5PostToneMatchHeldOutLoss >= 0.0) {
+                std::wcout << L" | Tone Match (" << r.gp5ChosenStrategy << L") held-out: before="
+                           << r.gp5ChosenDeviceHeldOutLoss << L", after=" << r.gp5PostToneMatchHeldOutLoss;
             }
             std::wcout << L"\n";
         }

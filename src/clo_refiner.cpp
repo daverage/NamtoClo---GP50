@@ -271,16 +271,23 @@ static void renderWithB(const std::vector<float>& preB,const std::vector<float>&
 
 }
 
-bool refineCloBOnly(const fs::path& inputClo2048,
-                    const fs::path& stimulusWav,
-                    const fs::path& targetWav,
-                    const fs::path& outputClo2048,
-                    const CloRefineConfig& config,
-                    std::string& error,
-                    const RefineStatusCallback& status,
-                    std::vector<float>* outCorrectionIr) {
+// Analysis-only: computes the Tone Match correction filter for sourceClo against
+// targetWav (stimulusWav locates the final 20-second analysis window). Does not
+// modify or write any CLO. parseModel() reads A/B tap counts from the CLO header
+// rather than assuming any fixed length, and the CloPlayer-emulation render chain
+// (precomputeA/renderPreB/FirFftPlan) is equally tap-count-agnostic, so this works
+// unchanged whether sourceClo is a GP-200 2048-tap CLO or a GP-5/GP-50 512-tap one --
+// refineCloBOnly() (GP-200) and convertNamToClo()'s GP-5/GP-50 path both build on this
+// so the same measurement math applies to whichever model is being corrected, instead
+// of one borrowing a correction derived from the other's response.
+bool computeToneMatchCorrectionIr(const fs::path& sourceClo,
+                                  const fs::path& stimulusWav,
+                                  const fs::path& targetWav,
+                                  std::vector<float>& outIr,
+                                  std::string& error,
+                                  const RefineStatusCallback& status) {
     std::vector<std::uint8_t> bytes;
-    if (!readFileBytes(inputClo2048, bytes, error)) return false;
+    if (!readFileBytes(sourceClo, bytes, error)) return false;
 
     Model m;
     if (!parseModel(bytes, m, error)) return false;
@@ -326,9 +333,22 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     }
 
     // Keep the established refinement DSP unchanged: 5% smoothing and a
-    // 2048-sample minimum-phase IR. The IR stays in memory and is applied
-    // directly to Block B; no diagnostic/intermediate WAV is written to disk.
-    const auto ir = v26minPhaseIr(comparison, kV26Smooth);
+    // 2048-sample minimum-phase IR.
+    outIr = v26minPhaseIr(comparison, kV26Smooth);
+    return true;
+}
+
+bool refineCloBOnly(const fs::path& inputClo2048,
+                    const fs::path& stimulusWav,
+                    const fs::path& targetWav,
+                    const fs::path& outputClo2048,
+                    const CloRefineConfig& config,
+                    std::string& error,
+                    const RefineStatusCallback& status,
+                    std::vector<float>* outCorrectionIr) {
+    (void)config;
+    std::vector<float> ir;
+    if (!computeToneMatchCorrectionIr(inputClo2048, stimulusWav, targetWav, ir, error, status)) return false;
     if (outCorrectionIr) *outCorrectionIr = ir;
 
     if (status) status(L"Applying Tone Match correction to Block B...");

@@ -193,3 +193,15 @@ endif()
 
 install(TARGETS NamToClo RUNTIME DESTINATION .)
 install(FILES README.md LICENSE THIRD_PARTY.md DESTINATION .)
+
+# Tone Match reference clips (resources/reference_clips) are resolved at runtime next
+# to the exe (see resolveReferenceClipsDir() in native_converter.cpp) -- copy them on
+# every build so Auto/Clean/Moderate/High/Bass reference selection works without a
+# manual copy step, and install them the same way for packaged releases.
+add_custom_command(TARGET NamToClo POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:NamToClo>/reference_clips"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/resources/reference_clips"
+        "$<TARGET_FILE_DIR:NamToClo>/reference_clips"
+    COMMENT "Copying Tone Match reference clips next to NamToClo.exe")
+install(DIRECTORY resources/reference_clips/ DESTINATION reference_clips)

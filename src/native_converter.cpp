@@ -1811,6 +1811,68 @@ fs::path resolveOriginalStimulusPath(){
     return exe.empty()?fs::path{}:exe.parent_path()/L"nam_input_wav.wav";
 }
 
+fs::path resolveReferenceClipsDir(){
+    const fs::path exe=executablePath();
+    return exe.empty()?fs::path{}:exe.parent_path()/L"reference_clips";
+}
+
+// Deterministically picks the first matching file (alphabetical) for a bucket prefix,
+// so repeated runs on the same NAM pick the same clip rather than depending on
+// filesystem enumeration order varying between machines.
+fs::path firstClipWithPrefix(const fs::path& dir,const std::wstring& prefix){
+    std::error_code ec;
+    std::vector<fs::path> matches;
+    for(const auto& entry:fs::directory_iterator(dir,ec)){
+        if(ec||!entry.is_regular_file(ec)||ec)continue;
+        auto name=entry.path().filename().wstring();
+        std::transform(name.begin(),name.end(),name.begin(),[](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});
+        if(name.rfind(prefix,0)==0)matches.push_back(entry.path());
+    }
+    if(matches.empty())return {};
+    std::sort(matches.begin(),matches.end());
+    return matches.front();
+}
+
+} // namespace
+
+AmpGainBucket classifyGainBucket(float kp,float kn){
+    // Thresholds set from the gap structure observed across 21 validated NAM captures:
+    // clean amps (guitar and clean-voiced bass alike) cluster under ~15, moderate/crunch
+    // amps span roughly 20-250, and high/extreme-gain amps sit above ~250 with the
+    // nearest neighbors (Green Day Insomniac 185, Marshall Silver Jubilee 184 on one
+    // side; Bogner Ecstasy Blue 339, Metallica Black Album 347 on the other) bracketing
+    // the boundary rather than landing on it.
+    const float avg=0.5f*(kp+kn);
+    if(avg<15.0f)return AmpGainBucket::Clean;
+    if(avg<260.0f)return AmpGainBucket::Moderate;
+    return AmpGainBucket::High;
+}
+
+fs::path resolveNamedReferenceClip(ToneMatchReferenceMode mode,float kp,float kn){
+    const fs::path dir=resolveReferenceClipsDir();
+    std::error_code ec;
+    if(dir.empty()||!fs::exists(dir,ec)||ec)return {};
+    std::wstring prefix;
+    switch(mode){
+        case ToneMatchReferenceMode::Bass: prefix=L"bass_"; break;
+        case ToneMatchReferenceMode::Clean: prefix=L"clean_"; break;
+        case ToneMatchReferenceMode::Moderate: prefix=L"moderate_"; break;
+        case ToneMatchReferenceMode::High: prefix=L"high_"; break;
+        case ToneMatchReferenceMode::Auto: {
+            switch(classifyGainBucket(kp,kn)){
+                case AmpGainBucket::Clean: prefix=L"clean_"; break;
+                case AmpGainBucket::Moderate: prefix=L"moderate_"; break;
+                case AmpGainBucket::High: prefix=L"high_"; break;
+            }
+            break;
+        }
+        default: return {};
+    }
+    return firstClipWithPrefix(dir,prefix);
+}
+
+namespace {
+
 bool writeMonoFloat32Wav(const fs::path&path,const std::vector<float>&samples,std::uint32_t sampleRate,std::string&error){
     if(sampleRate==0){error="Cannot write WAV with sample rate 0.";return false;}
     std::error_code ec;if(path.has_parent_path())fs::create_directories(path.parent_path(),ec);if(ec){error="Cannot create WAV directory: "+ec.message();return false;}
@@ -1887,6 +1949,32 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     const std::vector<float> toneTarget44100=prepareToneTarget44100(target,sr);
     detrend(target);const auto latency=detectLatency(target,sr);target=alignLeft(target,latency);report(status,L"Detected NAM latency "+std::to_wstring(latency)+L" samples.");
     Model m;m.A.assign(kA,0);m.A[0]=1;m.B.assign(kB,0);m.B[0]=1;m.pk=fitPk(input,target,sr);m.pre=Biquad{};m.post=postForRate(sr);{std::wostringstream os;os<<L"P/K = "<<m.pk.pp<<L" / "<<m.pk.pn<<L" / "<<m.pk.kp<<L" / "<<m.pk.kn;report(status,os.str());}
+
+    // Resolve the Tone Match reference audio now that the PK shaper (needed for Auto
+    // classification) is available, before fitAB/refineB run. Custom keeps the
+    // user-browsed refine.referenceWav as-is; Default leaves it empty (standard
+    // stimulus tail, unchanged behavior).
+    if(refine.enabled&&refine.referenceMode!=ToneMatchReferenceMode::Custom&&refine.referenceMode!=ToneMatchReferenceMode::Default){
+        const fs::path namedClip=resolveNamedReferenceClip(refine.referenceMode,m.pk.kp,m.pk.kn);
+        if(namedClip.empty()){
+            report(status,L"Tone Match reference clip not found next to the executable (reference_clips folder) -- using the default stimulus instead.");
+            refine.referenceWav.clear();
+        }else{
+            refine.referenceWav=namedClip;
+            if(refine.referenceMode==ToneMatchReferenceMode::Auto){
+                const wchar_t* bucketName=L"moderate";
+                switch(classifyGainBucket(m.pk.kp,m.pk.kn)){
+                    case AmpGainBucket::Clean: bucketName=L"clean"; break;
+                    case AmpGainBucket::Moderate: bucketName=L"moderate"; break;
+                    case AmpGainBucket::High: bucketName=L"high-gain"; break;
+                }
+                report(status,std::wstring(L"Tone Match: auto-classified as ")+bucketName+L", using reference clip "+namedClip.filename().wstring());
+            }else{
+                report(status,L"Tone Match: using reference clip "+namedClip.filename().wstring());
+            }
+        }
+    }
+
     fitAB(m,input,target,sr,status,kB,&r.fitLoss);refineB(m,input,target,sr,status);
 
     const fs::path original2048=work/L"native_original_2048.clo";if(!serialize2048(original2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
@@ -1936,15 +2024,16 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
     fs::path toneMatched2048;
     std::vector<float> toneMatchIr;
+    fs::path refineStimulusPath=stim;
+    fs::path refineTargetWavPath;
     if(refine.enabled){
         report(status,L"Tone Match: preparing matched NAM target...");
-        fs::path refineStimulus=stim;
         std::vector<float> refineTarget44100=toneTarget44100;
         if(!refine.referenceWav.empty()){
             StimulusConfig refineStimulusConfig=stimulus;refineStimulusConfig.tailMode=TailMode::RecordedAudio;refineStimulusConfig.recordedAudio=refine.referenceWav;
-            refineStimulus=work/L"refine_input_wav.wav";
-            if(!buildStimulus(originalStimulus,refineStimulusConfig,refineStimulus,error)){r.error="Could not prepare refinement test WAV: "+error;fs::remove_all(work,ec);return r;}
-            std::vector<float> refineS44;std::uint32_t refineSr44=0;if(!readPcm16Mono(refineStimulus,refineS44,refineSr44,error)){r.error=error;fs::remove_all(work,ec);return r;}
+            refineStimulusPath=work/L"refine_input_wav.wav";
+            if(!buildStimulus(originalStimulus,refineStimulusConfig,refineStimulusPath,error)){r.error="Could not prepare refinement test WAV: "+error;fs::remove_all(work,ec);return r;}
+            std::vector<float> refineS44;std::uint32_t refineSr44=0;if(!readPcm16Mono(refineStimulusPath,refineS44,refineSr44,error)){r.error=error;fs::remove_all(work,ec);return r;}
             std::vector<float> unusedInput,refineRendered;double refineRate=sr;if(!renderNam(modelPath,refineS44,trainer.blockSize,0.31f,unusedInput,refineRendered,refineRate,error,status)){r.error="Could not render refinement stimulus through NAM: "+error;fs::remove_all(work,ec);return r;}
             refineTarget44100=prepareToneTarget44100(refineRendered,refineRate);
         }
@@ -1962,29 +2051,75 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
             report(status,L"Tone Match: original conversion stimulus through NAM Full vs original native CLO.");
         }
 
-        const fs::path targetWav=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(targetWav,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
+        refineTargetWavPath=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(refineTargetWavPath,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
         toneMatched2048=work/L"native_2048_TONEMATCH.clo";
         CloRefineConfig refineRun=refine;
-        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,toneMatched2048,refineRun,error,status,&toneMatchIr)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+        if(!refineCloBOnly(toneMatchInputClo,refineStimulusPath,refineTargetWavPath,toneMatched2048,refineRun,error,status,&toneMatchIr)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+    }
+
+    // GP-5/GP-50 device-specific Tone Match: measure and correct the ACTUAL chosen
+    // 512-tap model's own response against the same target, instead of reusing the
+    // correction derived from the GP-200 2048-tap model above. Held-out testing across
+    // 5 NAM models showed the reused-correction approximation was inconsistent --
+    // sometimes better, sometimes measurably worse -- so this both derives a correction
+    // specific to the chosen model AND only keeps it if it doesn't worsen the fit.
+    std::vector<float> gp5ToneMatchIr;
+    if(gp5Chosen&&refine.enabled){
+        report(status,L"GP-5/GP-50: performing device-specific Tone Match...");
+        const fs::path gp5PreToneMatchClo=work/L"gp5_512_pre_tonematch.clo";
+        std::string gp5Error;
+        std::vector<float> candidateIr;
+        if(!serializeGp5Compact(gp5PreToneMatchClo,*gp5Chosen,sr,gp5Error,correctiveIr,
+                                correction.enabled?correctiveStats.postGainDb:-6.0)){
+            report(status,L"GP-5/GP-50 Tone Match skipped: could not prepare analysis CLO ("+std::wstring(gp5Error.begin(),gp5Error.end())+L").");
+        }else if(!computeToneMatchCorrectionIr(gp5PreToneMatchClo,refineStimulusPath,refineTargetWavPath,candidateIr,gp5Error,status)){
+            report(status,L"GP-5/GP-50 Tone Match skipped: "+std::wstring(gp5Error.begin(),gp5Error.end()));
+        }else{
+            // Rebuild the exact 44.1kHz device-domain Block B that gp5PreToneMatchClo
+            // holds (chosen model + Corrective IR, matching the analysis signal chain),
+            // apply the candidate correction to a copy, and compare loss before/after
+            // against the same Tone Match target -- only keep the correction if it
+            // doesn't measurably worsen the fit.
+            auto bScaled=gp5Chosen->B;for(auto&v:bScaled)v*=4.0f;
+            auto B44Pre=resampleFirOfficial(bScaled,sr,512);
+            std::string applyErr;
+            bool preOk=true;
+            if(correction.enabled) preOk=applyCorrectiveIrToB44(B44Pre,correctiveIr,correctiveStats.postGainDb,applyErr);
+            auto B44Post=B44Pre;
+            const bool postOk=preOk&&applyCorrectiveIrToB44(B44Post,candidateIr,0.0,applyErr);
+
+            std::vector<float> analysisInput,analysisTarget;std::string readErr;
+            if(postOk&&loadClipAsMono44100(refineStimulusPath,analysisInput,readErr)
+                     &&loadClipAsMono44100(refineTargetWavPath,analysisTarget,readErr)){
+                auto A44=resampleFirOfficial(gp5Chosen->A,sr,128);
+                Model preM;preM.pre=gp5Chosen->pre;preM.post=gp5Chosen->post;preM.pk=gp5Chosen->pk;preM.A=A44;preM.B=B44Pre;
+                Model postM=preM;postM.B=B44Post;
+                const double lossPre=evaluateModelLoss(preM,analysisInput,analysisTarget,44100.0);
+                const double lossPost=evaluateModelLoss(postM,analysisInput,analysisTarget,44100.0);
+                std::wostringstream os;os<<L"GP-5/GP-50 Tone Match: loss before="<<lossPre<<L", after="<<lossPost;
+                if(lossPost<=lossPre){os<<L" -- applying.";gp5ToneMatchIr=candidateIr;}
+                else{os<<L" -- not applying (would worsen the fit).";}
+                report(status,os.str());
+            }
+        }
     }
 
     if(gp5Chosen){
+        const bool gp5ToneMatchApplied=!gp5ToneMatchIr.empty();
         r.gp5gp50Compact=uniqueOutput(outputDirectory,inputNam.stem().wstring(),
-            refine.enabled?L"_NATIVE_GP5GP50_512_TONEMATCH.clo":L"_NATIVE_GP5GP50_512.clo");
-        // Layer the same corrections the GP-200 output got onto this Block B too,
-        // in the same order (Corrective IR, then Tone Match) so the two files stay
-        // consistent instead of the GP-5/GP-50 file silently skipping them. The Tone
-        // Match correction here is the same filter fit against the GP-200 2048-tap
-        // CLO's own render -- an approximation, not a from-scratch 512-tap analysis,
-        // but far closer than skipping Tone Match for GP-5/GP-50 entirely.
+            gp5ToneMatchApplied?L"_NATIVE_GP5GP50_512_TONEMATCH.clo":L"_NATIVE_GP5GP50_512.clo");
+        // Corrective IR still layers onto this Block B as before. Tone Match now uses
+        // the device-specific correction computed above (empty, hence a no-op, when it
+        // wasn't derived or didn't measurably help).
         if(!serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,
                                 correction.enabled?correctiveStats.postGainDb:-6.0,
-                                toneMatchIr,0.0)){
+                                gp5ToneMatchIr,0.0)){
             r.error=error;fs::remove_all(work,ec);return r;
         }
         {std::wostringstream os;os<<L"GP-5/GP-50 CLO written using "<<(gp5UsedDirectFit?L"direct-fit":L"truncated")
             <<(correction.enabled?L", Corrective IR applied":L"")
-            <<(refine.enabled?L", Tone Match correction applied":L"")<<L".";report(status,os.str());}
+            <<(gp5ToneMatchApplied?L", device-specific Tone Match applied":(refine.enabled?L", Tone Match not applied":L""))
+            <<L".";report(status,os.str());}
     }
 
     if(refine.enabled){
@@ -2005,6 +2140,7 @@ BatchConversionResult convertNamFolderToClo(const fs::path& inputDirectory,const
 std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& inputNam,const fs::path& outputDirectory,
                                                             StimulusConfig stimulus,NativeConverterConfig converter,
                                                             const std::vector<fs::path>& validationClips,
+                                                            const fs::path& toneMatchReferenceWav,
                                                             const StatusCallback& status){
     std::vector<QualityExperimentResult> results;
     std::error_code ec;
@@ -2086,6 +2222,7 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
 
         Model m;m.A.assign(kA,0);m.A[0]=1;m.B.assign(kB,0);m.B[0]=1;
         m.pk=fitPk(input,target,sr);m.pre=Biquad{};m.post=postForRate(sr);
+        qr.pkPp=m.pk.pp;qr.pkPn=m.pk.pn;qr.pkKp=m.pk.kp;qr.pkKn=m.pk.kn;
         fitAB(m,input,target,sr,status,kB,&qr.conversion.fitLoss);
         refineB(m,input,target,sr,status,kB);
 
@@ -2100,6 +2237,11 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
         qr.gp5TruncatedHeldOutLoss=heldOutLossFor(truncated,sr);
         qr.gp5DirectFitHeldOutLoss=heldOutLossFor(m5,sr);
 
+        // Same dynamic pick convertNamToClo uses in production.
+        const bool gp5UsedDirectFit=qr.gp5DirectFitLoss<=qr.gp5TruncatedLoss;
+        qr.gp5ChosenStrategy=gp5UsedDirectFit?L"direct-fit":L"truncated";
+        const Model& gp5Chosen=gp5UsedDirectFit?m5:truncated;
+
         const fs::path variantDir=outputDirectory/sub.label;
         fs::create_directories(variantDir,ec);
         const fs::path full2048=work/(L"native_"+sub.label+L"_2048.clo");
@@ -2107,14 +2249,67 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
         if(serialize2048(full2048,m,sr,error)&&makeGp200CompactClo(full2048,gp2001024Path,error))
             qr.conversion.gp2001024=gp2001024Path;
         qr.conversion.gp5gp50Compact=uniqueOutput(variantDir,inputNam.stem().wstring(),L"_NATIVE_GP5GP50_512.clo");
-        serializeGp5Compact(qr.conversion.gp5gp50Compact,m5,sr,error);
+        serializeGp5Compact(qr.conversion.gp5gp50Compact,gp5Chosen,sr,error);
         qr.conversion.ok=true;
+
+        // Tone Match before/after, scored against held-out clips in the 44.1kHz
+        // device-storage domain (matching what actually ships to GP-5/GP-50). The
+        // correction here is derived from the CHOSEN 512-tap model's own response
+        // (computeToneMatchCorrectionIr against a temp GP-5/GP-50 CLO), the same
+        // device-specific approach convertNamToClo uses in production -- not the
+        // GP-200 2048-tap model's correction reused/borrowed.
+        if(!groundTruths.empty()){
+            report(status,L"Quality experiment ["+sub.label+L"]: running device-specific GP-5/GP-50 Tone Match for held-out comparison...");
+            fs::path tmStimulusPath=stim;
+            std::vector<float> tmS44=s44;
+            std::string tmError;
+            if(!toneMatchReferenceWav.empty()){
+                StimulusConfig refCfg=stimulus;refCfg.tailMode=TailMode::RecordedAudio;refCfg.recordedAudio=toneMatchReferenceWav;
+                tmStimulusPath=work/(L"tonematch_ref_stimulus_"+sub.label+L".wav");
+                std::uint32_t tmSsr=0;
+                if(!buildStimulus(originalStimulus,refCfg,tmStimulusPath,tmError)
+                   ||!readPcm16Mono(tmStimulusPath,tmS44,tmSsr,tmError)){
+                    report(status,L"GP-5/GP-50 Tone Match reference WAV skipped: "+std::wstring(tmError.begin(),tmError.end())+L" -- using default stimulus.");
+                    tmStimulusPath=stim;tmS44=s44;
+                }
+            }
+            std::vector<float> rawInput,rawTarget;double rawRate=sr;
+            if(renderNam(modelPath,tmS44,converter.blockSize,0.31f,rawInput,rawTarget,rawRate,tmError,status)){
+                const auto toneTarget44100=prepareToneTarget44100(rawTarget,rawRate);
+                const fs::path targetWav=work/(L"tonematch_target_"+sub.label+L".wav");
+                if(writeMonoFloat32Wav(targetWav,toneTarget44100,44100,tmError)){
+                    const fs::path gp5PreToneMatchClo=work/(L"gp5_512_pre_tonematch_"+sub.label+L".clo");
+                    if(serializeGp5Compact(gp5PreToneMatchClo,gp5Chosen,sr,tmError)){
+                        std::vector<float> gp5ToneMatchIr;
+                        if(computeToneMatchCorrectionIr(gp5PreToneMatchClo,tmStimulusPath,targetWav,gp5ToneMatchIr,tmError,status)){
+                            auto build44=[&](const Model& src)->Model{
+                                Model out;out.pre=src.pre;out.post=src.post;out.pk=src.pk;
+                                out.A=resampleFirOfficial(src.A,sr,128);
+                                auto bScaled=src.B;for(auto&v:bScaled)v*=4.0f;
+                                out.B=resampleFirOfficial(bScaled,sr,512);
+                                return out;
+                            };
+                            Model preModel44=build44(gp5Chosen);
+                            Model postModel44=preModel44;
+                            std::string applyError;
+                            if(!gp5ToneMatchIr.empty()&&applyCorrectiveIrToB44(postModel44.B,gp5ToneMatchIr,0.0,applyError)){
+                                qr.gp5ChosenDeviceHeldOutLoss=heldOutLossFor(preModel44,44100.0);
+                                qr.gp5PostToneMatchHeldOutLoss=heldOutLossFor(postModel44,44100.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         {std::wostringstream os;os<<L"Quality experiment ["<<sub.label<<L"]: GP-200 fit loss="<<qr.conversion.fitLoss
             <<L", GP-5/GP-50 truncated-512 loss="<<qr.gp5TruncatedLoss
             <<L", direct-fit-512 loss="<<qr.gp5DirectFitLoss;
             if(qr.gp5TruncatedHeldOutLoss>=0.0)
                 os<<L" | held-out: truncated="<<qr.gp5TruncatedHeldOutLoss<<L", direct-fit="<<qr.gp5DirectFitHeldOutLoss;
+            if(qr.gp5PostToneMatchHeldOutLoss>=0.0)
+                os<<L" | GP-5/GP-50 Tone Match held-out: before="<<qr.gp5ChosenDeviceHeldOutLoss
+                  <<L", after="<<qr.gp5PostToneMatchHeldOutLoss;
             os<<L" (lower is better).";report(status,os.str());}
         results.push_back(std::move(qr));
     }
@@ -2123,11 +2318,17 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
     std::ofstream csv(outputDirectory/L"quality_experiment_results.csv");
     if(csv){
         csv<<"submodel,gp200_fit_loss_2048,gp5_truncated_512_loss,gp5_direct_fit_512_loss,"
-             "gp5_truncated_512_held_out_loss,gp5_direct_fit_512_held_out_loss,gp200_output,gp5gp50_output\n";
+             "gp5_truncated_512_held_out_loss,gp5_direct_fit_512_held_out_loss,"
+             "gp5_chosen_strategy,gp5_chosen_device_held_out_loss,gp5_post_tonematch_held_out_loss,"
+             "pk_pp,pk_pn,pk_kp,pk_kn,"
+             "gp200_output,gp5gp50_output\n";
         for(const auto&r:results){
             const std::string label(r.label.begin(),r.label.end());
+            const std::string strategy(r.gp5ChosenStrategy.begin(),r.gp5ChosenStrategy.end());
             csv<<label<<","<<r.conversion.fitLoss<<","<<r.gp5TruncatedLoss<<","<<r.gp5DirectFitLoss<<","
                <<r.gp5TruncatedHeldOutLoss<<","<<r.gp5DirectFitHeldOutLoss<<","
+               <<strategy<<","<<r.gp5ChosenDeviceHeldOutLoss<<","<<r.gp5PostToneMatchHeldOutLoss<<","
+               <<r.pkPp<<","<<r.pkPn<<","<<r.pkKp<<","<<r.pkKn<<","
                <<pathToUtf8(r.conversion.gp2001024)<<","<<pathToUtf8(r.conversion.gp5gp50Compact)<<"\n";
         }
     }
