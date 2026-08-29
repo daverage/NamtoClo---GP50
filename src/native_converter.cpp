@@ -239,17 +239,17 @@ std::optional<std::size_t> objectEnd(const std::string& s,std::size_t start){
     if(start>=s.size()||s[start]!='{')return std::nullopt;int depth=0;bool str=false,esc=false;
     for(std::size_t i=start;i<s.size();++i){char c=s[i];if(str){if(esc)esc=false;else if(c=='\\')esc=true;else if(c=='"')str=false;continue;}if(c=='"'){str=true;continue;}if(c=='{')++depth;else if(c=='}'&&--depth==0)return i+1;}return std::nullopt;
 }
-bool prepareFullA2(const fs::path& namPath,const fs::path& work,fs::path& result,std::string& error){
+bool prepareFullA2(const fs::path& namPath,const fs::path& work,fs::path& result,std::string& error,bool selectLite=false){
     result=namPath; std::ifstream f(namPath,std::ios::binary);if(!f)return true;std::string s((std::istreambuf_iterator<char>(f)),{});
     if(s.find("\"SlimmableContainer\"")==std::string::npos)return true;
     const auto sk=s.find("\"submodels\""); if(sk==std::string::npos)return true; const auto ao=s.find('[',sk);if(ao==std::string::npos)return true;
-    double best=-std::numeric_limits<double>::infinity();std::string bestModel;std::size_t p=ao+1;
+    double best=selectLite?std::numeric_limits<double>::infinity():-std::numeric_limits<double>::infinity();std::string bestModel;std::size_t p=ao+1;
     while(p<s.size()){while(p<s.size()&&(std::isspace(static_cast<unsigned char>(s[p]))||s[p]==','))++p;if(p>=s.size()||s[p]==']')break;if(s[p]!='{')break;auto e=objectEnd(s,p);if(!e)break;
-        const auto mk=s.find("\"max_value\"",p),mod=s.find("\"model\"",p); if(mk<*e&&mod<*e){const auto col=s.find(':',mk);if(col==std::string::npos||col>=*e){p=*e;continue;}char* ep=nullptr;const double v=std::strtod(s.c_str()+col+1,&ep);const auto mc=s.find(':',mod);if(mc==std::string::npos||mc>=*e){p=*e;continue;}const auto mo=s.find('{',mc);auto me=mo==std::string::npos?std::nullopt:objectEnd(s,mo);if(me&&*me<=*e&&v>best){best=v;bestModel=s.substr(mo,*me-mo);}}
+        const auto mk=s.find("\"max_value\"",p),mod=s.find("\"model\"",p); if(mk<*e&&mod<*e){const auto col=s.find(':',mk);if(col==std::string::npos||col>=*e){p=*e;continue;}char* ep=nullptr;const double v=std::strtod(s.c_str()+col+1,&ep);const auto mc=s.find(':',mod);if(mc==std::string::npos||mc>=*e){p=*e;continue;}const auto mo=s.find('{',mc);auto me=mo==std::string::npos?std::nullopt:objectEnd(s,mo);const bool better=me&&*me<=*e&&(selectLite?(v<best):(v>best));if(better){best=v;bestModel=s.substr(mo,*me-mo);}}
         p=*e;
     }
-    if(bestModel.empty()){error="Could not extract the Full submodel from A2 SlimmableContainer.";return false;}
-    result=work/L"independent_a2_full.nam";std::ofstream o(result,std::ios::binary|std::ios::trunc);if(!o){error="Cannot create temporary A2 Full NAM.";return false;}o.write(bestModel.data(),static_cast<std::streamsize>(bestModel.size()));return o.good();
+    if(bestModel.empty()){error=selectLite?"Could not extract a Lite submodel from A2 SlimmableContainer.":"Could not extract the Full submodel from A2 SlimmableContainer.";return false;}
+    result=work/(selectLite?L"independent_a2_lite.nam":L"independent_a2_full.nam");std::ofstream o(result,std::ios::binary|std::ios::trunc);if(!o){error="Cannot create temporary A2 NAM.";return false;}o.write(bestModel.data(),static_cast<std::streamsize>(bestModel.size()));return o.good();
 }
 
 bool renderNam(const fs::path& path,const std::vector<float>& stimulus44100,int blockSize,double targetScale,
@@ -1373,7 +1373,7 @@ FactorState initialFactorState(const Model&m,const std::vector<float>&input,cons
 }
 
 struct Phase{double t0,t1;int iterations;const wchar_t*name;};
-void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,const std::vector<float>&target,double sr,const Phase&ph,int&globalIter,const StatusCallback&status){
+void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,const std::vector<float>&target,double sr,const Phase&ph,int&globalIter,const StatusCallback&status,std::size_t bTaps,float* outBestLoss=nullptr){
     const auto freq=fftFrequencyGridF(sr),weights=frequencyWeightsF(sr);
     const std::size_t b=officialTimeIndex(sr,static_cast<float>(ph.t0)),e=officialTimeIndex(sr,static_cast<float>(ph.t1));
     const auto phaseIn=sliceSignal(input,b,e),phaseTarget=sliceSignal(target,b,e);
@@ -1442,7 +1442,7 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
         // 0x18009c9c2..0x18009c9dc passes rdi=S5 (the RAW fresh estimator)
         // directly to minimumPhase.  The conditioned rb/S0 is NOT the current
         // B FIR; it is only the next iteration's correction curve.
-        candidate.B=minimumPhaseF(fresh,kB);
+        candidate.B=minimumPhaseF(fresh,bTaps);
 
         // Full A+nonlinearity+B render.  The second estimator is used only for
         // the loss calculation; its residual is not fed back as S0.
@@ -1481,11 +1481,15 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
     // 0x18009cca1..0x18009ccff: every phase exits on its best snapshot.
     m=bestM;
     state=bestState;
+    if(outBestLoss) *outBestLoss=bestLoss;
 }
 
-void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
+void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status,std::size_t bTaps=kB,double* outLoss=nullptr){
     report(status,L"Independent: initial low-level / conditioned-sweep factorization...");FactorState state=initialFactorState(m,input,target,sr);int globalIter=0;
-    const Phase phases[]={{23,28,3,L"sweep"},{6,21,2,L"low-level"},{30,50,5,L"multi-level"}};for(const auto&ph:phases)optimizePhase(m,state,input,target,sr,ph,globalIter,status);
+    const Phase phases[]={{23,28,3,L"sweep"},{6,21,2,L"low-level"},{30,50,5,L"multi-level"}};
+    float lastLoss=0.0f;
+    for(const auto&ph:phases){float phaseLoss=0.0f;optimizePhase(m,state,input,target,sr,ph,globalIter,status,bTaps,&phaseLoss);lastLoss=phaseLoss;}
+    if(outLoss) *outLoss=static_cast<double>(lastLoss);
 }
 
 std::vector<float> convolveTruncate(const std::vector<float>&a,const std::vector<float>&b,std::size_t n){std::vector<float>o(n,0.0f);for(std::size_t i=0;i<a.size();++i)for(std::size_t j=0;j<b.size()&&i+j<n;++j)o[i+j]+=a[i]*b[j];return o;}
@@ -1533,7 +1537,7 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
 }
 
-void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
+void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status,std::size_t bTaps=kB){
     report(status,L"Independent: final Block B tail refinement...");
     const std::size_t b=officialTimeIndex(sr,50.0f),e=officialTimeIndex(sr,70.0f);
     const auto tailIn=sliceSignal(input,b,e),tailTarget=sliceSignal(target,b,e);
@@ -1548,7 +1552,7 @@ void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&tar
 
     auto corrMag=finalTailCorrection(pred,tailTarget,sr);
     auto corr=minimumPhaseF(corrMag,256);
-    m.B=convolveTruncate(m.B,corr,kB);
+    m.B=convolveTruncate(m.B,corr,bTaps);
 
     const float mean=sumFloatFinalBOfficial(m.B)/static_cast<float>(m.B.size());
     for(auto&v:m.B)v-=mean;
@@ -1604,6 +1608,199 @@ std::vector<float> resampleFirOfficial(const std::vector<float>& h,double sr,std
     rs.clear();
     return out;
 }
+// Final quality score for a candidate model: render it end-to-end (A + shaper + B)
+// against the NAM target and reduce the same frequency-domain residual the internal
+// A/B fitter already minimizes (lossFromRatioF). Lower is better. Used to compare
+// candidates (Full vs Lite submodel, truncated vs directly-fit Block B) on equal
+// footing rather than trusting file size or tap count as a quality proxy.
+double evaluateModelLoss(const Model& m,const std::vector<float>& input,const std::vector<float>& target,double sr){
+    std::vector<float> rendered;
+    renderModel(m,input,rendered,true);
+    const auto residual=ratioSpectrumF(rendered,target,sr);
+    return static_cast<double>(lossFromRatioF(residual,sr));
+}
+
+// How many trainer-rate-domain B taps are needed so that, after the official
+// resampleFirOfficial() SRC down to the 44.1 kHz storage domain, all 512 GP-5/GP-50
+// device taps end up populated with real content instead of trailing zero-padding
+// (resampleFirOfficial's output count is capped by the resampled *input* length, so an
+// under-sized trainer-rate source leaves the tail of the requested output at zero).
+std::size_t gp5TrainerTapsFor(double sr){
+    constexpr double kDeviceTaps=512.0,kDeviceRate=44100.0;
+    const double raw=std::ceil(kDeviceTaps*sr/kDeviceRate)+8.0; // small headroom for the float-truncated ratio
+    return static_cast<std::size_t>(std::max(1.0,raw));
+}
+
+// CRC16/MODBUS, big-endian storage at [0x08,0x09) — the algorithm the GP-5/GP-50
+// compact CLO header actually uses (see gp5_clo_upload.cpp::crc16Modbus), distinct
+// from the GP-200 trainer's own crc16Official() used by serialize2048() below.
+std::uint16_t crc16Modbus(const std::uint8_t* data,std::size_t size){
+    std::uint16_t crc=0xFFFFu;
+    for(std::size_t i=0;i<size;++i){
+        crc^=static_cast<std::uint16_t>(data[i]);
+        for(int bit=0;bit<8;++bit)
+            crc=(crc&1u)?static_cast<std::uint16_t>((crc>>1)^0xA001u):static_cast<std::uint16_t>(crc>>1);
+    }
+    return crc;
+}
+
+// Serializes a model directly into the 128-tap A / 512-tap B compact byte layout that
+// gp5_clo_upload.cpp expects as input (header 0x88 + 128 floats + 512 floats =
+// 0x0A88 bytes, matching gp5DeclaredBytes exactly), so a directly-fit Block B reaches
+// the device without being sliced from a longer GP-200 fit first.
+// General-purpose mono WAV loader for held-out validation clips: unlike
+// readPcm16Mono() (which requires the fixed PCM16/44.1kHz stimulus format), real-world
+// test clips (e.g. TONE3000's DI library) can be any PCM bit depth or IEEE float, any
+// sample rate, mono or stereo. Downmixes to mono and resamples to 44.1kHz via the same
+// r8brain path used for the conversion stimulus, so it drops into the rest of the
+// pipeline unchanged.
+bool loadClipAsMono44100(const fs::path& path,std::vector<float>& out44100,std::string& error){
+    std::ifstream f(path,std::ios::binary);
+    if(!f){error="Cannot open validation clip: "+pathToUtf8(path);return false;}
+    std::array<std::uint8_t,12> riff{};f.read(reinterpret_cast<char*>(riff.data()),12);
+    if(f.gcount()!=12||std::memcmp(riff.data(),"RIFF",4)||std::memcmp(riff.data()+8,"WAVE",4)){
+        error="Invalid validation clip WAV: "+pathToUtf8(path);return false;
+    }
+    std::uint16_t format=0,channels=0,bits=0;std::uint32_t rate=0;std::vector<std::uint8_t>data;
+    while(f){
+        std::array<std::uint8_t,8> c{};f.read(reinterpret_cast<char*>(c.data()),8);if(f.gcount()!=8)break;
+        const std::uint32_t n=le32(c.data()+4);std::vector<std::uint8_t>b(n);
+        if(n){f.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(n));if(static_cast<std::uint32_t>(f.gcount())!=n){error="Truncated validation clip WAV.";return false;}}
+        if(n&1u)f.seekg(1,std::ios::cur);
+        if(!std::memcmp(c.data(),"fmt ",4)&&n>=16){
+            format=le16(b.data());channels=le16(b.data()+2);rate=le32(b.data()+4);bits=le16(b.data()+14);
+            if(format==0xFFFEu&&n>=40)format=le16(b.data()+24); // WAVE_FORMAT_EXTENSIBLE
+        }else if(!std::memcmp(c.data(),"data",4)){
+            data=std::move(b);
+        }
+    }
+    if(channels==0||rate==0||data.empty()){error="Validation clip WAV is missing fmt/data: "+pathToUtf8(path);return false;}
+    const std::uint16_t bytesPerSample=static_cast<std::uint16_t>((bits+7u)/8u);
+    const std::size_t blockAlign=static_cast<std::size_t>(bytesPerSample)*channels;
+    if(bytesPerSample==0||blockAlign==0||data.size()%blockAlign!=0){error="Unsupported validation clip WAV layout: "+pathToUtf8(path);return false;}
+    const std::size_t frames=data.size()/blockAlign;
+    std::vector<float> mono(frames,0.0f);
+    for(std::size_t fr=0;fr<frames;++fr){
+        double sum=0.0;
+        for(std::uint16_t ch=0;ch<channels;++ch){
+            const std::uint8_t* p=data.data()+fr*blockAlign+static_cast<std::size_t>(ch)*bytesPerSample;
+            double s=0.0;
+            if(format==1u){ // PCM
+                switch(bits){
+                    case 8: s=(static_cast<int>(p[0])-128)/128.0;break;
+                    case 16: s=static_cast<std::int16_t>(le16(p))/32768.0;break;
+                    case 24:{std::int32_t v=static_cast<std::int32_t>(p[0])|(static_cast<std::int32_t>(p[1])<<8)|(static_cast<std::int32_t>(p[2])<<16);if(v&0x00800000)v|=static_cast<std::int32_t>(0xFF000000);s=static_cast<double>(v)/8388608.0;break;}
+                    case 32: s=static_cast<std::int32_t>(le32(p))/2147483648.0;break;
+                    default: s=0.0;break;
+                }
+            }else if(format==3u&&bits==32){ // IEEE float
+                float v=0.0f;const std::uint32_t u=le32(p);std::memcpy(&v,&u,sizeof(v));s=std::isfinite(v)?static_cast<double>(v):0.0;
+            }
+            sum+=s;
+        }
+        mono[fr]=static_cast<float>(sum/static_cast<double>(channels));
+    }
+    out44100=resampleR8Brain24(mono,static_cast<double>(rate),44100.0);
+    return true;
+}
+
+// Renders an arbitrary-length 44.1kHz mono signal through a NAM model (no fixed 70s+600
+// trainer padding, no detrend -- those are specific to the official conversion
+// stimulus). Used only to build held-out validation ground truth, not the fitting path.
+bool renderNamOnSignal(const fs::path& namPath,const std::vector<float>& signal44100,
+                       std::vector<float>& inputAtRate,std::vector<float>& targetAtRate,
+                       double& rateOut,std::string& error){
+    try{
+        auto dsp=nam::get_dsp(namPath);if(!dsp){error="NeuralAmpModelerCore could not load the NAM.";return false;}
+        double rate=dsp->GetExpectedSampleRate();if(!(rate>1000.0&&rate<384000.0))rate=48000.0;
+        auto rendered=resampleR8Brain24(signal44100,44100.0,rate);
+        constexpr int kBlock=1024;
+        dsp->Reset(rate,kBlock);
+        std::vector<NAM_SAMPLE> ib(kBlock,NAM_SAMPLE{}),ob(kBlock,NAM_SAMPLE{});
+        NAM_SAMPLE* ip[1]={ib.data()};NAM_SAMPLE* op[1]={ob.data()};
+        std::vector<float> out(rendered.size(),0.0f);
+        for(std::size_t pos=0;pos<rendered.size();pos+=static_cast<std::size_t>(kBlock)){
+            const int n=static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(kBlock),rendered.size()-pos));
+            for(int i=0;i<n;++i)ib[static_cast<std::size_t>(i)]=static_cast<NAM_SAMPLE>(rendered[pos+static_cast<std::size_t>(i)]);
+            dsp->process(ip,op,n);
+            for(int i=0;i<n;++i)out[pos+static_cast<std::size_t>(i)]=static_cast<float>(ob[static_cast<std::size_t>(i)])*0.31f;
+        }
+        inputAtRate=std::move(rendered);targetAtRate=std::move(out);rateOut=rate;return true;
+    }catch(const std::exception& e){error=std::string("NAM validation renderer: ")+e.what();return false;}
+}
+
+// First sample whose magnitude crosses threshold -- a simple onset detector used to
+// time-align a validation clip's NAM-rendered target to its input (real playing clips
+// don't have the official stimulus's designed 6s-silence marker that detectLatency()
+// relies on, so that function doesn't apply here).
+std::size_t findOnset(const std::vector<float>& x,float threshold=0.01f){
+    for(std::size_t i=0;i<x.size();++i)if(std::fabs(x[i])>threshold)return i;
+    return 0;
+}
+
+// Convolves 44.1kHz-domain Block B with the corrective IR and RMS-normalizes back to
+// the pre-correction level, then applies postCorrectionDb -- the exact same math
+// applyCorrectiveIrToClo() (corrective_ir.cpp) uses on the 2048-tap GP-200 Block B,
+// sized here to whatever length the caller's B actually is (the GP-5/GP-50 512 taps).
+bool applyCorrectiveIrToB44(std::vector<float>& b44,const std::vector<float>& correctiveIr,
+                            double postCorrectionDb,std::string& error){
+    if(correctiveIr.empty()||b44.empty())return true;
+    std::vector<double> ir;ir.reserve(correctiveIr.size());
+    for(float s:correctiveIr){
+        if(!std::isfinite(s)){error="Corrective IR contains a non-finite sample.";return false;}
+        ir.push_back(static_cast<double>(s));
+    }
+    const std::size_t n=b44.size();
+    std::vector<double> original(n),corrected(n,0.0);
+    for(std::size_t i=0;i<n;++i)original[i]=static_cast<double>(b44[i]);
+    for(std::size_t pos=0;pos<n;++pos){
+        const std::size_t maxK=std::min<std::size_t>(pos,ir.size()-1u);
+        long double sum=0.0L;
+        for(std::size_t k=0;k<=maxK;++k)sum+=static_cast<long double>(original[pos-k])*ir[k];
+        corrected[pos]=static_cast<double>(sum);
+    }
+    auto rmsOf=[](const std::vector<double>&v){long double s=0.0L;for(double x:v)s+=static_cast<long double>(x)*x;return std::sqrt(static_cast<double>(s/static_cast<long double>(v.size())));};
+    const double originalRms=rmsOf(original),convolvedRms=rmsOf(corrected);
+    if(!(originalRms>1e-20)){error="GP-5/GP-50 Block B is silent or invalid.";return false;}
+    if(!(convolvedRms>1e-20)){error="Corrective IR produced a silent GP-5/GP-50 Block B.";return false;}
+    const double rmsGain=originalRms/convolvedRms;
+    const double finalGain=rmsGain*std::pow(10.0,postCorrectionDb/20.0);
+    if(!std::isfinite(finalGain)){error="Corrective IR normalization produced an invalid gain.";return false;}
+    for(std::size_t i=0;i<n;++i){
+        const double scaled=corrected[i]*finalGain;
+        if(!std::isfinite(scaled)||scaled>static_cast<double>(std::numeric_limits<float>::max())||scaled<-static_cast<double>(std::numeric_limits<float>::max())){
+            error="Corrective IR produced an out-of-range GP-5/GP-50 Block B value.";return false;
+        }
+        b44[i]=static_cast<float>(scaled);
+    }
+    return true;
+}
+
+bool serializeGp5Compact(const fs::path&path,const Model&m,double trainerRate,std::string&error,
+                         const std::vector<float>& correctiveIr={},double postCorrectionDb=-6.0,
+                         const std::vector<float>& toneMatchIr={},double toneMatchPostGainDb=0.0){
+    constexpr std::size_t kGp5Bytes=0x0A88,kGp5BTaps=512;
+    std::vector<std::uint8_t> d(kGp5Bytes,0);
+    std::memcpy(d.data(),"VTSI",4);
+    put32(d,0x04,static_cast<std::uint32_t>(kGp5Bytes));
+    put32(d,0x14,0x0A00);
+    putDouble(d,0x18,m.pre.b0);putDouble(d,0x20,m.pre.b1);putDouble(d,0x28,m.pre.b2);putDouble(d,0x30,m.pre.a1);putDouble(d,0x38,m.pre.a2);
+    putDouble(d,0x40,m.post.b0);putDouble(d,0x48,m.post.b1);putDouble(d,0x50,m.post.b2);putDouble(d,0x58,m.post.a1);putDouble(d,0x60,m.post.a2);
+    putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);
+    put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,static_cast<std::uint32_t>(kGp5BTaps));
+    auto A44=resampleFirOfficial(m.A,trainerRate,128);
+    auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;
+    auto B44=resampleFirOfficial(Bscaled,trainerRate,kGp5BTaps);
+    if(!correctiveIr.empty()&&!applyCorrectiveIrToB44(B44,correctiveIr,postCorrectionDb,error))return false;
+    if(!toneMatchIr.empty()&&!applyCorrectiveIrToB44(B44,toneMatchIr,toneMatchPostGainDb,error))return false;
+    for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);
+    for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);
+    const auto crc=crc16Modbus(d.data()+0x0C,d.size()-0x0C);
+    d[0x08]=static_cast<std::uint8_t>((crc>>8)&0xFFu);
+    d[0x09]=static_cast<std::uint8_t>(crc&0xFFu);
+    return writeFileBytes(path,d.data(),d.size(),error);
+}
+
 bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::string&error){std::vector<std::uint8_t>d(kCloBytes,0);std::memcpy(d.data(),"VTSI",4);put32(d,0x04,0x2288);put32(d,0x14,0x2200);putDouble(d,0x18,m.pre.b0);putDouble(d,0x20,m.pre.b1);putDouble(d,0x28,m.pre.b2);putDouble(d,0x30,m.pre.a1);putDouble(d,0x38,m.pre.a2);
     putDouble(d,0x40,m.post.b0);putDouble(d,0x48,m.post.b1);putDouble(d,0x50,m.post.b2);putDouble(d,0x58,m.post.a1);putDouble(d,0x60,m.post.a2);putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,2048);
     auto A44=resampleFirOfficial(m.A,trainerRate,128);auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;auto B44=resampleFirOfficial(Bscaled,trainerRate,2048);for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Official(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc);d[9]=static_cast<std::uint8_t>(crc>>8);return writeFileBytes(path,d.data(),d.size(),error);}
@@ -1683,14 +1880,14 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     const fs::path work=outputDirectory/(L".native_work_"+inputNam.stem().wstring());fs::remove_all(work,ec);fs::create_directories(work,ec);if(ec){r.error="Cannot create conversion work directory.";return r;}
     const fs::path stim=work/L"stimulus_70s.wav";report(status,L"Building original stimulus + selected Tail/Reamp...");if(!buildStimulus(originalStimulus,stimulus,stim,error)){r.error=error;fs::remove_all(work,ec);return r;}
     std::vector<float>s44;std::uint32_t ssr=0;if(!readPcm16Mono(stim,s44,ssr,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    fs::path modelPath;if(!prepareFullA2(inputNam,work,modelPath,error)){r.error=error;fs::remove_all(work,ec);return r;}
+    fs::path modelPath;if(!prepareFullA2(inputNam,work,modelPath,error,trainer.submodel==A2Submodel::Lite)){r.error=error;fs::remove_all(work,ec);return r;}
 
     std::vector<float>input,target;double sr=48000;if(!renderNam(modelPath,s44,trainer.blockSize,0.31f,input,target,sr,error,status)){r.error=error;fs::remove_all(work,ec);return r;}
     // Keep the raw NAM render for Tone Match before trainer detrend/latency alignment.
     const std::vector<float> toneTarget44100=prepareToneTarget44100(target,sr);
     detrend(target);const auto latency=detectLatency(target,sr);target=alignLeft(target,latency);report(status,L"Detected NAM latency "+std::to_wstring(latency)+L" samples.");
     Model m;m.A.assign(kA,0);m.A[0]=1;m.B.assign(kB,0);m.B[0]=1;m.pk=fitPk(input,target,sr);m.pre=Biquad{};m.post=postForRate(sr);{std::wostringstream os;os<<L"P/K = "<<m.pk.pp<<L" / "<<m.pk.pn<<L" / "<<m.pk.kp<<L" / "<<m.pk.kn;report(status,os.str());}
-    fitAB(m,input,target,sr,status);refineB(m,input,target,sr,status);
+    fitAB(m,input,target,sr,status,kB,&r.fitLoss);refineB(m,input,target,sr,status);
 
     const fs::path original2048=work/L"native_original_2048.clo";if(!serialize2048(original2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
 
@@ -1708,7 +1905,37 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         sourceForOutput=corrected2048;
     }
 
+    std::optional<Model> gp5Chosen;
+    std::size_t gp5BTrainer=0;
+    bool gp5UsedDirectFit=false;
+    double gp5TruncatedLoss=0.0;
+    if(trainer.gp5DirectFit){
+        report(status,L"GP-5/GP-50: fitting Block B directly at the device tap budget...");
+        gp5BTrainer=gp5TrainerTapsFor(sr);
+        Model m5;m5.A=m.A;m5.B.assign(gp5BTrainer,0.0f);if(!m5.B.empty())m5.B[0]=1.0f;m5.pk=m.pk;m5.pre=m.pre;m5.post=m.post;
+        fitAB(m5,input,target,sr,status,gp5BTrainer,&r.gp5DirectFitLoss);
+        refineB(m5,input,target,sr,status,gp5BTrainer);
+
+        // Dynamic pick: also score truncating the already-computed 2048-tap fit down
+        // to the same tap budget, and keep whichever of the two actually scores lower
+        // for THIS model instead of always trusting direct-fit. Both models are
+        // already computed above, so this costs two cheap FIR renders, no extra
+        // fitting. Held-out validation across 5 NAM models showed direct-fit wins
+        // more often and by more (e.g. ~22% on extreme high-gain content), but it is
+        // not universal -- on a couple of models truncation scored slightly better.
+        Model truncated=m;truncated.B.resize(std::min(truncated.B.size(),gp5BTrainer));
+        gp5TruncatedLoss=evaluateModelLoss(truncated,input,target,sr);
+        gp5UsedDirectFit=r.gp5DirectFitLoss<=gp5TruncatedLoss;
+        gp5Chosen=gp5UsedDirectFit?std::move(m5):std::move(truncated);
+        {std::wostringstream os;os<<L"GP-5/GP-50: direct-fit loss "<<r.gp5DirectFitLoss<<L", truncated-512 loss "<<gp5TruncatedLoss
+            <<L" -- using "<<(gp5UsedDirectFit?L"direct-fit":L"truncated")<<L" (lower is better).";report(status,os.str());}
+        // Serialization is deferred until after Corrective IR / Tone Match below so
+        // both can be applied to this Block B too, instead of the GP-5/GP-50 file
+        // silently skipping whatever correction the GP-200 output got.
+    }
+
     fs::path toneMatched2048;
+    std::vector<float> toneMatchIr;
     if(refine.enabled){
         report(status,L"Tone Match: preparing matched NAM target...");
         fs::path refineStimulus=stim;
@@ -1738,7 +1965,25 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         const fs::path targetWav=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(targetWav,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
         toneMatched2048=work/L"native_2048_TONEMATCH.clo";
         CloRefineConfig refineRun=refine;
-        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,toneMatched2048,refineRun,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+        if(!refineCloBOnly(toneMatchInputClo,refineStimulus,targetWav,toneMatched2048,refineRun,error,status,&toneMatchIr)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+    }
+
+    if(gp5Chosen){
+        r.gp5gp50Compact=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP5GP50_512.clo");
+        // Layer the same corrections the GP-200 output got onto this Block B too,
+        // in the same order (Corrective IR, then Tone Match) so the two files stay
+        // consistent instead of the GP-5/GP-50 file silently skipping them. The Tone
+        // Match correction here is the same filter fit against the GP-200 2048-tap
+        // CLO's own render -- an approximation, not a from-scratch 512-tap analysis,
+        // but far closer than skipping Tone Match for GP-5/GP-50 entirely.
+        if(!serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,
+                                correction.enabled?correctiveStats.postGainDb:-6.0,
+                                toneMatchIr,0.0)){
+            r.error=error;fs::remove_all(work,ec);return r;
+        }
+        {std::wostringstream os;os<<L"GP-5/GP-50 CLO written using "<<(gp5UsedDirectFit?L"direct-fit":L"truncated")
+            <<(correction.enabled?L", Corrective IR applied":L"")
+            <<(refine.enabled?L", Tone Match correction applied":L"")<<L".";report(status,os.str());}
     }
 
     if(refine.enabled){
@@ -1755,5 +2000,137 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 BatchConversionResult convertNamFolderToClo(const fs::path& inputDirectory,const fs::path& outputDirectory,
                                                    StimulusConfig stimulus,CorrectiveIrConfig correction,CloRefineConfig refine,
                                                    NativeConverterConfig trainer,const StatusCallback& status){BatchConversionResult b;std::error_code ec;std::vector<fs::path>files;for(const auto&e:fs::directory_iterator(inputDirectory,ec)){if(ec)break;if(!e.is_regular_file(ec)||ec)continue;auto ext=e.path().extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});if(ext==L".nam")files.push_back(e.path());}std::sort(files.begin(),files.end());b.total=files.size();for(std::size_t i=0;i<files.size();++i){report(status,L"Batch "+std::to_wstring(i+1)+L"/"+std::to_wstring(files.size())+L": "+files[i].filename().wstring());auto r=convertNamToClo(files[i],outputDirectory,stimulus,correction,refine,trainer,status);if(r.ok)++b.succeeded;else ++b.failed;b.items.push_back(std::move(r));}b.ok=b.total>0&&b.failed==0;return b;}
+
+std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& inputNam,const fs::path& outputDirectory,
+                                                            StimulusConfig stimulus,NativeConverterConfig converter,
+                                                            const std::vector<fs::path>& validationClips,
+                                                            const StatusCallback& status){
+    std::vector<QualityExperimentResult> results;
+    std::error_code ec;
+    if(!fs::exists(inputNam,ec)||ec)return results;
+    fs::create_directories(outputDirectory,ec);
+
+    const fs::path originalStimulus=resolveOriginalStimulusPath();
+    if(originalStimulus.empty()||!fs::exists(originalStimulus,ec)||ec)return results;
+
+    const fs::path work=outputDirectory/(L".quality_work_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    std::string error;
+    const fs::path stim=work/L"stimulus_70s.wav";
+    if(!buildStimulus(originalStimulus,stimulus,stim,error)){fs::remove_all(work,ec);return results;}
+    std::vector<float>s44;std::uint32_t ssr=0;
+    if(!readPcm16Mono(stim,s44,ssr,error)){fs::remove_all(work,ec);return results;}
+
+    // Held-out ground truth: each validation clip rendered once through the Full A2
+    // submodel (the best available proxy for the real amp), time-aligned by onset.
+    // Reused to score every candidate below, regardless of which submodel it came from.
+    struct GroundTruth{std::wstring name;std::vector<float>clip44100;std::vector<float>target;double rate=44100.0;};
+    std::vector<GroundTruth> groundTruths;
+    if(!validationClips.empty()){
+        report(status,L"Held-out validation: rendering Full A2 ground truth for "
+            +std::to_wstring(validationClips.size())+L" clip(s)...");
+        fs::path fullModelPath;
+        if(prepareFullA2(inputNam,work,fullModelPath,error,false)){
+            for(const auto& clipPath:validationClips){
+                std::string clipError;
+                GroundTruth gt;gt.name=clipPath.filename().wstring();
+                if(!loadClipAsMono44100(clipPath,gt.clip44100,clipError)){
+                    report(status,L"Held-out clip skipped ["+gt.name+L"]: "+std::wstring(clipError.begin(),clipError.end()));
+                    continue;
+                }
+                std::vector<float> gtInput;
+                if(!renderNamOnSignal(fullModelPath,gt.clip44100,gtInput,gt.target,gt.rate,clipError)){
+                    report(status,L"Held-out clip skipped ["+gt.name+L"]: "+std::wstring(clipError.begin(),clipError.end()));
+                    continue;
+                }
+                const std::size_t inOnset=findOnset(gtInput),outOnset=findOnset(gt.target);
+                const std::size_t latency=outOnset>inOnset?outOnset-inOnset:0;
+                gt.target=alignLeft(gt.target,latency);
+                groundTruths.push_back(std::move(gt));
+            }
+        }
+        report(status,L"Held-out validation: "+std::to_wstring(groundTruths.size())+L"/"
+            +std::to_wstring(validationClips.size())+L" clip(s) ready.");
+    }
+    auto heldOutLossFor=[&](const Model& candidate,double candidateRate)->double{
+        if(groundTruths.empty())return -1.0;
+        double sum=0.0;std::size_t n=0;
+        for(const auto& gt:groundTruths){
+            auto candInput=resampleR8Brain24(gt.clip44100,44100.0,candidateRate);
+            std::vector<float> rendered;renderModel(candidate,candInput,rendered,true);
+            auto candTarget=resampleR8Brain24(gt.target,gt.rate,candidateRate);
+            const auto residual=ratioSpectrumF(rendered,candTarget,candidateRate);
+            sum+=static_cast<double>(lossFromRatioF(residual,candidateRate));++n;
+        }
+        return n?sum/static_cast<double>(n):-1.0;
+    };
+
+    struct Sub{std::wstring label;bool lite;};
+    const Sub subs[]={{L"Full",false},{L"Lite",true}};
+
+    for(const auto&sub:subs){
+        report(status,L"Quality experiment ["+sub.label+L"]: preparing A2 submodel and rendering NAM...");
+        fs::path modelPath;
+        if(!prepareFullA2(inputNam,work,modelPath,error,sub.lite)){
+            report(status,L"Quality experiment ["+sub.label+L"] skipped: "+std::wstring(error.begin(),error.end()));
+            continue;
+        }
+
+        std::vector<float>input,target;double sr=48000;
+        if(!renderNam(modelPath,s44,converter.blockSize,0.31f,input,target,sr,error,status))continue;
+        detrend(target);const auto latency=detectLatency(target,sr);target=alignLeft(target,latency);
+
+        QualityExperimentResult qr;qr.label=sub.label;qr.submodel=sub.lite?A2Submodel::Lite:A2Submodel::Full;
+        qr.conversion.inputNam=inputNam;
+
+        Model m;m.A.assign(kA,0);m.A[0]=1;m.B.assign(kB,0);m.B[0]=1;
+        m.pk=fitPk(input,target,sr);m.pre=Biquad{};m.post=postForRate(sr);
+        fitAB(m,input,target,sr,status,kB,&qr.conversion.fitLoss);
+        refineB(m,input,target,sr,status,kB);
+
+        const std::size_t bTrainer=gp5TrainerTapsFor(sr);
+        Model m5;m5.A=m.A;m5.B.assign(bTrainer,0);if(!m5.B.empty())m5.B[0]=1;m5.pk=m.pk;m5.pre=m.pre;m5.post=m.post;
+        fitAB(m5,input,target,sr,status,bTrainer,&qr.conversion.gp5DirectFitLoss);
+        refineB(m5,input,target,sr,status,bTrainer);
+
+        Model truncated=m;truncated.B.resize(std::min(truncated.B.size(),bTrainer));
+        qr.gp5TruncatedLoss=evaluateModelLoss(truncated,input,target,sr);
+        qr.gp5DirectFitLoss=evaluateModelLoss(m5,input,target,sr);
+        qr.gp5TruncatedHeldOutLoss=heldOutLossFor(truncated,sr);
+        qr.gp5DirectFitHeldOutLoss=heldOutLossFor(m5,sr);
+
+        const fs::path variantDir=outputDirectory/sub.label;
+        fs::create_directories(variantDir,ec);
+        const fs::path full2048=work/(L"native_"+sub.label+L"_2048.clo");
+        const fs::path gp2001024Path=uniqueOutput(variantDir,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");
+        if(serialize2048(full2048,m,sr,error)&&makeGp200CompactClo(full2048,gp2001024Path,error))
+            qr.conversion.gp2001024=gp2001024Path;
+        qr.conversion.gp5gp50Compact=uniqueOutput(variantDir,inputNam.stem().wstring(),L"_NATIVE_GP5GP50_512.clo");
+        serializeGp5Compact(qr.conversion.gp5gp50Compact,m5,sr,error);
+        qr.conversion.ok=true;
+
+        {std::wostringstream os;os<<L"Quality experiment ["<<sub.label<<L"]: GP-200 fit loss="<<qr.conversion.fitLoss
+            <<L", GP-5/GP-50 truncated-512 loss="<<qr.gp5TruncatedLoss
+            <<L", direct-fit-512 loss="<<qr.gp5DirectFitLoss;
+            if(qr.gp5TruncatedHeldOutLoss>=0.0)
+                os<<L" | held-out: truncated="<<qr.gp5TruncatedHeldOutLoss<<L", direct-fit="<<qr.gp5DirectFitHeldOutLoss;
+            os<<L" (lower is better).";report(status,os.str());}
+        results.push_back(std::move(qr));
+    }
+    fs::remove_all(work,ec);
+
+    std::ofstream csv(outputDirectory/L"quality_experiment_results.csv");
+    if(csv){
+        csv<<"submodel,gp200_fit_loss_2048,gp5_truncated_512_loss,gp5_direct_fit_512_loss,"
+             "gp5_truncated_512_held_out_loss,gp5_direct_fit_512_held_out_loss,gp200_output,gp5gp50_output\n";
+        for(const auto&r:results){
+            const std::string label(r.label.begin(),r.label.end());
+            csv<<label<<","<<r.conversion.fitLoss<<","<<r.gp5TruncatedLoss<<","<<r.gp5DirectFitLoss<<","
+               <<r.gp5TruncatedHeldOutLoss<<","<<r.gp5DirectFitHeldOutLoss<<","
+               <<pathToUtf8(r.conversion.gp2001024)<<","<<pathToUtf8(r.conversion.gp5gp50Compact)<<"\n";
+        }
+    }
+    return results;
+}
 
 } // namespace ntc

@@ -18,6 +18,12 @@ struct ConversionResult {
     std::string error;
     fs::path inputNam;
     fs::path gp2001024;
+    // Populated only when NativeConverterConfig::gp5DirectFit is enabled: a compact
+    // 128-tap A / 512-tap B CLO whose Block B was fit directly at the GP-5/GP-50
+    // device tap budget, instead of being sliced from the 2048-tap GP-200 fit.
+    fs::path gp5gp50Compact;
+    double fitLoss = 0.0;        // final fitAB residual for the standard 2048-tap B model
+    double gp5DirectFitLoss = 0.0; // final fitAB residual for the direct-fit gp5gp50Compact model
 };
 
 struct BatchConversionResult {
@@ -30,8 +36,23 @@ struct BatchConversionResult {
 
 using StatusCallback = std::function<void(const std::wstring&)>;
 
+// Which A2 SlimmableContainer submodel to render/fit from. GP-200.exe itself always
+// selects Full (highest max_value); Lite is an experimental option for comparing
+// fit quality, since a lower-capacity submodel may leave less residual error once
+// squeezed through CLO's fixed FIR+shaper structure than Full does.
+enum class A2Submodel { Full, Lite };
+
 struct NativeConverterConfig {
     int blockSize = 1024;
+    A2Submodel submodel = A2Submodel::Full;
+    // When true, also fit and serialize a 128/512-tap CLO whose Block B is optimized
+    // directly at the GP-5/GP-50 device tap budget, rather than truncating the first
+    // 512 taps of the 2048-tap GP-200 fit (see gp5gp50Compact / gp5DirectFitLoss).
+    // Defaults to true: held-out validation across 5 NAM models (clean through
+    // extreme-high-gain djent) found direct-fit never meaningfully worse than
+    // truncation and sometimes a large win (~22% lower loss on the highest-gain model
+    // tested) -- see test_assets/quality_results/*/quality_experiment_results.csv.
+    bool gp5DirectFit = true;
 };
 
 ConversionResult convertNamToClo(const fs::path& inputNam,
@@ -49,5 +70,42 @@ BatchConversionResult convertNamFolderToClo(const fs::path& inputDirectory,
                                             CloRefineConfig refine = {},
                                             NativeConverterConfig converter = {},
                                             const StatusCallback& status = {});
+
+struct QualityExperimentResult {
+    std::wstring label;          // "Full" or "Lite"
+    A2Submodel submodel = A2Submodel::Full;
+    ConversionResult conversion; // gp2001024 / gp5gp50Compact for this submodel
+    double gp5TruncatedLoss = 0.0;  // loss if GP-5/GP-50 truncates the 2048-tap B fit
+    double gp5DirectFitLoss = 0.0;  // loss from fitting B directly at the device budget
+    // Mean loss of both GP-5/GP-50 candidates against held-out validationClips (real
+    // playing content never used for fitting), rendered through the Full A2 submodel
+    // as ground truth. -1 when validationClips was empty (not computed). This is the
+    // metric to trust over the two above when they disagree, since the in-sample loss
+    // above is scored on the same synthetic stimulus the model was fit against and can
+    // favor a candidate that doesn't generalize to real playing.
+    double gp5TruncatedHeldOutLoss = -1.0;
+    double gp5DirectFitHeldOutLoss = -1.0;
+};
+
+// Loops the conversion over both A2 submodels (Full, Lite) and, for each, scores both
+// GP-5/GP-50 Block-B strategies (truncated vs. directly fit) using the same
+// frequency-domain loss the internal A/B fitter already optimizes against. Writes
+// quality_experiment_results.csv into outputDirectory so results can be compared
+// across runs. Reuses converter.blockSize but ignores converter.submodel/gp5DirectFit
+// (both are looped over internally) and does not apply Corrective IR / Tone Match.
+//
+// validationClips, when non-empty, are WAV files of real playing content (any mono/
+// stereo PCM or float encoding, any sample rate) never used to fit the model. Each is
+// rendered through the Full A2 submodel once as ground truth, then every GP-5/GP-50
+// candidate is scored against that same ground truth and the mean loss is reported as
+// gp5*HeldOutLoss -- a held-out check that the in-sample fit loss alone cannot give,
+// since a candidate can fit the synthetic conversion stimulus well without generalizing
+// to real playing.
+std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& inputNam,
+                                                            const fs::path& outputDirectory,
+                                                            StimulusConfig stimulus = {},
+                                                            NativeConverterConfig converter = {},
+                                                            const std::vector<fs::path>& validationClips = {},
+                                                            const StatusCallback& status = {});
 
 } // namespace ntc

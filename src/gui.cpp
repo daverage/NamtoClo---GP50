@@ -10,8 +10,11 @@
 #include <shlobj.h>
 #include <shellapi.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <cwctype>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -293,15 +296,16 @@ void updateBackendUi() {
     showUploaderUi(hwnd, gp200);
     showGp5UploaderUi(hwnd, gp5);
     if (gp200) {
-        setText(gSubtitle, L"Upload CLO files directly to a GP-200 SnapTone slot via USB MIDI.");
+        setText(gSubtitle, L"Upload a GP-200 CLO (1024-tap) to a GP-200 SnapTone slot via USB MIDI.");
         refreshUploaderDetection();
         if (!gUploadBusy) setText(gStatus, L"GP-200 Uploader ready.");
     } else if (gp5) {
-        setText(gSubtitle, L"Adapt a CLO to the GP-5/GP-50 A128/B512 transfer format and upload it to SnapTone 51-80.");
+        setText(gSubtitle, L"Upload a GP-5 / GP-50 CLO (512-tap) to SnapTone 51-80.");
         refreshGp5Detection();
         if (!gGp5UploadBusy) setText(gStatus, L"GP-5 / GP-50 Uploader ready.");
     } else {
-        setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
+        setText(gSubtitle,
+            L"Convert one NAM or batch-convert a folder. Produces a GP-200 (1024-tap) and a GP-5 / GP-50 (512-tap) CLO.");
         setText(gInfo,
             L"Place nam_input_wav.wav next to NamToClo.exe. The original stimulus is always used.\r\n"
             L"Tail / Reamp, Corrective IR and Tone Match are optional.");
@@ -809,7 +813,8 @@ void createUi(HWND hwnd) {
                                0, 0, 100, 30, hwnd, controlId(1001), nullptr, nullptr);
     applyFont(title, gTitleFont);
 
-    gSubtitle = CreateWindowW(L"STATIC", L"Convert one NAM or batch-convert every NAM in a selected folder.",
+    gSubtitle = CreateWindowW(L"STATIC",
+                              L"Convert one NAM or batch-convert a folder. Produces a GP-200 (1024-tap) and a GP-5 / GP-50 (512-tap) CLO.",
                               WS_CHILD | WS_VISIBLE, 0, 0, 100, 20, hwnd,
                               controlId(IDC_SUBTITLE), nullptr, nullptr);
     applyFont(gSubtitle, gSubtitleFont);
@@ -891,7 +896,7 @@ void createUi(HWND hwnd) {
                                                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                0, 0, 124, 32, hwnd, controlId(IDC_BROWSE_REFINE_TARGET), nullptr, nullptr);
 
-    createSectionLabel(hwnd, 1011, L"Sound Clone file (.clo)");
+    createSectionLabel(hwnd, 1011, L"GP-200 CLO (.clo, 1024-tap)");
     createSectionLabel(hwnd, 1012, L"Destination SnapTone slot");
     createSectionLabel(hwnd, 1013, L"USB MIDI device");
     createSectionLabel(hwnd, 1014, L"Transfer progress");
@@ -926,7 +931,7 @@ void createUi(HWND hwnd) {
                                           0, 0, 240, 38, hwnd, controlId(IDC_UPLOADER_UPLOAD), nullptr, nullptr);
     applyFont(gUploaderUploadButton);
 
-    createSectionLabel(hwnd, 1015, L"CLO file (adapted automatically to SnapTone B512)");
+    createSectionLabel(hwnd, 1015, L"GP-5 / GP-50 CLO (.clo, 512-tap)");
     createSectionLabel(hwnd, 1016, L"Destination SnapTone slot (51-80)");
     createSectionLabel(hwnd, 1017, L"USB MIDI device");
     createSectionLabel(hwnd, 1018, L"Transfer progress");
@@ -1318,7 +1323,22 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         updateBackendUi();
         updateTailControls();
         if (r && r->ok) {
-            const std::wstring resultMessage = L"Conversion complete.\r\n\r\nGP-200 CLO 1024:\r\n" + r->gp2001024.wstring();
+            // Pre-fill both Uploader tabs so the user can switch tabs and press
+            // Upload directly instead of having to browse for the right file.
+            // GP-5/GP-50 gets the directly-fit compact CLO when it was produced
+            // (see NativeConverterConfig::gp5DirectFit) since held-out validation
+            // across 5 NAM models showed it's never meaningfully worse than, and
+            // sometimes much better than, truncating the GP-200 1024 CLO.
+            setText(gUploaderCloEdit, r->gp2001024.wstring());
+            const bool haveGp5Direct = !r->gp5gp50Compact.empty();
+            setText(gGp5CloEdit, (haveGp5Direct ? r->gp5gp50Compact : r->gp2001024).wstring());
+
+            std::wstring resultMessage = L"Conversion complete.\r\n\r\nGP-200 CLO 1024:\r\n" + r->gp2001024.wstring();
+            if (haveGp5Direct) {
+                resultMessage += L"\r\n\r\nGP-5 / GP-50 CLO (directly fit for the device):\r\n" + r->gp5gp50Compact.wstring();
+            }
+            resultMessage += L"\r\n\r\nBoth Uploader tabs have been pre-filled with the right file -- "
+                              L"just switch tabs and press Upload.";
             setText(gStatus, L"Done. CLO file generated successfully.");
             const std::wstring doneTitle = L"NAM to CLO";
             MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);
@@ -1370,7 +1390,69 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 } // namespace
 
+namespace {
+// Headless entry point:
+//   NamToClo.exe --quality-experiment <input.nam> <outputDir> [validationClipsDir]
+// Loops the conversion over the Full and Lite A2 submodels and, for each, scores both
+// GP-5/GP-50 Block-B strategies (truncated-from-2048 vs. directly fit at the device tap
+// budget), printing progress and a final summary to the console and writing
+// quality_experiment_results.csv into outputDir. When validationClipsDir is given, every
+// *.wav file directly inside it (any encoding/sample rate) is used as held-out real-
+// playing validation content -- rendered once through the Full A2 submodel as ground
+// truth and used to score every candidate, independent of the in-sample fit loss.
+// Returns true if this process should exit immediately instead of starting the GUI.
+bool runHeadlessQualityExperimentIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 4 && std::wstring(argv[1]) == L"--quality-experiment") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path outputDir = argv[3];
+        std::vector<fs::path> validationClips;
+        if (argc >= 5) {
+            const fs::path clipsDir = argv[4];
+            std::error_code ec;
+            for (const auto& entry : fs::directory_iterator(clipsDir, ec)) {
+                if (ec || !entry.is_regular_file(ec) || ec) continue;
+                auto ext = entry.path().extension().wstring();
+                std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+                if (ext == L".wav") validationClips.push_back(entry.path());
+            }
+            std::sort(validationClips.begin(), validationClips.end());
+            std::wcout << L"Found " << validationClips.size() << L" validation clip(s) in " << clipsDir.wstring() << L"\n";
+        }
+        std::wcout << L"Quality experiment: " << inputNam.wstring() << L" -> " << outputDir.wstring() << L"\n";
+        ntc::NativeConverterConfig converter;
+        auto results = ntc::runQualityExperiments(inputNam, outputDir, ntc::StimulusConfig{}, converter, validationClips,
+            [](const std::wstring& s) { std::wcout << s << L"\n"; });
+        std::wcout << L"\n==== Summary (lower loss is better) ====\n";
+        for (const auto& r : results) {
+            std::wcout << r.label << L": GP-200 fit loss=" << r.conversion.fitLoss
+                       << L", GP-5/GP-50 truncated-512 loss=" << r.gp5TruncatedLoss
+                       << L", direct-fit-512 loss=" << r.gp5DirectFitLoss;
+            if (r.gp5TruncatedHeldOutLoss >= 0.0) {
+                std::wcout << L" | held-out: truncated=" << r.gp5TruncatedHeldOutLoss
+                           << L", direct-fit=" << r.gp5DirectFitHeldOutLoss;
+            }
+            std::wcout << L"\n";
+        }
+        std::wcout << L"\nResults CSV: " << (outputDir / L"quality_experiment_results.csv").wstring() << L"\n";
+        exitCode = results.empty() ? 1 : 0;
+    }
+    LocalFree(argv);
+    return handled;
+}
+} // namespace
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+    if (int exitCode = 0; runHeadlessQualityExperimentIfRequested(exitCode)) {
+        return exitCode;
+    }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -1384,7 +1466,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.lpfnWndProc = wndProc;
     wc.lpszClassName = kClassName;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIconSm = wc.hIcon;
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 

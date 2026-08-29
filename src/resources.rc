@@ -1,4 +1,5 @@
 #include "resource.h"
+IDI_APPICON       ICON   "../resources/icons/logo.ico"
 IDB_LOGO          BITMAP "../resources/icons/logo.bmp"
 IDB_ICON_INPUT    BITMAP "../resources/icons/input.bmp"
 IDB_ICON_OUTPUT   BITMAP "../resources/icons/output.bmp"

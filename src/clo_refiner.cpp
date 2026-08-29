@@ -277,7 +277,8 @@ bool refineCloBOnly(const fs::path& inputClo2048,
                     const fs::path& outputClo2048,
                     const CloRefineConfig& config,
                     std::string& error,
-                    const RefineStatusCallback& status) {
+                    const RefineStatusCallback& status,
+                    std::vector<float>* outCorrectionIr) {
     std::vector<std::uint8_t> bytes;
     if (!readFileBytes(inputClo2048, bytes, error)) return false;
 
@@ -328,6 +329,7 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     // 2048-sample minimum-phase IR. The IR stays in memory and is applied
     // directly to Block B; no diagnostic/intermediate WAV is written to disk.
     const auto ir = v26minPhaseIr(comparison, kV26Smooth);
+    if (outCorrectionIr) *outCorrectionIr = ir;
 
     if (status) status(L"Applying Tone Match correction to Block B...");
     CorrectiveIrStats correctionStats;

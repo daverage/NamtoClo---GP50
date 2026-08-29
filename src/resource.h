@@ -1,4 +1,5 @@
 #pragma once
+#define IDI_APPICON 100
 #define IDB_LOGO 200
 #define IDB_ICON_INPUT 201
 #define IDB_ICON_OUTPUT 202
