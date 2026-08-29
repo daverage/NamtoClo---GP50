@@ -1373,6 +1373,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (haveGp5Direct) {
                 resultMessage += L"\r\n\r\nGP-5 / GP-50 CLO (directly fit for the device):\r\n" + r->gp5gp50Compact.wstring();
             }
+            if (!r->toneMatchReferenceUsed.empty()) {
+                resultMessage += L"\r\n\r\nTone Match reference: " + r->toneMatchReferenceUsed.filename().wstring();
+            }
             resultMessage += L"\r\n\r\nBoth Uploader tabs have been pre-filled with the right file -- "
                               L"just switch tabs and press Upload.";
             setText(gStatus, L"Done. CLO file generated successfully.");

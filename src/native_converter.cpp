@@ -1974,6 +1974,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
             }
         }
     }
+    if(refine.enabled) r.toneMatchReferenceUsed=refine.referenceWav;
 
     fitAB(m,input,target,sr,status,kB,&r.fitLoss);refineB(m,input,target,sr,status);
 

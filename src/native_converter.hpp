@@ -24,6 +24,10 @@ struct ConversionResult {
     fs::path gp5gp50Compact;
     double fitLoss = 0.0;        // final fitAB residual for the standard 2048-tap B model
     double gp5DirectFitLoss = 0.0; // final fitAB residual for the direct-fit gp5gp50Compact model
+    // The reference WAV actually used for Tone Match, whether resolved automatically
+    // (Auto/Clean/Moderate/High/Bass) or user-browsed (Custom). Empty when Tone Match
+    // was disabled or used the default stimulus with no named reference.
+    fs::path toneMatchReferenceUsed;
 };
 
 struct BatchConversionResult {
