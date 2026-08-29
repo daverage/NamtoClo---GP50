@@ -1603,6 +1603,9 @@ std::vector<float> resampleFirOfficial(const std::vector<float>& h,double sr,std
     rs.clear();
     return out;
 }
+
+} // namespace
+
 // Final quality score for a candidate model: render it end-to-end (A + shaper + B)
 // against the NAM target and reduce the same frequency-domain residual the internal
 // A/B fitter already minimizes (lossFromRatioF). Lower is better. Used to compare
@@ -1614,8 +1617,6 @@ double evaluateModelLoss(const Model& m,const std::vector<float>& input,const st
     const auto residual=ratioSpectrumF(rendered,target,sr);
     return static_cast<double>(lossFromRatioF(residual,sr));
 }
-
-} // namespace
 
 // How many trainer-rate-domain B taps are needed so that, after the official
 // resampleFirOfficial() SRC down to the 44.1 kHz storage domain, all 512 GP-5/GP-50

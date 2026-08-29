@@ -68,13 +68,15 @@ What *is* still unconfirmed for GP-50 specifically: whether its wire protocol (p
 
 Magic `VTSI`/`HTSI`, FIR A = 128 taps, FIR B = first 512 taps of a larger CLO's Block B, declared size `0x0A88`, payload size `0x0A00`, CRC16/MODBUS recalculated on adaptation. Preceded by a reconstructed 74-byte SnapTone wrapper (destination slot + name) for the full 2770-byte transfer payload (146 blocks: 145×19 bytes + 1×15 bytes).
 
-### GP-5/GP-50 "pure" fit candidate — A/B seed doesn't matter, don't expect a win from it alone
+### GP-5/GP-50 "pure" fit candidate — P/K search overfits the synthetic stimulus, do not ship it as-is
 
 `native_converter.cpp`'s `runQualityExperiments` carries a third GP-5/GP-50 candidate (`ntc::gp5::fitPureFromRender`, `gp5_optimizer.hpp`/`.cpp`) that fits Block A/B directly at the device tap budget from a neutral (flat) seed, with zero dependency on the GP-200 2048-tap fit — unlike the existing direct-fit candidate (`native_converter.cpp`'s `m5`), which seeds its A128 from whatever the 2048-tap fit converged to.
 
-Measured (2026-08-29, one clean and one extreme-high-gain NAM, see `test_assets/quality_results/*_PureCandidate/quality_experiment_results.csv`): this produces a **byte-identical** `.clo` to the existing direct-fit candidate. `fitAB()`'s sweep/low-level/multi-level search turns out to be seed-independent for A/B when P/K and the pre/post biquads are held fixed — which they are in both candidates, since both get P/K from the same `fitPk()` call and default pre/post. So decoupling the A-seed from GP-200 alone buys nothing measurable.
+**Phase 1** (2026-08-29, P/K left untouched, see `test_assets/quality_results/*_PureCandidate/quality_experiment_results.csv`): produced a **byte-identical** `.clo` to the existing direct-fit candidate on both a clean and an extreme-high-gain NAM. `fitAB()`'s sweep/low-level/multi-level search is seed-independent for A/B when P/K and the pre/post biquads are held fixed — which they were in both candidates. Decoupling the A-seed from GP-200 alone bought nothing measurable.
 
-The actual lever, still unimplemented, is re-optimizing P/K (and pre/post) themselves against the GP-50 tap budget, rather than only carrying forward the GP-200-oriented `fitPk()` estimate unchanged. Don't reintroduce a "make the seed more independent" change expecting a quality win without also touching P/K — the evidence above says that's not where the headroom is.
+**Phase 2** (2026-08-29, bounded local P/K search added, alternating with a full A/B refit — see the same directory's `*_pk_search.csv`): on 2 of 4 (NAM, submodel) combinations tested, the search found and kept a genuine in-sample loss improvement (e.g. clean Fender Full: -32%); on the other 2, a monotonicity guard correctly rejected a round that would have regressed in-sample loss after the A/B refit. **But on every combination where an improvement was kept, held-out loss (scored against real playing content) got worse, not better** — e.g. clean Fender Full: in-sample -32%, held-out +23%. This is overfitting to the 70-second synthetic conversion stimulus: both the P/K search and its round-acceptance check only ever score against the same signal `fitAB()` was fit against, never against held-out content.
+
+Do not wire this candidate into `convertNamToClo`, and do not treat "the P/K search accepted an improvement" as evidence of a quality win, until the search (or at least its round-acceptance check) is scored against held-out clips too — `fitPureFromRender` does not currently take any validation clips as input, so this needs an API change, not just a threshold tweak. See `gp5_optimizer.hpp`'s `fitPureFromRender` doc comment for the full detail.
 
 ## Licensing / attribution notes
 

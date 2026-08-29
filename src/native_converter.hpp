@@ -122,16 +122,18 @@ struct QualityExperimentResult {
     double gp5PostToneMatchHeldOutLoss = -1.0;
 
     // "Pure" candidate: a GP-5/GP-50 model fit directly at the device tap
-    // budget from a neutral seed (see gp5_optimizer.hpp), with no dependency
-    // on the GP-200 2048-tap fit at all -- not even as a seed. Purely
-    // comparative for now; not wired into convertNamToClo's shipped output.
-    // -1 when the fit failed to run.
+    // budget from a neutral seed, including a bounded local P/K search (see
+    // gp5_optimizer.hpp), with no dependency on the GP-200 2048-tap fit at
+    // all -- not even as a seed. Purely comparative for now; not wired into
+    // convertNamToClo's shipped output. -1 when the fit failed to run.
     //
-    // Measured to produce byte-identical output to gp5DirectFitLoss's
-    // candidate (see gp5_optimizer.hpp's fitPureFromRender doc comment and
-    // test_assets/quality_results/*_PureCandidate/) -- the A/B seed doesn't
-    // matter, so expect this to track gp5DirectFitLoss exactly until P/K
-    // and/or pre/post are actually re-optimized here too.
+    // See gp5_optimizer.hpp's fitPureFromRender doc comment and
+    // test_assets/quality_results/*_PureCandidate/ for the full measured
+    // history. Current state: when its P/K search keeps an improvement,
+    // gp5PureLoss (in-sample) improves but gp5PureHeldOutLoss (real playing
+    // content) gets WORSE on every case tested so far -- overfitting to the
+    // synthetic conversion stimulus. Do not treat a lower gp5PureLoss as a
+    // quality win by itself; check gp5PureHeldOutLoss too.
     fs::path gp5PureCompact;
     double gp5PureLoss = -1.0;
     double gp5PureHeldOutLoss = -1.0;

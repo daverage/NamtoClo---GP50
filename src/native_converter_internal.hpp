@@ -69,4 +69,10 @@ void fitAB(Model& m, const std::vector<float>& input, const std::vector<float>& 
 void refineB(Model& m, const std::vector<float>& input, const std::vector<float>& target,
              double sr, const StatusCallback& status, std::size_t bTaps);
 
+// End-to-end quality score: renders the model (Pre->A->PK->Post->B) against
+// input and reduces the same frequency-domain residual fitAB() itself
+// minimizes. Lower is better.
+double evaluateModelLoss(const Model& m, const std::vector<float>& input,
+                          const std::vector<float>& target, double sr);
+
 } // namespace ntc
