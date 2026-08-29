@@ -1969,7 +1969,8 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     }
 
     if(gp5Chosen){
-        r.gp5gp50Compact=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP5GP50_512.clo");
+        r.gp5gp50Compact=uniqueOutput(outputDirectory,inputNam.stem().wstring(),
+            refine.enabled?L"_NATIVE_GP5GP50_512_TONEMATCH.clo":L"_NATIVE_GP5GP50_512.clo");
         // Layer the same corrections the GP-200 output got onto this Block B too,
         // in the same order (Corrective IR, then Tone Match) so the two files stay
         // consistent instead of the GP-5/GP-50 file silently skipping them. The Tone
