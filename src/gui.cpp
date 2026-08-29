@@ -1439,6 +1439,38 @@ namespace {
 // *.wav file directly inside it (any encoding/sample rate) is used as held-out real-
 // playing validation content -- rendered once through the Full A2 submodel as ground
 // truth and used to score every candidate, independent of the in-sample fit loss.
+// Headless entry point: NamToClo.exe --render-through-nam <nam> <inputWav> <outputWav>
+// Renders inputWav through nam's Full A2 submodel and writes outputWav (44.1kHz mono
+// float32) -- diagnostic only, not part of any conversion path. Useful for verifying
+// what a reference/validation clip actually sounds like once run through a real amp,
+// since characteristics like palm-muting are far more evident post-amp than in raw DI.
+bool runRenderThroughNamIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 5 && std::wstring(argv[1]) == L"--render-through-nam") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path namPath = argv[2];
+        const fs::path inputWav = argv[3];
+        const fs::path outputWav = argv[4];
+        std::string error;
+        std::wcout << L"Rendering " << inputWav.wstring() << L" through " << namPath.wstring() << L"...\n";
+        if (ntc::renderClipThroughNam(namPath, inputWav, outputWav, error)) {
+            std::wcout << L"Wrote " << outputWav.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
 // Returns true if this process should exit immediately instead of starting the GUI.
 bool runHeadlessQualityExperimentIfRequested(int& exitCode) {
     int argc = 0;
@@ -1478,10 +1510,14 @@ bool runHeadlessQualityExperimentIfRequested(int& exitCode) {
         for (const auto& r : results) {
             std::wcout << r.label << L": GP-200 fit loss=" << r.conversion.fitLoss
                        << L", GP-5/GP-50 truncated-512 loss=" << r.gp5TruncatedLoss
-                       << L", direct-fit-512 loss=" << r.gp5DirectFitLoss;
+                       << L", direct-fit-512 loss=" << r.gp5DirectFitLoss
+                       << L", pure-512 loss=" << r.gp5PureLoss;
             if (r.gp5TruncatedHeldOutLoss >= 0.0) {
                 std::wcout << L" | held-out: truncated=" << r.gp5TruncatedHeldOutLoss
                            << L", direct-fit=" << r.gp5DirectFitHeldOutLoss;
+            }
+            if (r.gp5PureHeldOutLoss >= 0.0) {
+                std::wcout << L", pure=" << r.gp5PureHeldOutLoss;
             }
             if (r.gp5PostToneMatchHeldOutLoss >= 0.0) {
                 std::wcout << L" | Tone Match (" << r.gp5ChosenStrategy << L") held-out: before="
@@ -1498,6 +1534,9 @@ bool runHeadlessQualityExperimentIfRequested(int& exitCode) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+    if (int exitCode = 0; runRenderThroughNamIfRequested(exitCode)) {
+        return exitCode;
+    }
     if (int exitCode = 0; runHeadlessQualityExperimentIfRequested(exitCode)) {
         return exitCode;
     }

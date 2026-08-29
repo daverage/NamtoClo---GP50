@@ -121,6 +121,15 @@ struct QualityExperimentResult {
     double gp5ChosenDeviceHeldOutLoss = -1.0;
     double gp5PostToneMatchHeldOutLoss = -1.0;
 
+    // "Pure" candidate: a GP-5/GP-50 model fit directly at the device tap
+    // budget from a neutral seed (see gp5_optimizer.hpp), with no dependency
+    // on the GP-200 2048-tap fit at all -- not even as a seed. Purely
+    // comparative for now; not wired into convertNamToClo's shipped output.
+    // -1 when the fit failed to run.
+    fs::path gp5PureCompact;
+    double gp5PureLoss = -1.0;
+    double gp5PureHeldOutLoss = -1.0;
+
     // Fitted PK nonlinearity shaper (pp/pn = positive/negative saturation ceiling,
     // kp/kn = positive/negative saturation steepness) -- a cheap, already-computed
     // proxy for how "hot"/high-gain the amp is, independent of any filename or
@@ -128,6 +137,17 @@ struct QualityExperimentResult {
     // depend on B tap count).
     float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f;
 };
+
+// Diagnostic utility: renders an arbitrary WAV clip (any encoding/sample rate/channel
+// count) through a NAM model's Full A2 submodel and writes the result as a 44.1kHz
+// mono float32 WAV. Not part of any conversion path -- useful for verifying reference
+// clip content (e.g. checking for palm-mute/chug character, which is far more evident
+// after amp compression/distortion than in the raw DI) by listening to or analyzing
+// the rendered output instead of the source clip.
+bool renderClipThroughNam(const fs::path& namPath,
+                          const fs::path& inputWav,
+                          const fs::path& outputWav,
+                          std::string& error);
 
 // Loops the conversion over both A2 submodels (Full, Lite) and, for each, scores both
 // GP-5/GP-50 Block-B strategies (truncated vs. directly fit) using the same

@@ -1,4 +1,6 @@
 #include "native_converter.hpp"
+#include "native_converter_internal.hpp"
+#include "gp5_optimizer.hpp"
 #include "common.hpp"
 #include "stimulus.hpp"
 
@@ -356,7 +358,7 @@ std::size_t detectLatency(const std::vector<float>& y,double sr){
 }
 std::vector<float> alignLeft(const std::vector<float>& x,std::size_t n){std::vector<float> y(x.size(),0);if(n>=x.size())return y;std::copy(x.begin()+static_cast<std::ptrdiff_t>(n),x.end(),y.begin());return y;}
 
-struct PK {float pp=.1f,pn=.1f,kp=1,kn=1;};
+} // namespace
 
 // Exact reconstruction of 0x558c30: 100 ms extrema over the first 5 s,
 // P fixed by branch extrema, K seeded from the small-signal slope up to
@@ -518,22 +520,6 @@ PK fitPk(const std::vector<float>& in,const std::vector<float>& out,double sr){
     r.kn=bestMulN*kn0;
     return r;
 }
-// Trainer biquad numerical path from GP-200.exe (0x557900 et al.).
-// The official trainer uses direct-form II state in double, scales the input
-// by 1000, rounds the internal output to float, then applies 0.001 and rounds
-// to float again. The reciprocal scales cancel mathematically but the
-// intermediate float conversion is observable and is therefore retained.
-struct Biquad{
-    double b0=1,b1=0,b2=0,a1=0,a2=0;
-    double w1=0,w2=0;
-    float p(float x){
-        const double w0=static_cast<double>(x)*1000.0-a1*w1-a2*w2;
-        const double yd=b0*w0+b1*w1+b2*w2;
-        w2=w1; w1=w0;
-        const float rounded=static_cast<float>(yd);
-        return static_cast<float>(static_cast<double>(rounded)*0.001);
-    }
-};
 Biquad postForRate(double fs){
     // GP-200.exe computes this section in float, then stores/promotes the five
     // float32 results into the double CLO fields.  Keeping the arithmetic in
@@ -545,6 +531,9 @@ Biquad postForRate(double fs){
     const float a2=(f2-c*f+w2)/D;
     Biquad q;q.b0=static_cast<double>(b0);q.b1=static_cast<double>(b1);q.b2=static_cast<double>(b2);q.a1=static_cast<double>(a1);q.a2=static_cast<double>(a2);return q;
 }
+
+namespace {
+
 struct AP{float a=0,s=0;float p(float x){const float y=s+a*x;s=x-a*y;return y;}};
 struct Poly{std::vector<AP>a,b;float d=0;Poly(std::initializer_list<float>x,std::initializer_list<float>y){for(float v:x)a.push_back({v,0});for(float v:y)b.push_back({v,0});}float r(std::vector<AP>&v,float x){for(auto&s:v)x=s.p(x);return x;}void up(float x,float&e,float&o){e=r(a,x);o=r(b,x);}float down(float e,float o){const float x=r(a,e),y=r(b,o),z=.5f*(x+d);d=y;return z;}};
 
@@ -770,8 +759,6 @@ std::vector<float> applyInitialConditioningFir(const std::vector<float>& in, dou
     fp.run(in, out);
     return out;
 }
-
-struct Model{std::vector<float>A,B;PK pk;Biquad pre,post;};
 
 // 0x5589d0 / 0x5580e0: PRE is executed even though its coefficients are
 // identity on the NAM path.  Because the official biquad has observable
@@ -1484,6 +1471,8 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
     if(outBestLoss) *outBestLoss=bestLoss;
 }
 
+} // namespace
+
 void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status,std::size_t bTaps=kB,double* outLoss=nullptr){
     report(status,L"Independent: initial low-level / conditioned-sweep factorization...");FactorState state=initialFactorState(m,input,target,sr);int globalIter=0;
     const Phase phases[]={{23,28,3,L"sweep"},{6,21,2,L"low-level"},{30,50,5,L"multi-level"}};
@@ -1491,6 +1480,8 @@ void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&targe
     for(const auto&ph:phases){float phaseLoss=0.0f;optimizePhase(m,state,input,target,sr,ph,globalIter,status,bTaps,&phaseLoss);lastLoss=phaseLoss;}
     if(outLoss) *outLoss=static_cast<double>(lastLoss);
 }
+
+namespace {
 
 std::vector<float> convolveTruncate(const std::vector<float>&a,const std::vector<float>&b,std::size_t n){std::vector<float>o(n,0.0f);for(std::size_t i=0;i<a.size();++i)for(std::size_t j=0;j<b.size()&&i+j<n;++j)o[i+j]+=a[i]*b[j];return o;}
 
@@ -1537,6 +1528,8 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
 }
 
+} // namespace
+
 void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status,std::size_t bTaps=kB){
     report(status,L"Independent: final Block B tail refinement...");
     const std::size_t b=officialTimeIndex(sr,50.0f),e=officialTimeIndex(sr,70.0f);
@@ -1565,6 +1558,8 @@ void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&tar
         for(auto&v:m.B)v*=g;
     }
 }
+
+namespace {
 
 // Exact FIR serialization SRC reconstructed from GP-200.exe 0x5a70a0.
 // This path is intentionally separate from the long-stimulus SRC.  The
@@ -1620,6 +1615,8 @@ double evaluateModelLoss(const Model& m,const std::vector<float>& input,const st
     return static_cast<double>(lossFromRatioF(residual,sr));
 }
 
+} // namespace
+
 // How many trainer-rate-domain B taps are needed so that, after the official
 // resampleFirOfficial() SRC down to the 44.1 kHz storage domain, all 512 GP-5/GP-50
 // device taps end up populated with real content instead of trailing zero-padding
@@ -1630,6 +1627,8 @@ std::size_t gp5TrainerTapsFor(double sr){
     const double raw=std::ceil(kDeviceTaps*sr/kDeviceRate)+8.0; // small headroom for the float-truncated ratio
     return static_cast<std::size_t>(std::max(1.0,raw));
 }
+
+namespace {
 
 // CRC16/MODBUS, big-endian storage at [0x08,0x09) — the algorithm the GP-5/GP-50
 // compact CLO header actually uses (see gp5_clo_upload.cpp::crc16Modbus), distinct
@@ -1926,6 +1925,27 @@ std::vector<float> prepareToneTarget44100(const std::vector<float>&renderedWithG
 fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix){fs::path p=dir/(stem+suffix);int i=2;while(fs::exists(p))p=dir/(stem+L"_"+std::to_wstring(i++)+suffix);return p;}
 
 } // namespace
+
+bool renderClipThroughNam(const fs::path& namPath,const fs::path& inputWav,const fs::path& outputWav,std::string& error){
+    if(outputWav.has_parent_path()){std::error_code dec;fs::create_directories(outputWav.parent_path(),dec);}
+    const fs::path work=(outputWav.has_parent_path()?outputWav.parent_path():fs::path("."))/L".render_through_nam_work";
+    std::error_code ec;fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    std::vector<float> clip44100;
+    if(!loadClipAsMono44100(inputWav,clip44100,error)){fs::remove_all(work,ec);return false;}
+
+    fs::path modelPath;
+    if(!prepareFullA2(namPath,work,modelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> inputAtRate,targetAtRate;double rate=48000.0;
+    if(!renderNamOnSignal(modelPath,clip44100,inputAtRate,targetAtRate,rate,error)){fs::remove_all(work,ec);return false;}
+
+    auto rendered44100=resampleR8Brain24(targetAtRate,rate,44100.0);
+    const bool ok=writeMonoFloat32Wav(outputWav,rendered44100,44100,error);
+    fs::remove_all(work,ec);
+    return ok;
+}
 
 ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& outputDirectory,
                                              StimulusConfig stimulus,CorrectiveIrConfig correction,CloRefineConfig refine,
@@ -2245,6 +2265,22 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
 
         const fs::path variantDir=outputDirectory/sub.label;
         fs::create_directories(variantDir,ec);
+
+        // Candidate C: fit directly at the device tap budget from a neutral
+        // seed, with no dependency on the GP-200 2048-tap fit above (not even
+        // as a seed -- see gp5_optimizer.hpp). Purely comparative for now:
+        // not chosen as qr.conversion.gp5gp50Compact regardless of loss.
+        report(status,L"Quality experiment ["+sub.label+L"]: fitting GP-5/GP-50 pure candidate (no GP-200 dependency)...");
+        const auto pureFit=ntc::gp5::fitPureFromRender(input,target,sr,status);
+        if(pureFit.ok){
+            qr.gp5PureLoss=evaluateModelLoss(pureFit.model,input,target,sr);
+            qr.gp5PureHeldOutLoss=heldOutLossFor(pureFit.model,sr);
+            qr.gp5PureCompact=uniqueOutput(variantDir,inputNam.stem().wstring(),L"_NATIVE_GP5GP50_PURE_512.clo");
+            serializeGp5Compact(qr.gp5PureCompact,pureFit.model,sr,error);
+        }else{
+            report(status,L"Quality experiment ["+sub.label+L"]: GP-5/GP-50 pure candidate failed: "+std::wstring(pureFit.error.begin(),pureFit.error.end()));
+        }
+
         const fs::path full2048=work/(L"native_"+sub.label+L"_2048.clo");
         const fs::path gp2001024Path=uniqueOutput(variantDir,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");
         if(serialize2048(full2048,m,sr,error)&&makeGp200CompactClo(full2048,gp2001024Path,error))
@@ -2305,9 +2341,12 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
 
         {std::wostringstream os;os<<L"Quality experiment ["<<sub.label<<L"]: GP-200 fit loss="<<qr.conversion.fitLoss
             <<L", GP-5/GP-50 truncated-512 loss="<<qr.gp5TruncatedLoss
-            <<L", direct-fit-512 loss="<<qr.gp5DirectFitLoss;
+            <<L", direct-fit-512 loss="<<qr.gp5DirectFitLoss
+            <<L", pure-512 loss="<<qr.gp5PureLoss;
             if(qr.gp5TruncatedHeldOutLoss>=0.0)
                 os<<L" | held-out: truncated="<<qr.gp5TruncatedHeldOutLoss<<L", direct-fit="<<qr.gp5DirectFitHeldOutLoss;
+            if(qr.gp5PureHeldOutLoss>=0.0)
+                os<<L", pure="<<qr.gp5PureHeldOutLoss;
             if(qr.gp5PostToneMatchHeldOutLoss>=0.0)
                 os<<L" | GP-5/GP-50 Tone Match held-out: before="<<qr.gp5ChosenDeviceHeldOutLoss
                   <<L", after="<<qr.gp5PostToneMatchHeldOutLoss;
@@ -2320,17 +2359,19 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
     if(csv){
         csv<<"submodel,gp200_fit_loss_2048,gp5_truncated_512_loss,gp5_direct_fit_512_loss,"
              "gp5_truncated_512_held_out_loss,gp5_direct_fit_512_held_out_loss,"
+             "gp5_pure_512_loss,gp5_pure_512_held_out_loss,"
              "gp5_chosen_strategy,gp5_chosen_device_held_out_loss,gp5_post_tonematch_held_out_loss,"
              "pk_pp,pk_pn,pk_kp,pk_kn,"
-             "gp200_output,gp5gp50_output\n";
+             "gp200_output,gp5gp50_output,gp5gp50_pure_output\n";
         for(const auto&r:results){
             const std::string label(r.label.begin(),r.label.end());
             const std::string strategy(r.gp5ChosenStrategy.begin(),r.gp5ChosenStrategy.end());
             csv<<label<<","<<r.conversion.fitLoss<<","<<r.gp5TruncatedLoss<<","<<r.gp5DirectFitLoss<<","
                <<r.gp5TruncatedHeldOutLoss<<","<<r.gp5DirectFitHeldOutLoss<<","
+               <<r.gp5PureLoss<<","<<r.gp5PureHeldOutLoss<<","
                <<strategy<<","<<r.gp5ChosenDeviceHeldOutLoss<<","<<r.gp5PostToneMatchHeldOutLoss<<","
                <<r.pkPp<<","<<r.pkPn<<","<<r.pkKp<<","<<r.pkKn<<","
-               <<pathToUtf8(r.conversion.gp2001024)<<","<<pathToUtf8(r.conversion.gp5gp50Compact)<<"\n";
+               <<pathToUtf8(r.conversion.gp2001024)<<","<<pathToUtf8(r.conversion.gp5gp50Compact)<<","<<pathToUtf8(r.gp5PureCompact)<<"\n";
         }
     }
     return results;

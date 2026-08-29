@@ -142,6 +142,9 @@ target_compile_definitions(ntc_namcore PRIVATE
 target_sources(NamToClo PRIVATE
     src/native_converter.cpp
     src/native_converter.hpp
+    src/native_converter_internal.hpp
+    src/gp5_optimizer.cpp
+    src/gp5_optimizer.hpp
     "${_ntc_ooura_dir}/src/fft4g.c"
 )
 target_include_directories(NamToClo PRIVATE "${_ntc_ooura_dir}/src")
