@@ -68,6 +68,14 @@ What *is* still unconfirmed for GP-50 specifically: whether its wire protocol (p
 
 Magic `VTSI`/`HTSI`, FIR A = 128 taps, FIR B = first 512 taps of a larger CLO's Block B, declared size `0x0A88`, payload size `0x0A00`, CRC16/MODBUS recalculated on adaptation. Preceded by a reconstructed 74-byte SnapTone wrapper (destination slot + name) for the full 2770-byte transfer payload (146 blocks: 145×19 bytes + 1×15 bytes).
 
+### GP-5/GP-50 "pure" fit candidate — A/B seed doesn't matter, don't expect a win from it alone
+
+`native_converter.cpp`'s `runQualityExperiments` carries a third GP-5/GP-50 candidate (`ntc::gp5::fitPureFromRender`, `gp5_optimizer.hpp`/`.cpp`) that fits Block A/B directly at the device tap budget from a neutral (flat) seed, with zero dependency on the GP-200 2048-tap fit — unlike the existing direct-fit candidate (`native_converter.cpp`'s `m5`), which seeds its A128 from whatever the 2048-tap fit converged to.
+
+Measured (2026-08-29, one clean and one extreme-high-gain NAM, see `test_assets/quality_results/*_PureCandidate/quality_experiment_results.csv`): this produces a **byte-identical** `.clo` to the existing direct-fit candidate. `fitAB()`'s sweep/low-level/multi-level search turns out to be seed-independent for A/B when P/K and the pre/post biquads are held fixed — which they are in both candidates, since both get P/K from the same `fitPk()` call and default pre/post. So decoupling the A-seed from GP-200 alone buys nothing measurable.
+
+The actual lever, still unimplemented, is re-optimizing P/K (and pre/post) themselves against the GP-50 tap budget, rather than only carrying forward the GP-200-oriented `fitPk()` estimate unchanged. Don't reintroduce a "make the seed more independent" change expecting a quality win without also touching P/K — the evidence above says that's not where the headroom is.
+
 ## Licensing / attribution notes
 
 This is an independent research/reimplementation project, not affiliated with or endorsed by Valeton or Hotone. `THIRD_PARTY.md` tracks the three fetched dependencies (all MIT-licensed) and `CMakeLists.txt` installs their upstream LICENSE files alongside the built exe — if you change how a dependency is fetched or vendored, keep that install step in sync.

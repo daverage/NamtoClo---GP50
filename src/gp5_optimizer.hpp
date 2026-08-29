@@ -32,6 +32,17 @@ struct PureFit {
 // and default pre/post biquads. Runs the same joint A/B fitAB()+refineB()
 // phases the GP-200 path uses, just at the true device tap budget from the
 // start -- no 2048-tap pass, no truncation.
+//
+// MEASURED (2026-08-29, see test_assets/quality_results/*_PureCandidate/
+// quality_experiment_results.csv, one clean and one extreme-high-gain NAM):
+// this produces a byte-identical .clo to the existing direct-fit candidate
+// (native_converter.cpp's m5, seeded from the GP-200 2048-tap fit's converged
+// A). fitAB()'s sweep/low-level/multi-level search is seed-independent for
+// A/B given identical P/K/pre/post -- so removing the GP-200 A-seed alone
+// buys nothing. Do not expect a quality win from this candidate on its own;
+// it exists as scaffolding for a real P/K (and pre/post) re-optimization
+// pass, which is the part fitPureFromRender does NOT yet do differently from
+// the direct-fit path.
 PureFit fitPureFromRender(const std::vector<float>& input, const std::vector<float>& target,
                            double sr, const StatusCallback& status);
 

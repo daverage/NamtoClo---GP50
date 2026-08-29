@@ -126,6 +126,12 @@ struct QualityExperimentResult {
     // on the GP-200 2048-tap fit at all -- not even as a seed. Purely
     // comparative for now; not wired into convertNamToClo's shipped output.
     // -1 when the fit failed to run.
+    //
+    // Measured to produce byte-identical output to gp5DirectFitLoss's
+    // candidate (see gp5_optimizer.hpp's fitPureFromRender doc comment and
+    // test_assets/quality_results/*_PureCandidate/) -- the A/B seed doesn't
+    // matter, so expect this to track gp5DirectFitLoss exactly until P/K
+    // and/or pre/post are actually re-optimized here too.
     fs::path gp5PureCompact;
     double gp5PureLoss = -1.0;
     double gp5PureHeldOutLoss = -1.0;
