@@ -2277,7 +2277,12 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
     // clips are never seen during fitting or selection and are what actually gets
     // reported as gp5PureHeldOutLoss. heldOutLossFor above (using the full set) stays
     // the metric for every other candidate, none of which see any of these clips.
-    const std::size_t gp5SelectionCount=groundTruths.size()>=2?std::min<std::size_t>(3,groundTruths.size()/2):0;
+    // Roughly a third of the corpus goes to selection (uncapped -- with only ~10
+    // clips this was capped at 3, which starved the P/K/Post searches of enough
+    // signal to find a trustworthy direction; with a larger corpus this scales up
+    // instead of leaving the extra clips unused), requiring at least 4 total so
+    // both halves have something to work with.
+    const std::size_t gp5SelectionCount=groundTruths.size()>=4?groundTruths.size()/3:0;
     std::vector<GroundTruth> gp5SelectionTruths(groundTruths.begin(),groundTruths.begin()+static_cast<std::ptrdiff_t>(gp5SelectionCount));
     std::vector<GroundTruth> gp5BenchmarkTruths(groundTruths.begin()+static_cast<std::ptrdiff_t>(gp5SelectionCount),groundTruths.end());
     auto pureBenchmarkLossFor=[&](const Model& candidate,double candidateRate)->double{
