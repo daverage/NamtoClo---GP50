@@ -52,10 +52,20 @@ PkSearchResult searchPkLocal(const Model& m, const std::vector<float>& input,
     return {bestPk, bestLoss};
 }
 
+// Average evaluateModelLoss across a set of selection clips. Empty input
+// means "no selection set available" -- callers check this explicitly
+// rather than relying on a sentinel return, since 0.0 is a valid loss.
+double selectionLossFor(const Model& m, const std::vector<SelectionClip>& clips, double sr) {
+    double sum = 0.0;
+    for (const auto& clip : clips) sum += evaluateModelLoss(m, clip.input, clip.target, sr);
+    return sum / static_cast<double>(clips.size());
+}
+
 } // namespace
 
 PureFit fitPureFromRender(const std::vector<float>& input, const std::vector<float>& target,
-                           double sr, const StatusCallback& status) {
+                           double sr, const std::vector<SelectionClip>& selectionClips,
+                           const StatusCallback& status) {
     PureFit r;
     if (input.empty() || target.empty()) {
         r.error = "Empty NAM render passed to GP-5/GP-50 pure fit.";
@@ -93,8 +103,14 @@ PureFit fitPureFromRender(const std::vector<float>& input, const std::vector<flo
     // measurement. So each round's candidate is scored again AFTER the
     // refit and only kept if it still clears the threshold; otherwise the
     // candidate is discarded and the loop stops, leaving m at its previous
-    // (better or equal) state. This is what actually makes the loop
-    // monotonically non-increasing in loss, not searchPkLocal() alone.
+    // (better or equal) state.
+    //
+    // When selectionClips is non-empty, that post-refit acceptance check is
+    // gated on selection-set loss instead of training loss -- see this
+    // function's doc comment (PHASE 2 vs. PHASE 3) for why: gating on the
+    // same signal fitAB() trains on let every accepted round overfit to the
+    // synthetic stimulus. With an empty selectionClips (no validation clips
+    // available), falls back to the training-loss gate unchanged.
     constexpr int kMaxPkRounds = 3;
     constexpr double kMinRelativeImprovement = 0.002; // 0.2%
     // Must be evaluateModelLoss(), not r.fitLoss: fitAB's own internally-
@@ -103,6 +119,7 @@ PureFit fitPureFromRender(const std::vector<float>& input, const std::vector<flo
     // against, and comparing across the two caused this loop to break
     // immediately even when the P/K search found a real improvement.
     double currentLoss = evaluateModelLoss(m, input, target, sr);
+    double currentSelectionLoss = selectionClips.empty() ? 0.0 : selectionLossFor(m, selectionClips, sr);
     for (int round = 0; round < kMaxPkRounds; ++round) {
         const auto pkResult = searchPkLocal(m, input, target, sr, status);
         if (pkResult.loss >= currentLoss * (1.0 - kMinRelativeImprovement)) break;
@@ -113,7 +130,21 @@ PureFit fitPureFromRender(const std::vector<float>& input, const std::vector<flo
         fitAB(candidate, input, target, sr, status, r.bTaps, &candidateFitLoss);
         refineB(candidate, input, target, sr, status, r.bTaps);
         const double candidateLoss = evaluateModelLoss(candidate, input, target, sr);
-        if (candidateLoss >= currentLoss * (1.0 - kMinRelativeImprovement)) break;
+
+        if (selectionClips.empty()) {
+            if (candidateLoss >= currentLoss * (1.0 - kMinRelativeImprovement)) break;
+        } else {
+            const double candidateSelectionLoss = selectionLossFor(candidate, selectionClips, sr);
+            if (status) {
+                std::wostringstream os;
+                os << L"GP-5/GP-50 pure: round " << (round + 1) << L" -- training loss "
+                   << currentLoss << L" -> " << candidateLoss << L", selection loss "
+                   << currentSelectionLoss << L" -> " << candidateSelectionLoss;
+                status(os.str());
+            }
+            if (candidateSelectionLoss >= currentSelectionLoss * (1.0 - kMinRelativeImprovement)) break;
+            currentSelectionLoss = candidateSelectionLoss;
+        }
 
         m = std::move(candidate);
         r.fitLoss = candidateFitLoss;

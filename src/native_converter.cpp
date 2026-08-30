@@ -2214,7 +2214,7 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
     // Held-out ground truth: each validation clip rendered once through the Full A2
     // submodel (the best available proxy for the real amp), time-aligned by onset.
     // Reused to score every candidate below, regardless of which submodel it came from.
-    struct GroundTruth{std::wstring name;std::vector<float>clip44100;std::vector<float>target;double rate=44100.0;};
+    struct GroundTruth{std::wstring name;std::vector<float>clip44100;std::vector<float>input;std::vector<float>target;double rate=44100.0;};
     std::vector<GroundTruth> groundTruths;
     if(!validationClips.empty()){
         report(status,L"Held-out validation: rendering Full A2 ground truth for "
@@ -2228,12 +2228,11 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                     report(status,L"Held-out clip skipped ["+gt.name+L"]: "+std::wstring(clipError.begin(),clipError.end()));
                     continue;
                 }
-                std::vector<float> gtInput;
-                if(!renderNamOnSignal(fullModelPath,gt.clip44100,gtInput,gt.target,gt.rate,clipError)){
+                if(!renderNamOnSignal(fullModelPath,gt.clip44100,gt.input,gt.target,gt.rate,clipError)){
                     report(status,L"Held-out clip skipped ["+gt.name+L"]: "+std::wstring(clipError.begin(),clipError.end()));
                     continue;
                 }
-                const std::size_t inOnset=findOnset(gtInput),outOnset=findOnset(gt.target);
+                const std::size_t inOnset=findOnset(gt.input),outOnset=findOnset(gt.target);
                 const std::size_t latency=outOnset>inOnset?outOnset-inOnset:0;
                 gt.target=alignLeft(gt.target,latency);
                 groundTruths.push_back(std::move(gt));
@@ -2246,6 +2245,28 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
         if(groundTruths.empty())return -1.0;
         double sum=0.0;std::size_t n=0;
         for(const auto& gt:groundTruths){
+            auto candInput=resampleR8Brain24(gt.clip44100,44100.0,candidateRate);
+            std::vector<float> rendered;renderModel(candidate,candInput,rendered,true);
+            auto candTarget=resampleR8Brain24(gt.target,gt.rate,candidateRate);
+            const auto residual=ratioSpectrumF(rendered,candTarget,candidateRate);
+            sum+=static_cast<double>(lossFromRatioF(residual,candidateRate));++n;
+        }
+        return n?sum/static_cast<double>(n):-1.0;
+    };
+
+    // Three-way split for the pure candidate's P/K search (see gp5_optimizer.hpp):
+    // "selection" clips are threaded into fitPureFromRender so its round-acceptance
+    // check has real signal to gate on that isn't the training stimulus; "benchmark"
+    // clips are never seen during fitting or selection and are what actually gets
+    // reported as gp5PureHeldOutLoss. heldOutLossFor above (using the full set) stays
+    // the metric for every other candidate, none of which see any of these clips.
+    const std::size_t gp5SelectionCount=groundTruths.size()>=2?std::min<std::size_t>(3,groundTruths.size()/2):0;
+    std::vector<GroundTruth> gp5SelectionTruths(groundTruths.begin(),groundTruths.begin()+static_cast<std::ptrdiff_t>(gp5SelectionCount));
+    std::vector<GroundTruth> gp5BenchmarkTruths(groundTruths.begin()+static_cast<std::ptrdiff_t>(gp5SelectionCount),groundTruths.end());
+    auto pureBenchmarkLossFor=[&](const Model& candidate,double candidateRate)->double{
+        if(gp5BenchmarkTruths.empty())return -1.0;
+        double sum=0.0;std::size_t n=0;
+        for(const auto& gt:gp5BenchmarkTruths){
             auto candInput=resampleR8Brain24(gt.clip44100,44100.0,candidateRate);
             std::vector<float> rendered;renderModel(candidate,candInput,rendered,true);
             auto candTarget=resampleR8Brain24(gt.target,gt.rate,candidateRate);
@@ -2303,10 +2324,13 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
         // as a seed -- see gp5_optimizer.hpp). Purely comparative for now:
         // not chosen as qr.conversion.gp5gp50Compact regardless of loss.
         report(status,L"Quality experiment ["+sub.label+L"]: fitting GP-5/GP-50 pure candidate (no GP-200 dependency)...");
-        const auto pureFit=ntc::gp5::fitPureFromRender(input,target,sr,status);
+        std::vector<ntc::gp5::SelectionClip> gp5SelectionClips;
+        gp5SelectionClips.reserve(gp5SelectionTruths.size());
+        for(const auto& gt:gp5SelectionTruths) gp5SelectionClips.push_back({gt.input,gt.target});
+        const auto pureFit=ntc::gp5::fitPureFromRender(input,target,sr,gp5SelectionClips,status);
         if(pureFit.ok){
             qr.gp5PureLoss=evaluateModelLoss(pureFit.model,input,target,sr);
-            qr.gp5PureHeldOutLoss=heldOutLossFor(pureFit.model,sr);
+            qr.gp5PureHeldOutLoss=pureBenchmarkLossFor(pureFit.model,sr);
             qr.gp5PureCompact=uniqueOutput(variantDir,inputNam.stem().wstring(),L"_NATIVE_GP5GP50_PURE_512.clo");
             serializeGp5Compact(qr.gp5PureCompact,pureFit.model,sr,error);
         }else{

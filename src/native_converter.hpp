@@ -144,11 +144,15 @@ struct QualityExperimentResult {
     //
     // See gp5_optimizer.hpp's fitPureFromRender doc comment and
     // test_assets/quality_results/*_PureCandidate/ for the full measured
-    // history. Current state: when its P/K search keeps an improvement,
-    // gp5PureLoss (in-sample) improves but gp5PureHeldOutLoss (real playing
-    // content) gets WORSE on every case tested so far -- overfitting to the
-    // synthetic conversion stimulus. Do not treat a lower gp5PureLoss as a
-    // quality win by itself; check gp5PureHeldOutLoss too.
+    // history. gp5PureHeldOutLoss is now scored against a benchmark subset
+    // of validationClips disjoint from whatever subset gated the P/K
+    // search's round-acceptance (see runQualityExperiments's
+    // gp5SelectionTruths/gp5BenchmarkTruths split) -- fixed the earlier
+    // overfitting, but as of the fix landing, the search has not yet found
+    // a single improvement that survives that gate: gp5PureLoss stays
+    // identical to the pre-search baseline on every case tested. Not a bug;
+    // just means P/K search isn't a productive lever with the current small
+    // real-playing validation corpus.
     fs::path gp5PureCompact;
     double gp5PureLoss = -1.0;
     double gp5PureHeldOutLoss = -1.0;
