@@ -257,4 +257,27 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                                                             const fs::path& toneMatchReferenceWav = {},
                                                             const StatusCallback& status = {});
 
+// Roadmap item 7 (measurement phase): one dry-clip level's worth of the
+// level-response table -- how a fixed input gain scale renders through
+// Full A2 (ground truth) vs. the actual shipped GP-5/GP-50 CLO.
+struct LevelResponsePoint {
+    double levelDb = 0.0;           // requested gain scale applied to the dry clip
+    double inputRmsDb = 0.0;        // measured actual dry RMS after scaling
+    double fullA2OutputRmsDb = 0.0;
+    double gp5OutputRmsDb = 0.0;
+    double waveformErrorEsr = 0.0;  // error-to-signal ratio between the two outputs at this level
+};
+
+// Renders diClipWav at several gain levels ({-24,-18,-12,-6,0,+6} dB) through
+// both Full A2 and inputNam's actual shipped GP-5/GP-50 conversion
+// (convertNamToClo with default/production settings, Tone Match enabled --
+// this measures the real output users get, not a synthetic candidate), to
+// check whether the shipped conversion tracks a player's dynamic range
+// consistently. See CLAUDE.md's dynamic-range section for what was found.
+bool measureLevelResponse(const fs::path& inputNam,
+                          const fs::path& diClipWav,
+                          std::vector<LevelResponsePoint>& outPoints,
+                          std::string& error,
+                          const StatusCallback& status = {});
+
 } // namespace ntc

@@ -2554,4 +2554,93 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
     return results;
 }
 
+namespace {
+// Same simple metric clo_refiner.cpp's Post search uses internally for its
+// own candidate comparisons (duplicated here for the same reason Model/PK
+// already are between the two files -- see native_converter_internal.hpp's
+// header comment). Not a replacement for evaluateModelLoss anywhere else;
+// used only because it's simpler/more interpretable for a level-tracking
+// check than the frequency-domain ratio loss.
+double levelResponseEsr(const std::vector<float>& rendered,const std::vector<float>& target){
+    const std::size_t n=std::min(rendered.size(),target.size());
+    if(n==0)return 0.0;
+    double num=0.0,den=0.0;
+    for(std::size_t i=0;i<n;++i){
+        const double d=static_cast<double>(rendered[i])-static_cast<double>(target[i]);
+        num+=d*d;den+=static_cast<double>(target[i])*static_cast<double>(target[i]);
+    }
+    return den>1e-30?num/den:0.0;
+}
+double rmsDb(const std::vector<float>& x){
+    if(x.empty())return -std::numeric_limits<double>::infinity();
+    double sum=0.0;for(float v:x)sum+=static_cast<double>(v)*static_cast<double>(v);
+    const double rms=std::sqrt(sum/static_cast<double>(x.size()));
+    return rms>1e-30?20.0*std::log10(rms):-std::numeric_limits<double>::infinity();
+}
+}
+
+// Roadmap item 7 (measurement phase): renders the same dry clip at several
+// gain levels through both Full A2 (ground truth) and the actual shipped
+// GP-5/GP-50 CLO (convertNamToClo's real production output, not a
+// synthetic candidate), to check whether the shipped conversion tracks a
+// player's dynamic range correctly -- a roughly constant RMS gap and low
+// ESR across levels means it does; a gap that widens or an ESR that grows
+// at particular levels means it doesn't. Measurement only -- see
+// CLAUDE.md's dynamic-range section for what was actually found and
+// whether it's worth a follow-up optimization step.
+bool measureLevelResponse(const fs::path& inputNam,const fs::path& diClipWav,
+                          std::vector<LevelResponsePoint>& outPoints,
+                          std::string& error,const StatusCallback& status){
+    outPoints.clear();
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_level_response_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Level response: converting "+inputNam.filename().wstring()+L" (production settings)...");
+    NativeConverterConfig converter;
+    CloRefineConfig refine;refine.enabled=true;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+
+    static constexpr double kLevelsDb[]={-24.0,-18.0,-12.0,-6.0,0.0,6.0};
+    for(double levelDb:kLevelsDb){
+        report(status,L"Level response: rendering at "+std::to_wstring(levelDb)+L" dB...");
+        const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
+        std::vector<float> scaled(dry.size());
+        for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
+
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+        if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+            report(status,L"Level response: skipped "+std::to_wstring(levelDb)+L" dB (Full A2 render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+        std::vector<float> gp5Output;
+        if(!renderCloOnSignal(conversion.gp5gp50Compact,scaled,gp5Output,stepError)){
+            report(status,L"Level response: skipped "+std::to_wstring(levelDb)+L" dB (GP-5/GP-50 render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+
+        LevelResponsePoint p;
+        p.levelDb=levelDb;
+        p.inputRmsDb=rmsDb(scaled);
+        p.fullA2OutputRmsDb=rmsDb(fullA2Output);
+        p.gp5OutputRmsDb=rmsDb(gp5Output);
+        p.waveformErrorEsr=levelResponseEsr(gp5Output,fullA2Output);
+        outPoints.push_back(p);
+    }
+
+    fs::remove_all(work,ec);
+    return !outPoints.empty();
+}
+
 } // namespace ntc

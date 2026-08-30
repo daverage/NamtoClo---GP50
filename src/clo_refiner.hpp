@@ -153,4 +153,15 @@ PostSearchResult searchPostAndSolveB(const fs::path& sourceClo,
                                       std::string& error,
                                       const RefineStatusCallback& status = {});
 
+// Parses sourceClo and renders inputSignal44100 through it end-to-end
+// (Pre -> A -> P/K shaper -> Post -> B), at unity gain (no CloPlayer
+// Gain/Volume wrapper -- same convention as solveBlockBLeastSquares, for
+// the same reason: this is meant to reflect the actual device signal path,
+// not the CloPlayer analysis convention computeToneMatchCorrectionIr uses).
+// Diagnostic utility, not part of any conversion or refinement path.
+bool renderCloOnSignal(const fs::path& sourceClo,
+                        const std::vector<float>& inputSignal44100,
+                        std::vector<float>& outputSignal44100,
+                        std::string& error);
+
 } // namespace ntc

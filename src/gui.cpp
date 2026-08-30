@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <cwctype>
 #include <iostream>
 #include <memory>
@@ -1575,6 +1576,49 @@ bool runHeadlessConvertIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+
+// Headless entry point: NamToClo.exe --level-response <nam> <diClip.wav> <outputCsv>
+// Renders diClipWav at several gain levels through both Full A2 and inputNam's actual
+// shipped GP-5/GP-50 conversion (production settings, Tone Match enabled), to check
+// whether the shipped conversion tracks a player's dynamic range consistently --
+// roadmap item 7's measurement phase. See ntc::measureLevelResponse's doc comment.
+bool runHeadlessLevelResponseIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 5 && std::wstring(argv[1]) == L"--level-response") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path diClipWav = argv[3];
+        const fs::path outputCsv = argv[4];
+        std::wcout << L"Level response: " << inputNam.wstring() << L" x " << diClipWav.wstring() << L"\n";
+        std::vector<ntc::LevelResponsePoint> points;
+        std::string error;
+        if (ntc::measureLevelResponse(inputNam, diClipWav, points, error,
+                                       [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"level_db,input_rms_db,full_a2_output_rms_db,gp5_output_rms_db,waveform_error_esr\n";
+            std::wcout << L"\nlevel_db  input_rms_db  full_a2_rms_db  gp5_rms_db  esr\n";
+            for (const auto& p : points) {
+                csv << p.levelDb << L"," << p.inputRmsDb << L"," << p.fullA2OutputRmsDb << L","
+                    << p.gp5OutputRmsDb << L"," << p.waveformErrorEsr << L"\n";
+                std::wcout << p.levelDb << L"\t" << p.inputRmsDb << L"\t" << p.fullA2OutputRmsDb << L"\t"
+                           << p.gp5OutputRmsDb << L"\t" << p.waveformErrorEsr << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -1585,6 +1629,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessConvertIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessLevelResponseIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.

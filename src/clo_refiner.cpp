@@ -564,4 +564,24 @@ PostSearchResult searchPostAndSolveB(const fs::path& sourceClo,
     return r;
 }
 
+bool renderCloOnSignal(const fs::path& sourceClo,
+                        const std::vector<float>& inputSignal44100,
+                        std::vector<float>& outputSignal44100,
+                        std::string& error) {
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return false;
+
+    Model m;
+    if (!parseModel(bytes, m, error)) return false;
+
+    // Unity gain: reflects the actual device signal path, not the CloPlayer
+    // Gain/Volume analysis wrapper computeToneMatchCorrectionIr uses -- same
+    // convention as solveBlockBLeastSquares, for the same reason.
+    auto aout = precomputeA(m, inputSignal44100, inputSignal44100.size(), 1.0f);
+    std::vector<float> preB;
+    renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, preB);
+    renderWithB(preB, m.B, outputSignal44100, 1.0f);
+    return true;
+}
+
 } // namespace ntc
