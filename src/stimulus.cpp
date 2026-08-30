@@ -299,29 +299,42 @@ bool readAdaptedAudio(const fs::path& path,
         mono[frame] = sum / source.channels;
     }
 
-    // User-provided audio is always adapted to the exact requested duration
-    // at 44.1 kHz. Longer files are trimmed; shorter files are zero-padded.
+    // Trim leading/trailing silence so a short clip's analysis window isn't wasted on
+    // dead air, and so a long clip's first 20 s doesn't start with lead-in silence.
+    // Threshold is deliberately loose (~-40 dBFS) -- this is trimming true silence
+    // (recording lead-in/lead-out), not attempting to detect quiet playing.
+    std::size_t trimBegin = 0, trimEnd = mono.size();
+    {
+        constexpr double kSilenceThreshold = 0.01;
+        while (trimBegin < trimEnd && std::fabs(mono[trimBegin]) < kSilenceThreshold) ++trimBegin;
+        while (trimEnd > trimBegin && std::fabs(mono[trimEnd - 1]) < kSilenceThreshold) --trimEnd;
+        if (trimBegin >= trimEnd) { trimBegin = 0; trimEnd = mono.size(); } // fully silent source: leave unchanged
+    }
+    const std::size_t trimmedLen = trimEnd - trimBegin;
+
+    // User-provided audio is always adapted to the exact requested duration at
+    // 44.1 kHz, working from the trimmed (silence-removed) content. Longer content
+    // is trimmed to length; shorter content loops to fill the duration instead of
+    // being zero-padded, so the full analysis window carries real signal.
     wav.samples.assign(static_cast<std::size_t>(targetFrames), static_cast<std::int16_t>(0));
+    if (trimmedLen == 0) return true; // fully silent source WAV
 
     if (source.sampleRate == kExpectedSampleRate) {
-        const std::size_t framesToCopy = std::min(wav.samples.size(), mono.size());
-        for (std::size_t i = 0; i < framesToCopy; ++i) {
-            wav.samples[i] = floatToPcm16(mono[i]);
+        for (std::size_t i = 0; i < wav.samples.size(); ++i) {
+            wav.samples[i] = floatToPcm16(mono[trimBegin + (i % trimmedLen)]);
         }
         return true;
     }
 
-    // Linear interpolation adapts user-provided audio to 44.1 kHz. Samples
-    // beyond the end of a short file remain zero; samples beyond the target
-    // duration of a long file are ignored.
+    // Linear interpolation adapts user-provided audio to 44.1 kHz, wrapping the
+    // source position within the trimmed region so short clips loop rather than
+    // trailing off into silence.
     const double ratio = static_cast<double>(source.sampleRate) / kExpectedSampleRate;
     for (std::size_t i = 0; i < wav.samples.size(); ++i) {
-        const double sourcePosition = static_cast<double>(i) * ratio;
-        if (sourcePosition >= static_cast<double>(mono.size())) break;
-
-        const std::size_t i0 = static_cast<std::size_t>(sourcePosition);
-        const std::size_t i1 = std::min(i0 + 1, mono.size() - 1);
-        const double fraction = sourcePosition - static_cast<double>(i0);
+        const double wrapped = std::fmod(static_cast<double>(i) * ratio, static_cast<double>(trimmedLen));
+        const std::size_t i0 = trimBegin + static_cast<std::size_t>(wrapped);
+        const std::size_t i1 = trimBegin + ((static_cast<std::size_t>(wrapped) + 1) % trimmedLen);
+        const double fraction = wrapped - std::floor(wrapped);
         const double sample = mono[i0] + (mono[i1] - mono[i0]) * fraction;
         wav.samples[i] = floatToPcm16(sample);
     }
