@@ -361,4 +361,78 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     return true;
 }
 
+bool solveBlockBLeastSquares(const fs::path& sourceClo,
+                              const fs::path& stimulusWav,
+                              const fs::path& targetWav,
+                              std::vector<float>& outB,
+                              std::string& error,
+                              const RefineStatusCallback& status) {
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return false;
+
+    Model m;
+    if (!parseModel(bytes, m, error)) return false;
+    const std::size_t bTaps = m.B.size();
+    if (bTaps == 0) { error = "Source CLO has an empty Block B."; return false; }
+
+    std::vector<float> in, target;
+    if (!readMono44100(stimulusWav, in, error) || !readMono44100(targetWav, target, error)) return false;
+
+    const std::size_t tailFrames = 20u * kSampleRate;
+    if (in.size() < tailFrames + kV26Fft) {
+        error = "The conversion stimulus is too short for the final-20-s analysis window";
+        return false;
+    }
+    if (target.size() < tailFrames) {
+        error = "The refinement target WAV must contain at least 20.000 seconds of audio";
+        return false;
+    }
+
+    // Unity gain: see the doc comment in clo_refiner.hpp for why this
+    // doesn't reuse computeToneMatchCorrectionIr's CloPlayer Gain/Volume
+    // wrapper -- the least-squares solve below picks its own optimal
+    // absolute gain, and there's no downstream RMS renormalization step
+    // (unlike applyCorrectiveIrToB44) to correct for an artificial mismatch.
+    if (status) status(L"Rendering CLO pre-B signal for direct Block B solve...");
+    auto aout = precomputeA(m, in, in.size(), 1.0f);
+    std::vector<float> preB;
+    renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, preB);
+
+    const std::size_t sourceStart = preB.size() - tailFrames;
+    const std::size_t targetStart = target.size() - tailFrames;
+    std::vector<float> preBTail(preB.begin() + static_cast<std::ptrdiff_t>(sourceStart), preB.end());
+    std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
+
+    // Regularized (Tikhonov/Wiener-style) frequency-domain deconvolution:
+    // solve for the causal FIR B minimizing ||conv(preBTail, B) - targetTail||^2.
+    // Zero-pad by bTaps beyond the analysis window so the causal front of the
+    // resulting impulse response isn't corrupted by circular wraparound.
+    if (status) status(L"Solving Block B directly against the residual (least squares)...");
+    const std::size_t fftSize = nextPow2(tailFrames + bTaps);
+    std::vector<std::complex<float>> P(fftSize), T(fftSize);
+    for (std::size_t i = 0; i < tailFrames; ++i) {
+        P[i] = std::complex<float>(preBTail[i], 0.0f);
+        T[i] = std::complex<float>(targetTail[i], 0.0f);
+    }
+    fft(P, false);
+    fft(T, false);
+
+    double powerSum = 0.0;
+    for (const auto& v : P) powerSum += static_cast<double>(std::norm(v));
+    const float meanPower = static_cast<float>(powerSum / static_cast<double>(fftSize));
+    constexpr float kRegularization = 1e-3f; // fraction of mean |P(f)|^2; the one tunable knob here
+    const float eps = std::max(kRegularization * meanPower, 1e-20f);
+
+    std::vector<std::complex<float>> H(fftSize);
+    for (std::size_t k = 0; k < fftSize; ++k) {
+        const float power = std::norm(P[k]);
+        H[k] = std::conj(P[k]) * T[k] / (power + eps);
+    }
+    fft(H, true);
+
+    outB.assign(bTaps, 0.0f);
+    for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
+    return true;
+}
+
 } // namespace ntc

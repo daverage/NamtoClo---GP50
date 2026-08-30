@@ -2318,22 +2318,36 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                 if(writeMonoFloat32Wav(targetWav,toneTarget44100,44100,tmError)){
                     const fs::path gp5PreToneMatchClo=work/(L"gp5_512_pre_tonematch_"+sub.label+L".clo");
                     if(serializeGp5Compact(gp5PreToneMatchClo,gp5Chosen,sr,tmError)){
+                        auto build44=[&](const Model& src)->Model{
+                            Model out;out.pre=src.pre;out.post=src.post;out.pk=src.pk;
+                            out.A=resampleFirOfficial(src.A,sr,128);
+                            auto bScaled=src.B;for(auto&v:bScaled)v*=4.0f;
+                            out.B=resampleFirOfficial(bScaled,sr,512);
+                            return out;
+                        };
+                        const Model preModel44=build44(gp5Chosen);
+                        qr.gp5ChosenDeviceHeldOutLoss=heldOutLossFor(preModel44,44100.0);
+
                         std::vector<float> gp5ToneMatchIr;
                         if(computeToneMatchCorrectionIr(gp5PreToneMatchClo,tmStimulusPath,targetWav,gp5ToneMatchIr,tmError,status)){
-                            auto build44=[&](const Model& src)->Model{
-                                Model out;out.pre=src.pre;out.post=src.post;out.pk=src.pk;
-                                out.A=resampleFirOfficial(src.A,sr,128);
-                                auto bScaled=src.B;for(auto&v:bScaled)v*=4.0f;
-                                out.B=resampleFirOfficial(bScaled,sr,512);
-                                return out;
-                            };
-                            Model preModel44=build44(gp5Chosen);
                             Model postModel44=preModel44;
                             std::string applyError;
                             if(!gp5ToneMatchIr.empty()&&applyCorrectiveIrToB44(postModel44.B,gp5ToneMatchIr,0.0,applyError)){
-                                qr.gp5ChosenDeviceHeldOutLoss=heldOutLossFor(preModel44,44100.0);
                                 qr.gp5PostToneMatchHeldOutLoss=heldOutLossFor(postModel44,44100.0);
                             }
+                        }
+
+                        // Alternative candidate: solve Block B directly against the same
+                        // Tone Match target instead of convolving+truncating a correction
+                        // filter sized for a different tap budget. Independent of whether
+                        // the correction-IR candidate above succeeded.
+                        std::vector<float> directB;
+                        std::string solveError;
+                        if(solveBlockBLeastSquares(gp5PreToneMatchClo,tmStimulusPath,targetWav,directB,solveError,status)){
+                            Model directModel44=preModel44;directModel44.B=directB;
+                            qr.gp5DirectBSolveHeldOutLoss=heldOutLossFor(directModel44,44100.0);
+                        }else{
+                            report(status,L"Quality experiment ["+sub.label+L"]: GP-5/GP-50 direct B solve skipped: "+std::wstring(solveError.begin(),solveError.end()));
                         }
                     }
                 }
@@ -2348,9 +2362,10 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                 os<<L" | held-out: truncated="<<qr.gp5TruncatedHeldOutLoss<<L", direct-fit="<<qr.gp5DirectFitHeldOutLoss;
             if(qr.gp5PureHeldOutLoss>=0.0)
                 os<<L", pure="<<qr.gp5PureHeldOutLoss;
-            if(qr.gp5PostToneMatchHeldOutLoss>=0.0)
+            if(qr.gp5PostToneMatchHeldOutLoss>=0.0||qr.gp5DirectBSolveHeldOutLoss>=0.0)
                 os<<L" | GP-5/GP-50 Tone Match held-out: before="<<qr.gp5ChosenDeviceHeldOutLoss
-                  <<L", after="<<qr.gp5PostToneMatchHeldOutLoss;
+                  <<L", after (correction-IR)="<<qr.gp5PostToneMatchHeldOutLoss
+                  <<L", after (direct B solve)="<<qr.gp5DirectBSolveHeldOutLoss;
             os<<L" (lower is better).";report(status,os.str());}
         results.push_back(std::move(qr));
     }
@@ -2362,6 +2377,7 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
              "gp5_truncated_512_held_out_loss,gp5_direct_fit_512_held_out_loss,"
              "gp5_pure_512_loss,gp5_pure_512_held_out_loss,"
              "gp5_chosen_strategy,gp5_chosen_device_held_out_loss,gp5_post_tonematch_held_out_loss,"
+             "gp5_direct_b_solve_held_out_loss,"
              "pk_pp,pk_pn,pk_kp,pk_kn,"
              "gp200_output,gp5gp50_output,gp5gp50_pure_output\n";
         for(const auto&r:results){
@@ -2371,6 +2387,7 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                <<r.gp5TruncatedHeldOutLoss<<","<<r.gp5DirectFitHeldOutLoss<<","
                <<r.gp5PureLoss<<","<<r.gp5PureHeldOutLoss<<","
                <<strategy<<","<<r.gp5ChosenDeviceHeldOutLoss<<","<<r.gp5PostToneMatchHeldOutLoss<<","
+               <<r.gp5DirectBSolveHeldOutLoss<<","
                <<r.pkPp<<","<<r.pkPn<<","<<r.pkKp<<","<<r.pkKn<<","
                <<pathToUtf8(r.conversion.gp2001024)<<","<<pathToUtf8(r.conversion.gp5gp50Compact)<<","<<pathToUtf8(r.gp5PureCompact)<<"\n";
         }

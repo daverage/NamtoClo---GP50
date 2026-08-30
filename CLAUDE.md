@@ -78,6 +78,16 @@ Magic `VTSI`/`HTSI`, FIR A = 128 taps, FIR B = first 512 taps of a larger CLO's 
 
 Do not wire this candidate into `convertNamToClo`, and do not treat "the P/K search accepted an improvement" as evidence of a quality win, until the search (or at least its round-acceptance check) is scored against held-out clips too — `fitPureFromRender` does not currently take any validation clips as input, so this needs an API change, not just a threshold tweak. See `gp5_optimizer.hpp`'s `fitPureFromRender` doc comment for the full detail.
 
+### GP-5/GP-50 direct Block B least-squares solve — a real, verified win, but still not wired into production
+
+`clo_refiner.cpp`'s `solveBlockBLeastSquares()` (declared in `clo_refiner.hpp`) replaces the "compute a 2048-sample correction filter, convolve it into B, implicitly truncate everything past tap 512" approach (`computeToneMatchCorrectionIr()` + `applyCorrectiveIrToB44()`) with a direct regularized frequency-domain least-squares solve for the 512 B coefficients themselves, against the same Tone Match target and tail-analysis window. Pre/A128/P-K/Post stay frozen — only B changes.
+
+**Measured (2026-08-30)**, via `runQualityExperiments`'s held-out scoring (`gp5DirectBSolveHeldOutLoss` vs. `gp5PostToneMatchHeldOutLoss` and the pre-Tone-Match `gp5ChosenDeviceHeldOutLoss` baseline, see `test_assets/quality_results/*_PureCandidate/quality_experiment_results_b_solve_*.csv`): tested on a clean and an extreme-high-gain NAM, both submodels, and both the default synthetic stimulus and a real recorded clip as the Tone Match reference (8 combinations, held-out set always excluding whatever clip was used as the reference). **Every combination showed a large held-out win**: 54-87% loss reduction vs. the pre-Tone-Match baseline, and 60-87% vs. the existing correction-IR approach — which itself sometimes made held-out loss *worse* than doing nothing at all (e.g. clean Fender Full, default stimulus: baseline 1.637, correction-IR 1.769, direct solve 0.582).
+
+Unlike the P/K search above, **this is not overfitting** — the win holds up on held-out real playing content with a properly excluded validation set, not just on the training window. This is currently the strongest verified quality lever found this session.
+
+Still only computed for comparison in `runQualityExperiments`, not wired into `convertNamToClo`'s shipped output. The next decision is whether/how to add it as a third candidate in `convertNamToClo`'s existing GP-5/GP-50 Tone Match gate (`native_converter.cpp` ~L2082-2127, which already picks the better of "no correction" vs. "correction-IR" by comparing `lossPre`/`lossPost`) — that's a production change and hasn't been made yet.
+
 ## Licensing / attribution notes
 
 This is an independent research/reimplementation project, not affiliated with or endorsed by Valeton or Hotone. `THIRD_PARTY.md` tracks the three fetched dependencies (all MIT-licensed) and `CMakeLists.txt` installs their upstream LICENSE files alongside the built exe — if you change how a dependency is fetched or vendored, keep that install step in sync.

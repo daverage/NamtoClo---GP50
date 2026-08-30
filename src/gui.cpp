@@ -1519,9 +1519,11 @@ bool runHeadlessQualityExperimentIfRequested(int& exitCode) {
             if (r.gp5PureHeldOutLoss >= 0.0) {
                 std::wcout << L", pure=" << r.gp5PureHeldOutLoss;
             }
-            if (r.gp5PostToneMatchHeldOutLoss >= 0.0) {
+            if (r.gp5PostToneMatchHeldOutLoss >= 0.0 || r.gp5DirectBSolveHeldOutLoss >= 0.0) {
                 std::wcout << L" | Tone Match (" << r.gp5ChosenStrategy << L") held-out: before="
-                           << r.gp5ChosenDeviceHeldOutLoss << L", after=" << r.gp5PostToneMatchHeldOutLoss;
+                           << r.gp5ChosenDeviceHeldOutLoss
+                           << L", after (correction-IR)=" << r.gp5PostToneMatchHeldOutLoss
+                           << L", after (direct B solve)=" << r.gp5DirectBSolveHeldOutLoss;
             }
             std::wcout << L"\n";
         }

@@ -121,6 +121,21 @@ struct QualityExperimentResult {
     double gp5ChosenDeviceHeldOutLoss = -1.0;
     double gp5PostToneMatchHeldOutLoss = -1.0;
 
+    // Alternative to gp5PostToneMatchHeldOutLoss: instead of computing a
+    // correction filter sized for a different tap budget and
+    // convolving+truncating it into B (the gp5PostToneMatchHeldOutLoss
+    // approach), solve directly for the 512 B coefficients that minimize the
+    // residual against the same Tone Match target (see
+    // ntc::solveBlockBLeastSquares, clo_refiner.hpp). Scored the same way,
+    // against the same held-out validationClips, so directly comparable to
+    // gp5ChosenDeviceHeldOutLoss (before) and gp5PostToneMatchHeldOutLoss
+    // (the existing correction-IR approach). -1 when not computed.
+    //
+    // Measured a large, consistent held-out win over both -- see
+    // solveBlockBLeastSquares's doc comment (clo_refiner.hpp) for the full
+    // numbers. Not yet wired into convertNamToClo's production output.
+    double gp5DirectBSolveHeldOutLoss = -1.0;
+
     // "Pure" candidate: a GP-5/GP-50 model fit directly at the device tap
     // budget from a neutral seed, including a bounded local P/K search (see
     // gp5_optimizer.hpp), with no dependency on the GP-200 2048-tap fit at
