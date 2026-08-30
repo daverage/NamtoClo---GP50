@@ -121,6 +121,31 @@ struct QualityExperimentResult {
     double gp5ChosenDeviceHeldOutLoss = -1.0;
     double gp5PostToneMatchHeldOutLoss = -1.0;
 
+    // Roadmap item 5: the SAME gp5Chosen model (A/B/P-K/pre/post, same B*4.0
+    // scaling gp5ChosenDeviceHeldOutLoss's build44 applies before
+    // resampling), rendered at its native trainer rate (exercising the
+    // real, unresampled A/B coefficients) with only the rendered OUTPUT
+    // resampled to the common 44.1kHz comparison rate before scoring --
+    // see runQualityExperiments's heldOutLossAtCommonRateFor. Compare
+    // directly against gp5ChosenDeviceHeldOutLoss (same held-out clips,
+    // same model, same scoring rate, only the render rate differs) to
+    // isolate how much quality the trainer-rate -> 44.1kHz resample step
+    // itself costs, independent of fitting quality -- gates roadmap item 6
+    // (rearchitect the optimizer to work natively at 44.1kHz), which should
+    // only be pursued if this gap is actually meaningful.
+    //
+    // A naive same-rate comparison (heldOutLossFor(candidate, candidate's
+    // own native rate) at each rate, no common-rate resampling of the
+    // output) was tried first and found NOT valid: it scored the
+    // trainer-rate domain consistently *worse* than the 44.1kHz domain on
+    // every NAM tested, which isn't physically plausible for a resampling
+    // step (resampling can't make a model more accurate) -- ratioSpectrumF/
+    // lossFromRatioF isn't comparable across different native rates
+    // (different FFT bin count/frequency resolution), so that version's
+    // numbers were an artifact of the metric, not a real quality
+    // difference. -1 when not computed.
+    double gp5ChosenTrainerDomainHeldOutLoss = -1.0;
+
     // Alternative to gp5PostToneMatchHeldOutLoss: instead of computing a
     // correction filter sized for a different tap budget and
     // convolving+truncating it into B (the gp5PostToneMatchHeldOutLoss

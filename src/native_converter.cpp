@@ -2271,6 +2271,33 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
         return n?sum/static_cast<double>(n):-1.0;
     };
 
+    // Roadmap item 5: renders candidate at its OWN native rate (renderRate --
+    // exercises its actual, unresampled A/B coefficients, unlike heldOutLossFor
+    // above which always resamples the INPUT to whatever rate the candidate is
+    // already expressed in) and only resamples the rendered OUTPUT to commonRate
+    // before scoring against a target also resampled to commonRate. This makes
+    // ratioSpectrumF/lossFromRatioF operate at the same rate (hence the same FFT
+    // bin count/frequency resolution) in both comparisons, unlike naively calling
+    // heldOutLossFor(candidate, candidate's own native rate) directly, whose loss
+    // number turned out not to be comparable across different native rates --
+    // trainer-rate-domain scored consistently *worse* than the 44.1kHz storage
+    // domain regardless of which NAM was tested, which is not physically
+    // plausible for a resampling step and pointed at a metric-scale artifact
+    // instead of a real quality difference.
+    auto heldOutLossAtCommonRateFor=[&](const Model& candidate,double renderRate,double commonRate)->double{
+        if(groundTruths.empty())return -1.0;
+        double sum=0.0;std::size_t n=0;
+        for(const auto& gt:groundTruths){
+            auto candInput=resampleR8Brain24(gt.clip44100,44100.0,renderRate);
+            std::vector<float> renderedAtNative;renderModel(candidate,candInput,renderedAtNative,true);
+            auto renderedAtCommon=resampleR8Brain24(renderedAtNative,renderRate,commonRate);
+            auto candTarget=resampleR8Brain24(gt.target,gt.rate,commonRate);
+            const auto residual=ratioSpectrumF(renderedAtCommon,candTarget,commonRate);
+            sum+=static_cast<double>(lossFromRatioF(residual,commonRate));++n;
+        }
+        return n?sum/static_cast<double>(n):-1.0;
+    };
+
     // Three-way split for the pure candidate's P/K search (see gp5_optimizer.hpp):
     // "selection" clips are threaded into fitPureFromRender so its round-acceptance
     // check has real signal to gate on that isn't the training stimulus; "benchmark"
@@ -2405,6 +2432,18 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                         const Model preModel44=build44(gp5Chosen);
                         qr.gp5ChosenDeviceHeldOutLoss=heldOutLossFor(preModel44,44100.0);
 
+                        // Roadmap item 5: isolate the trainer-rate -> 44.1kHz storage-domain
+                        // resampling penalty. Same underlying model (A/B/PK/pre/post), same
+                        // *4.0 B scaling build44 applies before resampling, rendered at its
+                        // native trainer rate (exercising the real, unresampled A/B
+                        // coefficients) with only the OUTPUT audio resampled to 44.1kHz for a
+                        // fair comparison against gp5ChosenDeviceHeldOutLoss (see
+                        // heldOutLossAtCommonRateFor's doc comment for why a naive
+                        // heldOutLossFor(candidate, sr) call isn't valid here -- its loss
+                        // number isn't comparable across different native rates).
+                        Model gp5ChosenScaled=gp5Chosen;for(auto&v:gp5ChosenScaled.B)v*=4.0f;
+                        qr.gp5ChosenTrainerDomainHeldOutLoss=heldOutLossAtCommonRateFor(gp5ChosenScaled,sr,44100.0);
+
                         std::vector<float> gp5ToneMatchIr;
                         if(computeToneMatchCorrectionIr(gp5PreToneMatchClo,tmStimulusPath,targetWav,gp5ToneMatchIr,tmError,status)){
                             Model postModel44=preModel44;
@@ -2479,6 +2518,9 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                   <<L", after (direct B solve)="<<qr.gp5DirectBSolveHeldOutLoss;
             if(qr.gp5PostSearchHeldOutLoss>=0.0)
                 os<<L", after (post search, freqScale="<<qr.gp5PostSearchFreqScale<<L")="<<qr.gp5PostSearchHeldOutLoss;
+            if(qr.gp5ChosenTrainerDomainHeldOutLoss>=0.0)
+                os<<L" | trainer-rate domain="<<qr.gp5ChosenTrainerDomainHeldOutLoss
+                  <<L" vs. 44.1kHz storage domain="<<qr.gp5ChosenDeviceHeldOutLoss;
             os<<L" (lower is better).";report(status,os.str());}
         results.push_back(std::move(qr));
     }
@@ -2489,7 +2531,8 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
         csv<<"submodel,gp200_fit_loss_2048,gp5_truncated_512_loss,gp5_direct_fit_512_loss,"
              "gp5_truncated_512_held_out_loss,gp5_direct_fit_512_held_out_loss,"
              "gp5_pure_512_loss,gp5_pure_512_held_out_loss,"
-             "gp5_chosen_strategy,gp5_chosen_device_held_out_loss,gp5_post_tonematch_held_out_loss,"
+             "gp5_chosen_strategy,gp5_chosen_device_held_out_loss,gp5_chosen_trainer_domain_held_out_loss,"
+             "gp5_post_tonematch_held_out_loss,"
              "gp5_direct_b_solve_held_out_loss,gp5_direct_b_solve_benchmark_held_out_loss,"
              "gp5_post_search_freq_scale,gp5_post_search_held_out_loss,"
              "pk_pp,pk_pn,pk_kp,pk_kn,"
@@ -2500,7 +2543,8 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
             csv<<label<<","<<r.conversion.fitLoss<<","<<r.gp5TruncatedLoss<<","<<r.gp5DirectFitLoss<<","
                <<r.gp5TruncatedHeldOutLoss<<","<<r.gp5DirectFitHeldOutLoss<<","
                <<r.gp5PureLoss<<","<<r.gp5PureHeldOutLoss<<","
-               <<strategy<<","<<r.gp5ChosenDeviceHeldOutLoss<<","<<r.gp5PostToneMatchHeldOutLoss<<","
+               <<strategy<<","<<r.gp5ChosenDeviceHeldOutLoss<<","<<r.gp5ChosenTrainerDomainHeldOutLoss<<","
+               <<r.gp5PostToneMatchHeldOutLoss<<","
                <<r.gp5DirectBSolveHeldOutLoss<<","<<r.gp5DirectBSolveBenchmarkHeldOutLoss<<","
                <<r.gp5PostSearchFreqScale<<","<<r.gp5PostSearchHeldOutLoss<<","
                <<r.pkPp<<","<<r.pkPn<<","<<r.pkKp<<","<<r.pkKn<<","
