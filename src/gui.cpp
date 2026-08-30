@@ -1533,6 +1533,48 @@ bool runHeadlessQualityExperimentIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+
+// Headless entry point: NamToClo.exe --convert <input.nam> <outputDir> [toneMatchReferenceWav]
+// Runs a single conversion through convertNamToClo with Tone Match enabled (Custom
+// reference mode when toneMatchReferenceWav is given, Default -- the standard stimulus
+// tail -- otherwise), printing progress and the result to the console. Unlike
+// --quality-experiment (which has its own separate scoring logic and never calls
+// convertNamToClo), this exercises the exact same production code path the GUI's
+// Convert tab uses -- the only way to test production behavior headlessly.
+bool runHeadlessConvertIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 4 && std::wstring(argv[1]) == L"--convert") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path outputDir = argv[3];
+        ntc::CloRefineConfig refine;
+        refine.enabled = true;
+        if (argc >= 5) {
+            refine.referenceMode = ntc::ToneMatchReferenceMode::Custom;
+            refine.referenceWav = argv[4];
+            std::wcout << L"Tone Match reference WAV: " << refine.referenceWav.wstring() << L"\n";
+        }
+        std::wcout << L"Converting " << inputNam.wstring() << L" -> " << outputDir.wstring() << L"\n";
+        auto r = ntc::convertNamToClo(inputNam, outputDir, ntc::StimulusConfig{}, ntc::CorrectiveIrConfig{}, refine,
+                                       ntc::NativeConverterConfig{}, [](const std::wstring& s) { std::wcout << s << L"\n"; });
+        if (r.ok) {
+            std::wcout << L"\nOK.\nGP-200 output: " << r.gp2001024.wstring() << L"\n";
+            if (!r.gp5gp50Compact.empty()) std::wcout << L"GP-5/GP-50 output: " << r.gp5gp50Compact.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(r.error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -1540,6 +1582,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessQualityExperimentIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessConvertIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.

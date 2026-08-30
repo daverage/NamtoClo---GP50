@@ -1778,7 +1778,8 @@ bool applyCorrectiveIrToB44(std::vector<float>& b44,const std::vector<float>& co
 
 bool serializeGp5Compact(const fs::path&path,const Model&m,double trainerRate,std::string&error,
                          const std::vector<float>& correctiveIr={},double postCorrectionDb=-6.0,
-                         const std::vector<float>& toneMatchIr={},double toneMatchPostGainDb=0.0){
+                         const std::vector<float>& toneMatchIr={},double toneMatchPostGainDb=0.0,
+                         const std::vector<float>* overrideB44=nullptr){
     constexpr std::size_t kGp5Bytes=0x0A88,kGp5BTaps=512;
     std::vector<std::uint8_t> d(kGp5Bytes,0);
     std::memcpy(d.data(),"VTSI",4);
@@ -1789,10 +1790,20 @@ bool serializeGp5Compact(const fs::path&path,const Model&m,double trainerRate,st
     putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);
     put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,static_cast<std::uint32_t>(kGp5BTaps));
     auto A44=resampleFirOfficial(m.A,trainerRate,128);
-    auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;
-    auto B44=resampleFirOfficial(Bscaled,trainerRate,kGp5BTaps);
-    if(!correctiveIr.empty()&&!applyCorrectiveIrToB44(B44,correctiveIr,postCorrectionDb,error))return false;
-    if(!toneMatchIr.empty()&&!applyCorrectiveIrToB44(B44,toneMatchIr,toneMatchPostGainDb,error))return false;
+    std::vector<float> B44;
+    if(overrideB44){
+        // Already-finished replacement B (e.g. from solveBlockBLeastSquares),
+        // computed against an already-serialized CLO that had correctiveIr
+        // baked in if applicable -- fully replaces what resampling+Corrective
+        // IR+Tone Match would otherwise contribute below, so skip all of it.
+        if(overrideB44->size()!=kGp5BTaps){error="overrideB44 has the wrong tap count.";return false;}
+        B44=*overrideB44;
+    }else{
+        auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;
+        B44=resampleFirOfficial(Bscaled,trainerRate,kGp5BTaps);
+        if(!correctiveIr.empty()&&!applyCorrectiveIrToB44(B44,correctiveIr,postCorrectionDb,error))return false;
+        if(!toneMatchIr.empty()&&!applyCorrectiveIrToB44(B44,toneMatchIr,toneMatchPostGainDb,error))return false;
+    }
     for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);
     for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);
     const auto crc=crc16Modbus(d.data()+0x0C,d.size()-0x0C);
@@ -2081,66 +2092,86 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
     // GP-5/GP-50 device-specific Tone Match: measure and correct the ACTUAL chosen
     // 512-tap model's own response against the same target, instead of reusing the
-    // correction derived from the GP-200 2048-tap model above. Held-out testing across
-    // 5 NAM models showed the reused-correction approximation was inconsistent --
-    // sometimes better, sometimes measurably worse -- so this both derives a correction
-    // specific to the chosen model AND only keeps it if it doesn't worsen the fit.
+    // correction derived from the GP-200 2048-tap model above. Two candidate
+    // corrections are tried -- the correction-IR approach (computeToneMatchCorrectionIr,
+    // sized for a different tap budget and convolved+truncated into B) and a direct
+    // least-squares solve for B itself (solveBlockBLeastSquares, no tap-budget mismatch).
+    // Held-out testing (see CLAUDE.md's "GP-5/GP-50 direct Block B least-squares solve"
+    // section) found the direct solve wins by a wide margin across every case tested,
+    // and the correction-IR approach sometimes measurably worsens the fit -- so this
+    // always compares both against doing nothing and keeps whichever scores lowest.
     std::vector<float> gp5ToneMatchIr;
+    std::vector<float> gp5DirectSolveB44;
+    bool gp5DirectSolveWon=false;
     if(gp5Chosen&&refine.enabled){
         report(status,L"GP-5/GP-50: performing device-specific Tone Match...");
         const fs::path gp5PreToneMatchClo=work/L"gp5_512_pre_tonematch.clo";
         std::string gp5Error;
-        std::vector<float> candidateIr;
         if(!serializeGp5Compact(gp5PreToneMatchClo,*gp5Chosen,sr,gp5Error,correctiveIr,
                                 correction.enabled?correctiveStats.postGainDb:-6.0)){
             report(status,L"GP-5/GP-50 Tone Match skipped: could not prepare analysis CLO ("+std::wstring(gp5Error.begin(),gp5Error.end())+L").");
-        }else if(!computeToneMatchCorrectionIr(gp5PreToneMatchClo,refineStimulusPath,refineTargetWavPath,candidateIr,gp5Error,status)){
-            report(status,L"GP-5/GP-50 Tone Match skipped: "+std::wstring(gp5Error.begin(),gp5Error.end()));
         }else{
             // Rebuild the exact 44.1kHz device-domain Block B that gp5PreToneMatchClo
-            // holds (chosen model + Corrective IR, matching the analysis signal chain),
-            // apply the candidate correction to a copy, and compare loss before/after
-            // against the same Tone Match target -- only keep the correction if it
-            // doesn't measurably worsen the fit.
+            // holds (chosen model + Corrective IR, matching the analysis signal chain).
             auto bScaled=gp5Chosen->B;for(auto&v:bScaled)v*=4.0f;
             auto B44Pre=resampleFirOfficial(bScaled,sr,512);
             std::string applyErr;
             bool preOk=true;
             if(correction.enabled) preOk=applyCorrectiveIrToB44(B44Pre,correctiveIr,correctiveStats.postGainDb,applyErr);
-            auto B44Post=B44Pre;
-            const bool postOk=preOk&&applyCorrectiveIrToB44(B44Post,candidateIr,0.0,applyErr);
 
             std::vector<float> analysisInput,analysisTarget;std::string readErr;
-            if(postOk&&loadClipAsMono44100(refineStimulusPath,analysisInput,readErr)
+            if(preOk&&loadClipAsMono44100(refineStimulusPath,analysisInput,readErr)
                      &&loadClipAsMono44100(refineTargetWavPath,analysisTarget,readErr)){
                 auto A44=resampleFirOfficial(gp5Chosen->A,sr,128);
                 Model preM;preM.pre=gp5Chosen->pre;preM.post=gp5Chosen->post;preM.pk=gp5Chosen->pk;preM.A=A44;preM.B=B44Pre;
-                Model postM=preM;postM.B=B44Post;
-                const double lossPre=evaluateModelLoss(preM,analysisInput,analysisTarget,44100.0);
-                const double lossPost=evaluateModelLoss(postM,analysisInput,analysisTarget,44100.0);
-                std::wostringstream os;os<<L"GP-5/GP-50 Tone Match: loss before="<<lossPre<<L", after="<<lossPost;
-                if(lossPost<=lossPre){os<<L" -- applying.";gp5ToneMatchIr=candidateIr;}
-                else{os<<L" -- not applying (would worsen the fit).";}
+                double bestLoss=evaluateModelLoss(preM,analysisInput,analysisTarget,44100.0);
+                std::wostringstream os;os<<L"GP-5/GP-50 Tone Match: loss before="<<bestLoss;
+
+                std::vector<float> candidateIr;
+                if(computeToneMatchCorrectionIr(gp5PreToneMatchClo,refineStimulusPath,refineTargetWavPath,candidateIr,gp5Error,status)){
+                    Model postM=preM;
+                    if(applyCorrectiveIrToB44(postM.B,candidateIr,0.0,applyErr)){
+                        const double lossPost=evaluateModelLoss(postM,analysisInput,analysisTarget,44100.0);
+                        os<<L", correction-IR="<<lossPost;
+                        if(lossPost<bestLoss){bestLoss=lossPost;gp5ToneMatchIr=candidateIr;gp5DirectSolveWon=false;}
+                    }
+                }
+
+                std::vector<float> directB;std::string solveError;
+                if(solveBlockBLeastSquares(gp5PreToneMatchClo,refineStimulusPath,refineTargetWavPath,directB,solveError,status)){
+                    Model directM=preM;directM.B=directB;
+                    const double lossDirect=evaluateModelLoss(directM,analysisInput,analysisTarget,44100.0);
+                    os<<L", direct B solve="<<lossDirect;
+                    if(lossDirect<bestLoss){bestLoss=lossDirect;gp5ToneMatchIr.clear();gp5DirectSolveB44=directB;gp5DirectSolveWon=true;}
+                }
+
+                if(gp5DirectSolveWon)os<<L" -- using direct B solve.";
+                else if(!gp5ToneMatchIr.empty())os<<L" -- using correction-IR.";
+                else os<<L" -- not applying (baseline wins).";
                 report(status,os.str());
             }
         }
     }
 
     if(gp5Chosen){
-        const bool gp5ToneMatchApplied=!gp5ToneMatchIr.empty();
+        const bool gp5ToneMatchApplied=gp5DirectSolveWon||!gp5ToneMatchIr.empty();
         r.gp5gp50Compact=uniqueOutput(outputDirectory,inputNam.stem().wstring(),
             gp5ToneMatchApplied?L"_NATIVE_GP5GP50_512_TONEMATCH.clo":L"_NATIVE_GP5GP50_512.clo");
-        // Corrective IR still layers onto this Block B as before. Tone Match now uses
-        // the device-specific correction computed above (empty, hence a no-op, when it
-        // wasn't derived or didn't measurably help).
-        if(!serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,
-                                correction.enabled?correctiveStats.postGainDb:-6.0,
-                                gp5ToneMatchIr,0.0)){
+        // Corrective IR still layers onto this Block B as before (unless the direct
+        // solve won, in which case it's already baked in -- see serializeGp5Compact's
+        // overrideB44 handling).
+        const bool serializeOk=gp5DirectSolveWon
+            ?serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,{},0.0,{},0.0,&gp5DirectSolveB44)
+            :serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,
+                                 correction.enabled?correctiveStats.postGainDb:-6.0,
+                                 gp5ToneMatchIr,0.0);
+        if(!serializeOk){
             r.error=error;fs::remove_all(work,ec);return r;
         }
         {std::wostringstream os;os<<L"GP-5/GP-50 CLO written using "<<(gp5UsedDirectFit?L"direct-fit":L"truncated")
             <<(correction.enabled?L", Corrective IR applied":L"")
-            <<(gp5ToneMatchApplied?L", device-specific Tone Match applied":(refine.enabled?L", Tone Match not applied":L""))
+            <<(gp5DirectSolveWon?L", device-specific Tone Match applied (direct B solve)":
+               (!gp5ToneMatchIr.empty()?L", device-specific Tone Match applied (correction-IR)":(refine.enabled?L", Tone Match not applied":L"")))
             <<L".";report(status,os.str());}
     }
 
