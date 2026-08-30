@@ -1998,6 +1998,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     const std::vector<float> toneTarget44100=prepareToneTarget44100(target,sr);
     detrend(target);const auto latency=detectLatency(target,sr);target=alignLeft(target,latency);report(status,L"Detected NAM latency "+std::to_wstring(latency)+L" samples.");
     Model m;m.A.assign(kA,0);m.A[0]=1;m.B.assign(kB,0);m.B[0]=1;m.pk=fitPk(input,target,sr);m.pre=Biquad{};m.post=postForRate(sr);{std::wostringstream os;os<<L"P/K = "<<m.pk.pp<<L" / "<<m.pk.pn<<L" / "<<m.pk.kp<<L" / "<<m.pk.kn;report(status,os.str());}
+    r.pkPp=m.pk.pp;r.pkPn=m.pk.pn;r.pkKp=m.pk.kp;r.pkKn=m.pk.kn;
 
     // Resolve the Tone Match reference audio now that the PK shaper (needed for Auto
     // classification) is available, before fitAB/refineB run. Custom keeps the
@@ -2589,9 +2590,8 @@ double rmsDb(const std::vector<float>& x){
 // CLAUDE.md's dynamic-range section for what was actually found and
 // whether it's worth a follow-up optimization step.
 bool measureLevelResponse(const fs::path& inputNam,const fs::path& diClipWav,
-                          std::vector<LevelResponsePoint>& outPoints,
-                          std::string& error,const StatusCallback& status){
-    outPoints.clear();
+                          LevelResponseResult& out,std::string& error,const StatusCallback& status){
+    out=LevelResponseResult{};
     std::error_code ec;
     const fs::path work=fs::temp_directory_path(ec)/(L"ntc_level_response_"+inputNam.stem().wstring());
     fs::remove_all(work,ec);fs::create_directories(work,ec);
@@ -2611,6 +2611,7 @@ bool measureLevelResponse(const fs::path& inputNam,const fs::path& diClipWav,
         error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
         fs::remove_all(work,ec);return false;
     }
+    out.pkPp=conversion.pkPp;out.pkPn=conversion.pkPn;out.pkKp=conversion.pkKp;out.pkKn=conversion.pkKn;
 
     static constexpr double kLevelsDb[]={-24.0,-18.0,-12.0,-6.0,0.0,6.0};
     for(double levelDb:kLevelsDb){
@@ -2636,11 +2637,33 @@ bool measureLevelResponse(const fs::path& inputNam,const fs::path& diClipWav,
         p.fullA2OutputRmsDb=rmsDb(fullA2Output);
         p.gp5OutputRmsDb=rmsDb(gp5Output);
         p.waveformErrorEsr=levelResponseEsr(gp5Output,fullA2Output);
-        outPoints.push_back(p);
+        out.points.push_back(p);
     }
-
     fs::remove_all(work,ec);
-    return !outPoints.empty();
+    if(out.points.empty())return false;
+
+    // Anchor each output to THIS NAM's own 0dB point, then derive summary
+    // error stats -- see LevelResponsePoint's doc comment for why relative
+    // (not absolute) values are what's actually comparable across NAMs.
+    const auto zeroIt=std::find_if(out.points.begin(),out.points.end(),
+        [](const LevelResponsePoint&p){return std::abs(p.levelDb)<1e-9;});
+    if(zeroIt!=out.points.end()){
+        const double fullA2Zero=zeroIt->fullA2OutputRmsDb,gp5Zero=zeroIt->gp5OutputRmsDb;
+        double sumSq=0.0;
+        for(auto&p:out.points){
+            p.fullA2RelativeDb=p.fullA2OutputRmsDb-fullA2Zero;
+            p.gp5RelativeDb=p.gp5OutputRmsDb-gp5Zero;
+            p.relativeErrorDb=p.gp5RelativeDb-p.fullA2RelativeDb;
+            out.maxRelativeErrorDb=std::max(out.maxRelativeErrorDb,std::abs(p.relativeErrorDb));
+            sumSq+=p.relativeErrorDb*p.relativeErrorDb;
+        }
+        out.rmsRelativeErrorDb=std::sqrt(sumSq/static_cast<double>(out.points.size()));
+    }
+    out.fullA2SweepDb=out.points.back().fullA2OutputRmsDb-out.points.front().fullA2OutputRmsDb;
+    out.gp5SweepDb=out.points.back().gp5OutputRmsDb-out.points.front().gp5OutputRmsDb;
+
+    out.ok=true;
+    return true;
 }
 
 } // namespace ntc

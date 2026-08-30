@@ -1596,19 +1596,31 @@ bool runHeadlessLevelResponseIfRequested(int& exitCode) {
         const fs::path diClipWav = argv[3];
         const fs::path outputCsv = argv[4];
         std::wcout << L"Level response: " << inputNam.wstring() << L" x " << diClipWav.wstring() << L"\n";
-        std::vector<ntc::LevelResponsePoint> points;
+        ntc::LevelResponseResult result;
         std::string error;
-        if (ntc::measureLevelResponse(inputNam, diClipWav, points, error,
+        if (ntc::measureLevelResponse(inputNam, diClipWav, result, error,
                                        [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
             std::wofstream csv(outputCsv);
-            csv << L"level_db,input_rms_db,full_a2_output_rms_db,gp5_output_rms_db,waveform_error_esr\n";
-            std::wcout << L"\nlevel_db  input_rms_db  full_a2_rms_db  gp5_rms_db  esr\n";
-            for (const auto& p : points) {
+            csv << L"level_db,input_rms_db,full_a2_output_rms_db,gp5_output_rms_db,waveform_error_esr,"
+                   L"full_a2_relative_db,gp5_relative_db,relative_error_db,full_a2_step_db,gp5_step_db\n";
+            std::wcout << L"\nlevel_db  input_rms_db  full_a2_rms_db  gp5_rms_db  esr  "
+                          L"full_a2_rel_db  gp5_rel_db  rel_err_db  full_a2_step_db  gp5_step_db\n";
+            for (std::size_t i = 0; i < result.points.size(); ++i) {
+                const auto& p = result.points[i];
+                const double fullA2Step = (i == 0) ? 0.0 : p.fullA2OutputRmsDb - result.points[i - 1].fullA2OutputRmsDb;
+                const double gp5Step = (i == 0) ? 0.0 : p.gp5OutputRmsDb - result.points[i - 1].gp5OutputRmsDb;
                 csv << p.levelDb << L"," << p.inputRmsDb << L"," << p.fullA2OutputRmsDb << L","
-                    << p.gp5OutputRmsDb << L"," << p.waveformErrorEsr << L"\n";
+                    << p.gp5OutputRmsDb << L"," << p.waveformErrorEsr << L","
+                    << p.fullA2RelativeDb << L"," << p.gp5RelativeDb << L"," << p.relativeErrorDb << L","
+                    << fullA2Step << L"," << gp5Step << L"\n";
                 std::wcout << p.levelDb << L"\t" << p.inputRmsDb << L"\t" << p.fullA2OutputRmsDb << L"\t"
-                           << p.gp5OutputRmsDb << L"\t" << p.waveformErrorEsr << L"\n";
+                           << p.gp5OutputRmsDb << L"\t" << p.waveformErrorEsr << L"\t"
+                           << p.fullA2RelativeDb << L"\t" << p.gp5RelativeDb << L"\t" << p.relativeErrorDb << L"\t"
+                           << fullA2Step << L"\t" << gp5Step << L"\n";
             }
+            std::wcout << L"\npk=" << result.pkPp << L"/" << result.pkPn << L"/" << result.pkKp << L"/" << result.pkKn
+                       << L"  A2 sweep=" << result.fullA2SweepDb << L"dB  GP5 sweep=" << result.gp5SweepDb
+                       << L"dB  max err=" << result.maxRelativeErrorDb << L"dB  rms err=" << result.rmsRelativeErrorDb << L"dB\n";
             std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
             exitCode = 0;
         } else {

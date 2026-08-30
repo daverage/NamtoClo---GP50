@@ -28,6 +28,15 @@ struct ConversionResult {
     // (Auto/Clean/Moderate/High/Bass) or user-browsed (Custom). Empty when Tone Match
     // was disabled or used the default stimulus with no named reference.
     fs::path toneMatchReferenceUsed;
+
+    // Fitted PK nonlinearity shaper (pp/pn = positive/negative saturation ceiling,
+    // kp/kn = positive/negative saturation steepness), same values
+    // QualityExperimentResult::pkPp/etc. expose from the separate
+    // runQualityExperiments pipeline -- see classifyGainBucket() in this header.
+    // Computed once before any GP-5/GP-50 candidate branching, so the same
+    // regardless of which candidate is chosen. 0 if conversion failed before
+    // fitPk() ran.
+    float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f;
 };
 
 struct BatchConversionResult {
@@ -266,6 +275,31 @@ struct LevelResponsePoint {
     double fullA2OutputRmsDb = 0.0;
     double gp5OutputRmsDb = 0.0;
     double waveformErrorEsr = 0.0;  // error-to-signal ratio between the two outputs at this level
+
+    // Each output's RMS relative to THIS NAM's own 0dB point (fullA2OutputRmsDb/
+    // gp5OutputRmsDb at levelDb==0), and the difference between them. Anchoring
+    // to each model's own 0dB result -- rather than comparing absolute RMS --
+    // isolates the *shape* of the level-response curve so amps with different
+    // absolute output levels are still comparable across a NAM sweep.
+    // relativeErrorDb near 0 at every level means the GP-5/GP-50 conversion
+    // tracks Full A2's dynamic response; a growing magnitude means it doesn't.
+    double fullA2RelativeDb = 0.0;
+    double gp5RelativeDb = 0.0;
+    double relativeErrorDb = 0.0;   // gp5RelativeDb - fullA2RelativeDb
+};
+
+// Roadmap item 7 (measurement phase): full level-response result for one
+// (NAM, DI clip) pair, including the fitted P/K (for correlating error
+// against gain character) and summary error stats derived from points.
+struct LevelResponseResult {
+    bool ok = false;
+    std::string error;
+    float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f;
+    double fullA2SweepDb = 0.0;        // total output swing across tested levels (last - first)
+    double gp5SweepDb = 0.0;
+    double maxRelativeErrorDb = 0.0;   // max |relativeErrorDb| across points
+    double rmsRelativeErrorDb = 0.0;   // sqrt(mean(relativeErrorDb^2))
+    std::vector<LevelResponsePoint> points;
 };
 
 // Renders diClipWav at several gain levels ({-24,-18,-12,-6,0,+6} dB) through
@@ -276,7 +310,7 @@ struct LevelResponsePoint {
 // consistently. See CLAUDE.md's dynamic-range section for what was found.
 bool measureLevelResponse(const fs::path& inputNam,
                           const fs::path& diClipWav,
-                          std::vector<LevelResponsePoint>& outPoints,
+                          LevelResponseResult& out,
                           std::string& error,
                           const StatusCallback& status = {});
 
