@@ -245,4 +245,21 @@ bool renderCloOnSignal(const fs::path& sourceClo,
                         std::vector<float>& outputSignal44100,
                         std::string& error);
 
+// Same render chain as renderCloOnSignal (Pre -> A -> P/K shaper -> Post ->
+// B, unity gain), except the shaper (pp/pn/kp/kn) and B are overridden --
+// Pre/A/Post still come from sourceClo, unmodified. Lets an unshipped
+// candidate (e.g. searchPkForDynamics's winning P/K + Block B) be auditioned
+// on real audio without writing a new CLO file first.
+bool renderCloWithOverrideOnSignal(const fs::path& sourceClo,
+                                    float pp, float pn, float kp, float kn,
+                                    const std::vector<float>& b,
+                                    const std::vector<float>& inputSignal44100,
+                                    std::vector<float>& outputSignal44100,
+                                    std::string& error);
+
+// Writes samples as mono PCM16 44.1kHz WAV -- for exporting comparison
+// renders (e.g. runPkDynamicsAudition below) to listen to directly, not
+// used by any conversion or refinement path.
+bool writeMono44100Wav(const fs::path& path, const std::vector<float>& samples, std::string& error);
+
 } // namespace ntc

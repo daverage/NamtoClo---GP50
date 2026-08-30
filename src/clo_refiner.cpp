@@ -932,4 +932,53 @@ bool renderCloOnSignal(const fs::path& sourceClo,
     return true;
 }
 
+bool renderCloWithOverrideOnSignal(const fs::path& sourceClo,
+                                    float pp, float pn, float kp, float kn,
+                                    const std::vector<float>& b,
+                                    const std::vector<float>& inputSignal44100,
+                                    std::vector<float>& outputSignal44100,
+                                    std::string& error) {
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return false;
+
+    Model m;
+    if (!parseModel(bytes, m, error)) return false;
+    if (b.empty()) { error = "renderCloWithOverrideOnSignal: override B is empty."; return false; }
+
+    auto aout = precomputeA(m, inputSignal44100, inputSignal44100.size(), 1.0f);
+    std::vector<float> preB;
+    renderPreB(m, aout, pp, pn, kp, kn, preB);
+    renderWithB(preB, b, outputSignal44100, 1.0f);
+    return true;
+}
+
+bool writeMono44100Wav(const fs::path& path, const std::vector<float>& samples, std::string& error) {
+    std::error_code ec;
+    if (path.has_parent_path()) {
+        fs::create_directories(path.parent_path(), ec);
+        if (ec) { error = "Cannot create output directory: " + ec.message(); return false; }
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) { error = "Cannot open output WAV: " + pathToUtf8(path); return false; }
+
+    constexpr std::uint16_t channels = 1, bitsPerSample = 16;
+    constexpr std::uint32_t bytesPerSample = bitsPerSample / 8;
+    const std::uint32_t dataBytes = static_cast<std::uint32_t>(samples.size() * channels * bytesPerSample);
+    const std::uint32_t riffSize = 36u + dataBytes;
+    const std::uint32_t byteRate = kSampleRate * channels * bytesPerSample;
+    const std::uint16_t blockAlign = static_cast<std::uint16_t>(channels * bytesPerSample);
+
+    auto w32 = [&](std::uint32_t v) { out.write(reinterpret_cast<const char*>(&v), 4); };
+    auto w16 = [&](std::uint16_t v) { out.write(reinterpret_cast<const char*>(&v), 2); };
+    out.write("RIFF", 4); w32(riffSize); out.write("WAVE", 4);
+    out.write("fmt ", 4); w32(16); w16(1); w16(channels); w32(kSampleRate); w32(byteRate); w16(blockAlign); w16(bitsPerSample);
+    out.write("data", 4); w32(dataBytes);
+    for (float s : samples) {
+        const double clamped = std::clamp(static_cast<double>(s), -1.0, 1.0);
+        const std::int16_t pcm = static_cast<std::int16_t>(std::lround(clamped * 32767.0));
+        out.write(reinterpret_cast<const char*>(&pcm), 2);
+    }
+    return true;
+}
+
 } // namespace ntc

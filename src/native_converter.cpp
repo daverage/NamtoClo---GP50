@@ -2796,4 +2796,78 @@ bool runPkDynamicsSearchExperiment(const fs::path& inputNam,
     return outResult.ok;
 }
 
+// Listening-test export -- see the doc comment in native_converter.hpp for
+// why this exists (the search's measured numbers alone don't prove an
+// audible difference). Reuses the same conversion + search as
+// runPkDynamicsSearchExperiment, then renders a real musical clip (not the
+// synthetic level staircase) through Full A2 / baseline / optimized.
+bool runPkDynamicsAudition(const fs::path& inputNam,
+                           const fs::path& playingClipWav,
+                           const fs::path& trainDiClipWav,
+                           const fs::path& selectionDiClipWav,
+                           const fs::path& benchmarkDiClipWav,
+                           double lambda,
+                           const fs::path& outputDirectory,
+                           std::string& error,
+                           const StatusCallback& status){
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_pk_audition_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"P/K audition: converting "+inputNam.filename().wstring()+L" (production settings)...");
+    NativeConverterConfig converter;
+    CloRefineConfig refine;refine.enabled=true;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+
+    std::vector<MultiLevelClip> trainClips,selectionClips,benchmarkClips;
+    const bool built=
+        buildLevelClips(fullModelPath,trainDiClipWav,trainClips,error,status,L"P/K audition (train)")&&
+        buildLevelClips(fullModelPath,selectionDiClipWav,selectionClips,error,status,L"P/K audition (selection)")&&
+        buildLevelClips(fullModelPath,benchmarkDiClipWav,benchmarkClips,error,status,L"P/K audition (benchmark)");
+    if(!built){fs::remove_all(work,ec);return false;}
+
+    report(status,L"P/K audition: running Step 2 search...");
+    auto search=ntc::searchPkForDynamics(conversion.gp5gp50Compact,trainClips,selectionClips,benchmarkClips,lambda,error,status);
+    if(!search.ok){fs::remove_all(work,ec);return false;}
+
+    report(status,L"P/K audition: rendering "+playingClipWav.filename().wstring()+L"...");
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(playingClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+    if(!renderNamOnSignal(fullModelPath,dry,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+        error="Full A2 render failed: "+stepError;fs::remove_all(work,ec);return false;
+    }
+    auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+
+    std::vector<float> baselineOutput;
+    if(!renderCloOnSignal(conversion.gp5gp50Compact,dry,baselineOutput,error)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> optimizedOutput;
+    if(!renderCloWithOverrideOnSignal(conversion.gp5gp50Compact,search.pp,search.pn,search.kp,search.kn,search.b,
+                                      dry,optimizedOutput,error)){fs::remove_all(work,ec);return false;}
+
+    fs::remove_all(work,ec);
+
+    std::error_code oec;
+    fs::create_directories(outputDirectory,oec);
+    if(!writeMono44100Wav(outputDirectory/L"full_a2.wav",fullA2At44100,error))return false;
+    if(!writeMono44100Wav(outputDirectory/L"baseline_gp5.wav",baselineOutput,error))return false;
+    if(!writeMono44100Wav(outputDirectory/L"optimized_gp5.wav",optimizedOutput,error))return false;
+
+    report(status,L"P/K audition: pk initial="+std::to_wstring(search.initialPp)+L"/"+std::to_wstring(search.initialPn)+L"/"
+        +std::to_wstring(search.initialKp)+L"/"+std::to_wstring(search.initialKn)
+        +L"  optimized="+std::to_wstring(search.pp)+L"/"+std::to_wstring(search.pn)+L"/"
+        +std::to_wstring(search.kp)+L"/"+std::to_wstring(search.kn));
+    return true;
+}
+
 } // namespace ntc

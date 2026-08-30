@@ -362,4 +362,24 @@ bool runPkDynamicsSearchExperiment(const fs::path& inputNam,
                                    std::string& error,
                                    const StatusCallback& status = {});
 
+// Listening-test export (not a measurement): runs the same production
+// conversion + Step 2 P/K dynamics search as runPkDynamicsSearchExperiment
+// above, then renders playingClipWav -- a real musical clip with its own
+// natural dynamics, not the synthetic {-24..+6}dB staircase the search
+// itself trains/scores on -- through three paths: Full A2 (ground truth),
+// the as-shipped GP-5/GP-50 conversion, and the Step 2 P/K-optimized
+// candidate (unshipped). Writes full_a2.wav / baseline_gp5.wav /
+// optimized_gp5.wav to outputDirectory so the actual audible difference (if
+// any) can be checked by ear -- see CLAUDE.md's Step 2 section for why the
+// measured numbers alone aren't sufficient proof of an audible improvement.
+bool runPkDynamicsAudition(const fs::path& inputNam,
+                           const fs::path& playingClipWav,
+                           const fs::path& trainDiClipWav,
+                           const fs::path& selectionDiClipWav,
+                           const fs::path& benchmarkDiClipWav,
+                           double lambda,
+                           const fs::path& outputDirectory,
+                           std::string& error,
+                           const StatusCallback& status = {});
+
 } // namespace ntc

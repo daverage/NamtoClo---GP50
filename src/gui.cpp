@@ -1740,6 +1740,48 @@ bool runHeadlessPkDynamicsSearchIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+
+// Headless entry point: NamToClo.exe --pk-dynamics-audition <nam> <playingClip.wav>
+//   <trainClip.wav> <selectionClip.wav> <benchmarkClip.wav> <lambda> <outputDir>
+// Listening-test export: renders playingClipWav (real musical dynamics, not the
+// synthetic level staircase) through Full A2 / the as-shipped conversion / the
+// Step 2 P/K-optimized candidate, so the measured dynamics-error improvement can
+// be checked by ear. See ntc::runPkDynamicsAudition's doc comment.
+bool runHeadlessPkDynamicsAuditionIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 9 && std::wstring(argv[1]) == L"--pk-dynamics-audition") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path playingClip = argv[3];
+        const fs::path trainClip = argv[4];
+        const fs::path selectionClip = argv[5];
+        const fs::path benchmarkClip = argv[6];
+        const double lambda = std::wcstod(argv[7], nullptr);
+        const fs::path outputDir = argv[8];
+        std::wcout << L"P/K dynamics audition: " << inputNam.wstring() << L" x " << playingClip.wstring() << L"\n";
+        std::string error;
+        if (ntc::runPkDynamicsAudition(inputNam, playingClip, trainClip, selectionClip, benchmarkClip, lambda, outputDir, error,
+                                        [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wcout << L"\nWrote " << outputDir.wstring() << L"\\{full_a2,baseline_gp5,optimized_gp5}.wav\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            std::error_code oec;
+            fs::create_directories(outputDir, oec);
+            std::wofstream errFile(outputDir.wstring() + L"\\audition.err");
+            errFile << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -1759,6 +1801,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessPkDynamicsSearchIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessPkDynamicsAuditionIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.
