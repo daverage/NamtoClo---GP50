@@ -196,6 +196,44 @@ bool sweepKAndSolveSharedB(const fs::path& sourceClo,
                             std::string& error,
                             const RefineStatusCallback& status = {});
 
+// Dynamics-aware fitting, Step 2 (see CLAUDE.md's Step 1 writeup for why a
+// single shared Kp/Kn multiplier was rejected but full per-NAM search was
+// judged warranted). Full P/K unlock: Pp/Pn/Kp/Kn all free (Pre/A128/Post
+// frozen, read from sourceClo), coordinate-descent search where every
+// candidate is followed by a fresh sweepKAndSolveSharedB-style joint solve
+// of Block B across trainLevelClips. Scored as
+// spectralEsr(trainLevelClips) + lambda*rmsDynamicsErrorDb(trainLevelClips),
+// but a round is only ACCEPTED if it also improves the same combined score
+// re-evaluated on selectionLevelClips (a disjoint clip) using the exact
+// (params, B) pair the training round produced -- never re-solving B
+// against selection, the same discipline gp5_optimizer.hpp's P/K search and
+// searchPostAndSolveB() both use, for the same overfitting reason. A round
+// is further rejected if it would let selection maxDynamicsErrorDb grow
+// more than 10% past the current best's -- a safety floor so a better RMS
+// average can't hide a worse single-level outlier. benchmarkLevelClips (a
+// second, different disjoint clip) is scored only once at the end, purely
+// for honest reporting -- never used to accept or reject anything.
+struct PkDynamicsResult {
+    bool ok = false;
+    std::string error;
+    float pp = 0.0f, pn = 0.0f, kp = 0.0f, kn = 0.0f; // winning P/K
+    std::vector<float> b;                             // Block B solved jointly on trainLevelClips for the winner
+
+    float initialPp = 0.0f, initialPn = 0.0f, initialKp = 0.0f, initialKn = 0.0f;
+    double initialMaxDynamicsErrorDb = 0.0, initialRmsDynamicsErrorDb = 0.0, initialSpectralEsr = 0.0;         // sourceClo as-shipped, scored on selectionLevelClips
+    double optimizedMaxDynamicsErrorDb = 0.0, optimizedRmsDynamicsErrorDb = 0.0, optimizedSpectralEsr = 0.0;   // winner, scored on selectionLevelClips (the acceptance signal)
+    double benchmarkMaxDynamicsErrorDb = 0.0, benchmarkRmsDynamicsErrorDb = 0.0, benchmarkSpectralEsr = 0.0;   // winner, scored on benchmarkLevelClips (never seen during search)
+    double benchmarkInitialMaxDynamicsErrorDb = 0.0, benchmarkInitialRmsDynamicsErrorDb = 0.0, benchmarkInitialSpectralEsr = 0.0; // sourceClo as-shipped, scored on benchmarkLevelClips, for a fair benchmark-vs-benchmark comparison
+};
+
+PkDynamicsResult searchPkForDynamics(const fs::path& sourceClo,
+                                      const std::vector<MultiLevelClip>& trainLevelClips,
+                                      const std::vector<MultiLevelClip>& selectionLevelClips,
+                                      const std::vector<MultiLevelClip>& benchmarkLevelClips,
+                                      double lambda,
+                                      std::string& error,
+                                      const RefineStatusCallback& status = {});
+
 // Parses sourceClo and renders inputSignal44100 through it end-to-end
 // (Pre -> A -> P/K shaper -> Post -> B), at unity gain (no CloPlayer
 // Gain/Volume wrapper -- same convention as solveBlockBLeastSquares, for

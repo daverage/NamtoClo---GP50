@@ -2578,6 +2578,39 @@ double rmsDb(const std::vector<float>& x){
     const double rms=std::sqrt(sum/static_cast<double>(x.size()));
     return rms>1e-30?20.0*std::log10(rms):-std::numeric_limits<double>::infinity();
 }
+
+// Shared by runKSweepExperiment and runPkDynamicsSearchExperiment: builds
+// the {-24,-18,-12,-6,0,+6} dB MultiLevelClip set for one DI clip against
+// fullModelPath (Full A2), resampling each level's target to 44.1kHz so it's
+// directly usable by clo_refiner.hpp's 44.1kHz-domain solvers.
+bool buildLevelClips(const fs::path& fullModelPath,const fs::path& diClipWav,
+                     std::vector<MultiLevelClip>& out,std::string& error,
+                     const StatusCallback& status,const std::wstring& logPrefix){
+    out.clear();
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error))return false;
+
+    static constexpr double kLevelsDb[]={-24.0,-18.0,-12.0,-6.0,0.0,6.0};
+    for(double levelDb:kLevelsDb){
+        report(status,logPrefix+L": rendering ground truth at "+std::to_wstring(levelDb)+L" dB...");
+        const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
+        std::vector<float> scaled(dry.size());
+        for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
+
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+        if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+            report(status,logPrefix+L": skipped "+std::to_wstring(levelDb)+L" dB (Full A2 render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+        MultiLevelClip clip;
+        clip.levelDb=levelDb;
+        clip.input44100=scaled;
+        clip.target44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+        out.push_back(std::move(clip));
+    }
+    if(out.empty()){error=std::string("No level clips rendered successfully for ")+pathToUtf8(diClipWav);return false;}
+    return true;
+}
 }
 
 // Roadmap item 7 (measurement phase): renders the same dry clip at several
@@ -2684,9 +2717,6 @@ bool runKSweepExperiment(const fs::path& inputNam,const fs::path& diClipWav,
     fs::remove_all(work,ec);fs::create_directories(work,ec);
     if(ec){error="Cannot create work directory.";return false;}
 
-    std::vector<float> dry;
-    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
-
     fs::path fullModelPath;
     if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
 
@@ -2699,26 +2729,8 @@ bool runKSweepExperiment(const fs::path& inputNam,const fs::path& diClipWav,
         fs::remove_all(work,ec);return false;
     }
 
-    static constexpr double kLevelsDb[]={-24.0,-18.0,-12.0,-6.0,0.0,6.0};
     std::vector<MultiLevelClip> levelClips;
-    for(double levelDb:kLevelsDb){
-        report(status,L"K sweep: rendering ground truth at "+std::to_wstring(levelDb)+L" dB...");
-        const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
-        std::vector<float> scaled(dry.size());
-        for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
-
-        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
-        if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError)){
-            report(status,L"K sweep: skipped "+std::to_wstring(levelDb)+L" dB (Full A2 render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
-            continue;
-        }
-        MultiLevelClip clip;
-        clip.levelDb=levelDb;
-        clip.input44100=scaled;
-        clip.target44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
-        levelClips.push_back(std::move(clip));
-    }
-    if(levelClips.empty()){error="K sweep: no level clips rendered successfully.";fs::remove_all(work,ec);return false;}
+    if(!buildLevelClips(fullModelPath,diClipWav,levelClips,error,status,L"K sweep")){fs::remove_all(work,ec);return false;}
 
     static constexpr double kMultipliers[]={0.75,1.0,1.25,1.5,2.0,3.0,4.0};
     std::vector<KSweepCandidate> candidates;
@@ -2738,6 +2750,50 @@ bool runKSweepExperiment(const fs::path& inputNam,const fs::path& diClipWav,
         outResults.push_back(r);
     }
     return true;
+}
+
+// Dynamics-aware fitting, Step 2 -- see clo_refiner.hpp's searchPkForDynamics()
+// doc comment and CLAUDE.md's Step 1 writeup. Converts inputNam once, then
+// builds three DISJOINT level-clip sets (train/selection/benchmark, each its
+// own DI clip) so the search's round-acceptance gate never sees the same
+// signal it optimizes against, and the final benchmark numbers are honestly
+// held out end to end.
+bool runPkDynamicsSearchExperiment(const fs::path& inputNam,
+                                   const fs::path& trainDiClipWav,
+                                   const fs::path& selectionDiClipWav,
+                                   const fs::path& benchmarkDiClipWav,
+                                   double lambda,
+                                   PkDynamicsResult& outResult,
+                                   std::string& error,
+                                   const StatusCallback& status){
+    outResult=PkDynamicsResult{};
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_pk_dynamics_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"P/K dynamics search: converting "+inputNam.filename().wstring()+L" (production settings)...");
+    NativeConverterConfig converter;
+    CloRefineConfig refine;refine.enabled=true;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+
+    std::vector<MultiLevelClip> trainClips,selectionClips,benchmarkClips;
+    const bool built=
+        buildLevelClips(fullModelPath,trainDiClipWav,trainClips,error,status,L"P/K dynamics search (train)")&&
+        buildLevelClips(fullModelPath,selectionDiClipWav,selectionClips,error,status,L"P/K dynamics search (selection)")&&
+        buildLevelClips(fullModelPath,benchmarkDiClipWav,benchmarkClips,error,status,L"P/K dynamics search (benchmark)");
+    if(!built){fs::remove_all(work,ec);return false;}
+
+    outResult=ntc::searchPkForDynamics(conversion.gp5gp50Compact,trainClips,selectionClips,benchmarkClips,lambda,error,status);
+    fs::remove_all(work,ec);
+    return outResult.ok;
 }
 
 } // namespace ntc

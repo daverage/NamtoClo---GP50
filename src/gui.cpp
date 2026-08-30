@@ -1677,6 +1677,69 @@ bool runHeadlessKSweepIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+
+// Headless entry point: NamToClo.exe --pk-dynamics-search <nam> <trainClip.wav>
+//   <selectionClip.wav> <benchmarkClip.wav> <lambda> <outputCsv>
+// Dynamics-aware fitting, Step 2: full P/K unlock (coordinate descent over
+// Pp/Pn/Kp/Kn, fresh shared Block B solve per candidate), gated on a
+// selection clip disjoint from the training clip, with a final benchmark
+// clip (disjoint from both) scored only once for honest reporting. See
+// ntc::runPkDynamicsSearchExperiment's doc comment and CLAUDE.md.
+bool runHeadlessPkDynamicsSearchIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 8 && std::wstring(argv[1]) == L"--pk-dynamics-search") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path trainClip = argv[3];
+        const fs::path selectionClip = argv[4];
+        const fs::path benchmarkClip = argv[5];
+        const double lambda = std::wcstod(argv[6], nullptr);
+        const fs::path outputCsv = argv[7];
+        std::wcout << L"P/K dynamics search: " << inputNam.wstring() << L" lambda=" << lambda << L"\n";
+        ntc::PkDynamicsResult result;
+        std::string error;
+        if (ntc::runPkDynamicsSearchExperiment(inputNam, trainClip, selectionClip, benchmarkClip, lambda, result, error,
+                                                [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"metric,initial_pp,initial_pn,initial_kp,initial_kn,pp,pn,kp,kn,"
+                   L"initial_max_err_db,initial_rms_err_db,initial_esr,"
+                   L"optimized_max_err_db,optimized_rms_err_db,optimized_esr,"
+                   L"benchmark_initial_max_err_db,benchmark_initial_rms_err_db,benchmark_initial_esr,"
+                   L"benchmark_max_err_db,benchmark_rms_err_db,benchmark_esr\n";
+            csv << L"selection," << result.initialPp << L"," << result.initialPn << L"," << result.initialKp << L"," << result.initialKn << L","
+                << result.pp << L"," << result.pn << L"," << result.kp << L"," << result.kn << L","
+                << result.initialMaxDynamicsErrorDb << L"," << result.initialRmsDynamicsErrorDb << L"," << result.initialSpectralEsr << L","
+                << result.optimizedMaxDynamicsErrorDb << L"," << result.optimizedRmsDynamicsErrorDb << L"," << result.optimizedSpectralEsr << L","
+                << result.benchmarkInitialMaxDynamicsErrorDb << L"," << result.benchmarkInitialRmsDynamicsErrorDb << L"," << result.benchmarkInitialSpectralEsr << L","
+                << result.benchmarkMaxDynamicsErrorDb << L"," << result.benchmarkRmsDynamicsErrorDb << L"," << result.benchmarkSpectralEsr << L"\n";
+            std::wcout << L"\npk initial=" << result.initialPp << L"/" << result.initialPn << L"/" << result.initialKp << L"/" << result.initialKn
+                       << L"  pk optimized=" << result.pp << L"/" << result.pn << L"/" << result.kp << L"/" << result.kn << L"\n";
+            std::wcout << L"selection: initial maxErr=" << result.initialMaxDynamicsErrorDb << L" rmsErr=" << result.initialRmsDynamicsErrorDb
+                       << L" esr=" << result.initialSpectralEsr << L"\n";
+            std::wcout << L"selection: optimized maxErr=" << result.optimizedMaxDynamicsErrorDb << L" rmsErr=" << result.optimizedRmsDynamicsErrorDb
+                       << L" esr=" << result.optimizedSpectralEsr << L"\n";
+            std::wcout << L"benchmark: initial maxErr=" << result.benchmarkInitialMaxDynamicsErrorDb << L" rmsErr=" << result.benchmarkInitialRmsDynamicsErrorDb
+                       << L" esr=" << result.benchmarkInitialSpectralEsr << L"\n";
+            std::wcout << L"benchmark: optimized maxErr=" << result.benchmarkMaxDynamicsErrorDb << L" rmsErr=" << result.benchmarkRmsDynamicsErrorDb
+                       << L" esr=" << result.benchmarkSpectralEsr << L"\n";
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            std::wofstream errFile(outputCsv.wstring() + L".err");
+            errFile << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -1693,6 +1756,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessKSweepIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessPkDynamicsSearchIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.

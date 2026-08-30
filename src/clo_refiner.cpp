@@ -709,6 +709,209 @@ bool sweepKAndSolveSharedB(const fs::path& sourceClo,
     return true;
 }
 
+namespace {
+struct LevelClipScore { double maxErrDb = 0.0, rmsErrDb = 0.0, esr = 0.0; };
+
+// Renders levelClips through (candidate, b) using precomputed aouts (Pre->A
+// is unaffected by Pp/Pn/Kp/Kn, so the caller computes these once and reuses
+// across every P/K candidate), and scores dynamics error the same
+// relative-anchored way LevelResponsePoint/KSweepCandidate do -- anchored to
+// the clip whose levelDb is closest to 0.
+LevelClipScore scoreOnLevelClips(const Model& candidate, const std::vector<float>& b,
+                                  const std::vector<MultiLevelClip>& levelClips,
+                                  const std::vector<std::vector<float>>& aouts) {
+    LevelClipScore s;
+    if (levelClips.empty()) return s;
+    std::vector<double> renderedDb(levelClips.size()), targetDb(levelClips.size());
+    double esrSum = 0.0;
+    for (std::size_t i = 0; i < levelClips.size(); ++i) {
+        std::vector<float> preB, rendered;
+        renderPreB(candidate, aouts[i], candidate.pp, candidate.pn, candidate.kp, candidate.kn, preB);
+        renderWithB(preB, b, rendered, 1.0f);
+        esrSum += esrLoss(rendered, levelClips[i].target44100);
+        renderedDb[i] = rmsDb(rendered);
+        targetDb[i] = rmsDb(levelClips[i].target44100);
+    }
+    s.esr = esrSum / static_cast<double>(levelClips.size());
+
+    std::size_t zeroIdx = 0; double bestDist = std::numeric_limits<double>::max();
+    for (std::size_t i = 0; i < levelClips.size(); ++i) {
+        const double d = std::abs(levelClips[i].levelDb);
+        if (d < bestDist) { bestDist = d; zeroIdx = i; }
+    }
+    const double renderedZero = renderedDb[zeroIdx], targetZero = targetDb[zeroIdx];
+    double sumSq = 0.0;
+    for (std::size_t i = 0; i < levelClips.size(); ++i) {
+        const double relErr = (renderedDb[i] - renderedZero) - (targetDb[i] - targetZero);
+        s.maxErrDb = std::max(s.maxErrDb, std::abs(relErr));
+        sumSq += relErr * relErr;
+    }
+    s.rmsErrDb = std::sqrt(sumSq / static_cast<double>(levelClips.size()));
+    return s;
+}
+
+double combinedScore(const LevelClipScore& s, double lambda) { return s.esr + lambda * s.rmsErrDb; }
+
+std::vector<std::vector<float>> precomputeAouts(const Model& m, const std::vector<MultiLevelClip>& clips) {
+    std::vector<std::vector<float>> out(clips.size());
+    for (std::size_t i = 0; i < clips.size(); ++i) out[i] = precomputeA(m, clips[i].input44100, clips[i].input44100.size(), 1.0f);
+    return out;
+}
+
+// Solves Block B jointly across trainLevelClips for one (pp,pn,kp,kn)
+// candidate -- same weighting as sweepKAndSolveSharedB, inlined here since
+// this needs the already-computed train aouts rather than recomputing them
+// per candidate the way sweepKAndSolveSharedB does per kMultiplier.
+std::vector<float> solveBForCandidate(const Model& candidate, std::size_t bTaps,
+                                       const std::vector<MultiLevelClip>& trainLevelClips,
+                                       const std::vector<std::vector<float>>& trainAouts,
+                                       const std::vector<double>& trainWeights) {
+    std::vector<std::vector<float>> preBs(trainLevelClips.size()), targets(trainLevelClips.size());
+    for (std::size_t i = 0; i < trainLevelClips.size(); ++i) {
+        renderPreB(candidate, trainAouts[i], candidate.pp, candidate.pn, candidate.kp, candidate.kn, preBs[i]);
+        targets[i] = trainLevelClips[i].target44100;
+    }
+    std::vector<float> b;
+    solveBlockBMultiLevel(preBs, targets, trainWeights, bTaps, b);
+    return b;
+}
+} // namespace
+
+PkDynamicsResult searchPkForDynamics(const fs::path& sourceClo,
+                                      const std::vector<MultiLevelClip>& trainLevelClips,
+                                      const std::vector<MultiLevelClip>& selectionLevelClips,
+                                      const std::vector<MultiLevelClip>& benchmarkLevelClips,
+                                      double lambda,
+                                      std::string& error,
+                                      const RefineStatusCallback& status) {
+    PkDynamicsResult r;
+    if (trainLevelClips.empty() || selectionLevelClips.empty()) {
+        error = "searchPkForDynamics: train and selection level clips are both required.";
+        return r;
+    }
+
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return r;
+    Model baseModel;
+    if (!parseModel(bytes, baseModel, error)) return r;
+    const std::size_t bTaps = baseModel.B.size();
+    if (bTaps == 0) { error = "Source CLO has an empty Block B."; return r; }
+
+    r.initialPp = baseModel.pp; r.initialPn = baseModel.pn; r.initialKp = baseModel.kp; r.initialKn = baseModel.kn;
+
+    // Pre->A is unaffected by Pp/Pn/Kp/Kn; compute once, reuse across every candidate.
+    const auto trainAouts = precomputeAouts(baseModel, trainLevelClips);
+    const auto selectionAouts = precomputeAouts(baseModel, selectionLevelClips);
+    const auto benchmarkAouts = precomputeAouts(baseModel, benchmarkLevelClips);
+
+    std::vector<double> trainWeights(trainLevelClips.size());
+    double weightSum = 0.0;
+    for (std::size_t i = 0; i < trainLevelClips.size(); ++i) {
+        double energy = 0.0;
+        for (float v : trainLevelClips[i].target44100) energy += static_cast<double>(v) * static_cast<double>(v);
+        trainWeights[i] = energy > 1e-30 ? 1.0 / energy : 0.0;
+        weightSum += trainWeights[i];
+    }
+    if (weightSum <= 0.0) { error = "searchPkForDynamics: all train level clips are silent."; return r; }
+    for (double& w : trainWeights) w /= weightSum;
+
+    // Baseline (as-shipped P/K + a fresh joint B solve, so the comparison
+    // below isolates the P/K change rather than also crediting the joint-B
+    // solve itself -- see CLAUDE.md's Step 1 writeup for why that distinction
+    // matters).
+    Model best = baseModel;
+    std::vector<float> bestB = solveBForCandidate(best, bTaps, trainLevelClips, trainAouts, trainWeights);
+    LevelClipScore bestSelectionScore = scoreOnLevelClips(best, bestB, selectionLevelClips, selectionAouts);
+    double bestCombined = combinedScore(bestSelectionScore, lambda);
+    r.initialMaxDynamicsErrorDb = bestSelectionScore.maxErrDb;
+    r.initialRmsDynamicsErrorDb = bestSelectionScore.rmsErrDb;
+    r.initialSpectralEsr = bestSelectionScore.esr;
+    const auto initialBenchmarkScore = scoreOnLevelClips(best, bestB, benchmarkLevelClips, benchmarkAouts);
+    r.benchmarkInitialMaxDynamicsErrorDb = initialBenchmarkScore.maxErrDb;
+    r.benchmarkInitialRmsDynamicsErrorDb = initialBenchmarkScore.rmsErrDb;
+    r.benchmarkInitialSpectralEsr = initialBenchmarkScore.esr;
+
+    if (status) {
+        std::wostringstream os;
+        os << L"P/K dynamics search: baseline selection maxErr=" << bestSelectionScore.maxErrDb
+           << L" rmsErr=" << bestSelectionScore.rmsErrDb << L" esr=" << bestSelectionScore.esr;
+        status(os.str());
+    }
+
+    // Coordinate descent: kp/kn get a wider multiplicative range (Step 1
+    // showed steepness is the dominant lever); pp/pn get a narrower range
+    // (untested by Step 1, kept conservative since the original single-level
+    // P/K search found no signal there under a different metric).
+    static constexpr double kSteepnessFactors[] = {0.6, 0.8, 1.0, 1.25, 1.6};
+    static constexpr double kAmplitudeFactors[] = {0.85, 0.95, 1.0, 1.05, 1.15};
+    struct Coord { float Model::* field; const double* factors; std::size_t count; };
+    const Coord coords[] = {
+        {&Model::kp, kSteepnessFactors, sizeof(kSteepnessFactors) / sizeof(kSteepnessFactors[0])},
+        {&Model::kn, kSteepnessFactors, sizeof(kSteepnessFactors) / sizeof(kSteepnessFactors[0])},
+        {&Model::pp, kAmplitudeFactors, sizeof(kAmplitudeFactors) / sizeof(kAmplitudeFactors[0])},
+        {&Model::pn, kAmplitudeFactors, sizeof(kAmplitudeFactors) / sizeof(kAmplitudeFactors[0])},
+    };
+
+    static constexpr int kMaxRounds = 3;
+    for (int round = 0; round < kMaxRounds; ++round) {
+        bool improvedThisRound = false;
+        for (const auto& coord : coords) {
+            const float baseValue = best.*(coord.field);
+            float bestFieldValue = baseValue;
+            bool coordImproved = false;
+            for (std::size_t fi = 0; fi < coord.count; ++fi) {
+                const float candidateValue = static_cast<float>(baseValue * coord.factors[fi]);
+                if (candidateValue == baseValue) continue;
+                Model candidate = best;
+                candidate.*(coord.field) = candidateValue;
+
+                auto candB = solveBForCandidate(candidate, bTaps, trainLevelClips, trainAouts, trainWeights);
+                const auto selScore = scoreOnLevelClips(candidate, candB, selectionLevelClips, selectionAouts);
+                const double combined = combinedScore(selScore, lambda);
+
+                // Safety floor: reject if the worst single level regresses
+                // more than 10% past the current best's worst level, even if
+                // the combined/RMS score looks better.
+                if (selScore.maxErrDb > bestSelectionScore.maxErrDb * 1.1) continue;
+                if (combined < bestCombined) {
+                    bestCombined = combined;
+                    bestFieldValue = candidateValue;
+                    bestB = candB;
+                    bestSelectionScore = selScore;
+                    coordImproved = true;
+                }
+            }
+            if (coordImproved) {
+                best.*(coord.field) = bestFieldValue;
+                improvedThisRound = true;
+                if (status) {
+                    std::wostringstream os;
+                    os << L"P/K dynamics search: round " << round << L" improved -- pp=" << best.pp
+                       << L" pn=" << best.pn << L" kp=" << best.kp << L" kn=" << best.kn
+                       << L" selection maxErr=" << bestSelectionScore.maxErrDb
+                       << L" rmsErr=" << bestSelectionScore.rmsErrDb << L" esr=" << bestSelectionScore.esr;
+                    status(os.str());
+                }
+            }
+        }
+        if (!improvedThisRound) break;
+    }
+
+    r.pp = best.pp; r.pn = best.pn; r.kp = best.kp; r.kn = best.kn;
+    r.b = bestB;
+    r.optimizedMaxDynamicsErrorDb = bestSelectionScore.maxErrDb;
+    r.optimizedRmsDynamicsErrorDb = bestSelectionScore.rmsErrDb;
+    r.optimizedSpectralEsr = bestSelectionScore.esr;
+
+    const auto benchmarkScore = scoreOnLevelClips(best, bestB, benchmarkLevelClips, benchmarkAouts);
+    r.benchmarkMaxDynamicsErrorDb = benchmarkScore.maxErrDb;
+    r.benchmarkRmsDynamicsErrorDb = benchmarkScore.rmsErrDb;
+    r.benchmarkSpectralEsr = benchmarkScore.esr;
+
+    r.ok = true;
+    return r;
+}
+
 bool renderCloOnSignal(const fs::path& sourceClo,
                         const std::vector<float>& inputSignal44100,
                         std::vector<float>& outputSignal44100,

@@ -344,4 +344,22 @@ bool runKSweepExperiment(const fs::path& inputNam,
                          std::string& error,
                          const StatusCallback& status = {});
 
+// Dynamics-aware fitting, Step 2 (see CLAUDE.md -- Step 1 confirmed causality
+// but rejected a single shared Kp/Kn multiplier; this is the per-NAM full
+// P/K search that follows from it). Converts inputNam via convertNamToClo
+// (production settings), builds three DISJOINT 6-level clip sets from
+// trainDiClipWav/selectionDiClipWav/benchmarkDiClipWav, and runs
+// ntc::searchPkForDynamics (clo_refiner.hpp) with the given lambda
+// (weight on rmsDynamicsErrorDb relative to spectral ESR in the combined
+// score). Comparative/measurement only -- does not modify or replace
+// inputNam's actual shipped conversion.
+bool runPkDynamicsSearchExperiment(const fs::path& inputNam,
+                                   const fs::path& trainDiClipWav,
+                                   const fs::path& selectionDiClipWav,
+                                   const fs::path& benchmarkDiClipWav,
+                                   double lambda,
+                                   PkDynamicsResult& outResult,
+                                   std::string& error,
+                                   const StatusCallback& status = {});
+
 } // namespace ntc
