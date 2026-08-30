@@ -2666,4 +2666,78 @@ bool measureLevelResponse(const fs::path& inputNam,const fs::path& diClipWav,
     return true;
 }
 
+// Dynamics-aware fitting, Step 1 -- see clo_refiner.hpp's
+// sweepKAndSolveSharedB() doc comment and CLAUDE.md's dynamic-range
+// section. Builds the same 6-level clip set measureLevelResponse() does
+// (same DI clip, same {-24,-18,-12,-6,0,+6} dB levels, same production
+// conversion), but resamples each level's Full A2 target to 44.1kHz before
+// handing it to sweepKAndSolveSharedB -- measureLevelResponse() compares
+// RMS-dB across differing sample rates (trainer rate vs. 44.1kHz), which is
+// fine for a pure level measurement but not something to repeat here where
+// spectralHeldOutEsr also needs matching rates.
+bool runKSweepExperiment(const fs::path& inputNam,const fs::path& diClipWav,
+                         std::vector<KSweepResult>& outResults,std::string& error,
+                         const StatusCallback& status){
+    outResults.clear();
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_k_sweep_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"K sweep: converting "+inputNam.filename().wstring()+L" (production settings)...");
+    NativeConverterConfig converter;
+    CloRefineConfig refine;refine.enabled=true;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+
+    static constexpr double kLevelsDb[]={-24.0,-18.0,-12.0,-6.0,0.0,6.0};
+    std::vector<MultiLevelClip> levelClips;
+    for(double levelDb:kLevelsDb){
+        report(status,L"K sweep: rendering ground truth at "+std::to_wstring(levelDb)+L" dB...");
+        const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
+        std::vector<float> scaled(dry.size());
+        for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
+
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+        if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+            report(status,L"K sweep: skipped "+std::to_wstring(levelDb)+L" dB (Full A2 render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+        MultiLevelClip clip;
+        clip.levelDb=levelDb;
+        clip.input44100=scaled;
+        clip.target44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+        levelClips.push_back(std::move(clip));
+    }
+    if(levelClips.empty()){error="K sweep: no level clips rendered successfully.";fs::remove_all(work,ec);return false;}
+
+    static constexpr double kMultipliers[]={0.75,1.0,1.25,1.5,2.0,3.0,4.0};
+    std::vector<KSweepCandidate> candidates;
+    const bool sweepOk=sweepKAndSolveSharedB(conversion.gp5gp50Compact,
+                              std::vector<double>(std::begin(kMultipliers),std::end(kMultipliers)),
+                              levelClips,candidates,error,status);
+    fs::remove_all(work,ec);
+    if(!sweepOk) return false;
+
+    outResults.reserve(candidates.size());
+    for(const auto& c:candidates){
+        KSweepResult r;
+        r.kMultiplier=c.kMultiplier;
+        r.maxDynamicsErrorDb=c.maxDynamicsErrorDb;
+        r.rmsDynamicsErrorDb=c.rmsDynamicsErrorDb;
+        r.spectralHeldOutEsr=c.spectralHeldOutEsr;
+        outResults.push_back(r);
+    }
+    return true;
+}
+
 } // namespace ntc

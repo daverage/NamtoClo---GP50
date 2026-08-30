@@ -153,6 +153,49 @@ PostSearchResult searchPostAndSolveB(const fs::path& sourceClo,
                                       std::string& error,
                                       const RefineStatusCallback& status = {});
 
+// One (input, Full-A2-rendered target) pair at a specific gain level, both
+// already at 44.1kHz -- the same shape native_converter.cpp's
+// measureLevelResponse() builds per LevelResponsePoint, reused here so
+// sweepKAndSolveSharedB() can test dynamics response across levels instead
+// of a single operating point.
+struct MultiLevelClip {
+    double levelDb = 0.0;
+    std::vector<float> input44100;
+    std::vector<float> target44100;
+};
+
+struct KSweepCandidate {
+    double kMultiplier = 1.0;
+    std::vector<float> b;               // Block B solved jointly across all levelClips
+    double maxDynamicsErrorDb = 0.0;    // vs Full A2, same relative-anchoring as LevelResponsePoint
+    double rmsDynamicsErrorDb = 0.0;
+    double spectralHeldOutEsr = 0.0;    // mean ESR across levels -- proxy for "did we break the tone"
+};
+
+// Dynamics-aware fitting, Step 1 (see CLAUDE.md's dynamic-range section for
+// the dose-response evidence this responds to): sweeps a multiplier on the
+// P/K shaper's Kp/Kn steepness -- Pre/A128/Pp/Pn/Post all frozen, read from
+// sourceClo -- and for each candidate solves ONE Block B jointly across all
+// of levelClips (see solveBlockBMultiLevel's doc comment in the .cpp for
+// the weighting), instead of fitting each level separately the way
+// solveBlockBLeastSquares() does for a single operating point. This tests
+// whether the measured "GP-50 saturates too late" mismatch responds to the
+// saturation curve's steepness alone, before committing to a full P/K
+// search (which would also vary Pp/Pn, at much higher search cost).
+//
+// kMultiplier=1.0 should always be included in kMultipliers as the control:
+// it must reproduce (very closely -- floating-point differences only) the
+// same B solveBlockBLeastSquares would solve for a single level, and the
+// same dynamics numbers already measured by measureLevelResponse for the
+// unmodified conversion, as a sanity check on this new solve path before
+// trusting the other candidates.
+bool sweepKAndSolveSharedB(const fs::path& sourceClo,
+                            const std::vector<double>& kMultipliers,
+                            const std::vector<MultiLevelClip>& levelClips,
+                            std::vector<KSweepCandidate>& outCandidates,
+                            std::string& error,
+                            const RefineStatusCallback& status = {});
+
 // Parses sourceClo and renders inputSignal44100 through it end-to-end
 // (Pre -> A -> P/K shaper -> Post -> B), at unity gain (no CloPlayer
 // Gain/Volume wrapper -- same convention as solveBlockBLeastSquares, for

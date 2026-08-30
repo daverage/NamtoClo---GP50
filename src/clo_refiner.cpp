@@ -400,6 +400,59 @@ void solveBlockBFromPreB(const std::vector<float>& preBTail, const std::vector<f
     for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
 }
 
+// Generalizes solveBlockBFromPreB above to N simultaneous (preB, target)
+// pairs at different gain levels, weighted by wi (already normalized to sum
+// to 1 by the caller): H = (sum wi*conj(Pi)*Ti) / (sum wi*|Pi|^2 + eps).
+// eps is scaled from the *weighted* mean of the accumulated denominator
+// (not the single-level constant) so regularization strength doesn't drift
+// with level count/weighting the way reusing a per-level constant would.
+// All preBTails must be the same length (the caller renders every level
+// clip at the same duration).
+void solveBlockBMultiLevel(const std::vector<std::vector<float>>& preBTails,
+                            const std::vector<std::vector<float>>& targetTails,
+                            const std::vector<double>& weights,
+                            std::size_t bTaps, std::vector<float>& outB) {
+    const std::size_t levels = preBTails.size();
+    std::size_t tailFrames = 0;
+    for (const auto& t : preBTails) tailFrames = std::max(tailFrames, t.size());
+    const std::size_t fftSize = nextPow2(tailFrames + bTaps);
+
+    std::vector<std::complex<float>> numer(fftSize), denom(fftSize);
+    for (std::size_t i = 0; i < levels; ++i) {
+        std::vector<std::complex<float>> P(fftSize), T(fftSize);
+        for (std::size_t j = 0; j < preBTails[i].size(); ++j) P[j] = std::complex<float>(preBTails[i][j], 0.0f);
+        for (std::size_t j = 0; j < targetTails[i].size(); ++j) T[j] = std::complex<float>(targetTails[i][j], 0.0f);
+        fft(P, false);
+        fft(T, false);
+        const float w = static_cast<float>(weights[i]);
+        for (std::size_t k = 0; k < fftSize; ++k) {
+            numer[k] += w * std::conj(P[k]) * T[k];
+            denom[k] += std::complex<float>(w * std::norm(P[k]), 0.0f);
+        }
+    }
+
+    double powerSum = 0.0;
+    for (const auto& v : denom) powerSum += static_cast<double>(v.real());
+    const float meanPower = static_cast<float>(powerSum / static_cast<double>(fftSize));
+    constexpr float kRegularization = 1e-3f;
+    const float eps = std::max(kRegularization * meanPower, 1e-20f);
+
+    std::vector<std::complex<float>> H(fftSize);
+    for (std::size_t k = 0; k < fftSize; ++k) H[k] = numer[k] / (denom[k].real() + eps);
+    fft(H, true);
+
+    outB.assign(bTaps, 0.0f);
+    for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
+}
+
+double rmsDb(const std::vector<float>& x) {
+    if (x.empty()) return -std::numeric_limits<double>::infinity();
+    double sum = 0.0;
+    for (float v : x) sum += static_cast<double>(v) * static_cast<double>(v);
+    const double rms = std::sqrt(sum / static_cast<double>(x.size()));
+    return rms > 1e-30 ? 20.0 * std::log10(rms) : -std::numeric_limits<double>::infinity();
+}
+
 // Generalizes native_converter.cpp's postForRate(sr) (duplicated here since
 // this file has its own Biquad/Model types -- see the existing Model/parseModel
 // duplication above) with a corner-frequency scale: freqScale=1.0 reproduces
@@ -562,6 +615,98 @@ PostSearchResult searchPostAndSolveB(const fs::path& sourceClo,
 
     r.ok = true;
     return r;
+}
+
+bool sweepKAndSolveSharedB(const fs::path& sourceClo,
+                            const std::vector<double>& kMultipliers,
+                            const std::vector<MultiLevelClip>& levelClips,
+                            std::vector<KSweepCandidate>& outCandidates,
+                            std::string& error,
+                            const RefineStatusCallback& status) {
+    outCandidates.clear();
+    if (levelClips.empty()) { error = "sweepKAndSolveSharedB: no level clips supplied."; return false; }
+
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return false;
+
+    Model baseModel;
+    if (!parseModel(bytes, baseModel, error)) return false;
+    const std::size_t bTaps = baseModel.B.size();
+    if (bTaps == 0) { error = "Source CLO has an empty Block B."; return false; }
+
+    // Pre->A is unaffected by Kp/Kn; compute once per level and reuse across
+    // every kMultiplier candidate, same reuse pattern as searchPostAndSolveB.
+    std::vector<std::vector<float>> aouts(levelClips.size());
+    std::vector<double> weights(levelClips.size());
+    double weightSum = 0.0;
+    for (std::size_t i = 0; i < levelClips.size(); ++i) {
+        aouts[i] = precomputeA(baseModel, levelClips[i].input44100, levelClips[i].input44100.size(), 1.0f);
+        double energy = 0.0;
+        for (float v : levelClips[i].target44100) energy += static_cast<double>(v) * static_cast<double>(v);
+        weights[i] = energy > 1e-30 ? 1.0 / energy : 0.0;
+        weightSum += weights[i];
+    }
+    if (weightSum <= 0.0) { error = "sweepKAndSolveSharedB: all level clips are silent."; return false; }
+    for (double& w : weights) w /= weightSum;
+
+    const auto zeroIt = std::find_if(levelClips.begin(), levelClips.end(),
+        [](const MultiLevelClip& c) { return std::abs(c.levelDb) < 1e-9; });
+    const bool haveZero = zeroIt != levelClips.end();
+    const std::size_t zeroIdx = haveZero ? static_cast<std::size_t>(std::distance(levelClips.begin(), zeroIt)) : 0;
+
+    for (double kMultiplier : kMultipliers) {
+        Model candidate = baseModel;
+        candidate.kp = baseModel.kp * static_cast<float>(kMultiplier);
+        candidate.kn = baseModel.kn * static_cast<float>(kMultiplier);
+
+        std::vector<std::vector<float>> preBs(levelClips.size());
+        for (std::size_t i = 0; i < levelClips.size(); ++i) {
+            renderPreB(candidate, aouts[i], candidate.pp, candidate.pn, candidate.kp, candidate.kn, preBs[i]);
+        }
+
+        std::vector<std::vector<float>> targets(levelClips.size());
+        for (std::size_t i = 0; i < levelClips.size(); ++i) targets[i] = levelClips[i].target44100;
+
+        KSweepCandidate cand;
+        cand.kMultiplier = kMultiplier;
+        solveBlockBMultiLevel(preBs, targets, weights, bTaps, cand.b);
+
+        std::vector<double> renderedRmsDb(levelClips.size()), targetRmsDb(levelClips.size());
+        double esrSum = 0.0;
+        for (std::size_t i = 0; i < levelClips.size(); ++i) {
+            std::vector<float> rendered;
+            renderWithB(preBs[i], cand.b, rendered, 1.0f);
+            esrSum += esrLoss(rendered, levelClips[i].target44100);
+            renderedRmsDb[i] = rmsDb(rendered);
+            targetRmsDb[i] = rmsDb(levelClips[i].target44100);
+        }
+        cand.spectralHeldOutEsr = esrSum / static_cast<double>(levelClips.size());
+
+        if (haveZero) {
+            const double renderedZero = renderedRmsDb[zeroIdx], targetZero = targetRmsDb[zeroIdx];
+            double sumSq = 0.0;
+            for (std::size_t i = 0; i < levelClips.size(); ++i) {
+                const double gp5Relative = renderedRmsDb[i] - renderedZero;
+                const double fullA2Relative = targetRmsDb[i] - targetZero;
+                const double relativeError = gp5Relative - fullA2Relative;
+                cand.maxDynamicsErrorDb = std::max(cand.maxDynamicsErrorDb, std::abs(relativeError));
+                sumSq += relativeError * relativeError;
+            }
+            cand.rmsDynamicsErrorDb = std::sqrt(sumSq / static_cast<double>(levelClips.size()));
+        }
+
+        if (status) {
+            std::wostringstream os;
+            os << L"GP-5/GP-50 K sweep: kMultiplier=" << kMultiplier
+               << L" -- maxDynamicsErrorDb=" << cand.maxDynamicsErrorDb
+               << L" rmsDynamicsErrorDb=" << cand.rmsDynamicsErrorDb
+               << L" spectralHeldOutEsr=" << cand.spectralHeldOutEsr;
+            status(os.str());
+        }
+        outCandidates.push_back(std::move(cand));
+    }
+
+    return true;
 }
 
 bool renderCloOnSignal(const fs::path& sourceClo,

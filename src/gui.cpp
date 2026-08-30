@@ -1631,6 +1631,52 @@ bool runHeadlessLevelResponseIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+
+// Headless entry point: NamToClo.exe --k-sweep <nam> <diClip.wav> <outputCsv>
+// Dynamics-aware fitting, Step 1: sweeps a multiplier on the P/K shaper's Kp/Kn
+// steepness, solving one shared Block B jointly across 6 gain levels per
+// candidate, to test whether the dynamic-range mismatch found by
+// --level-response responds to saturation steepness alone. See
+// ntc::runKSweepExperiment's doc comment and CLAUDE.md's dynamic-range section.
+bool runHeadlessKSweepIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 5 && std::wstring(argv[1]) == L"--k-sweep") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path diClipWav = argv[3];
+        const fs::path outputCsv = argv[4];
+        std::wcout << L"K sweep: " << inputNam.wstring() << L" x " << diClipWav.wstring() << L"\n";
+        std::vector<ntc::KSweepResult> results;
+        std::string error;
+        if (ntc::runKSweepExperiment(inputNam, diClipWav, results, error,
+                                      [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"k_multiplier,max_dynamics_error_db,rms_dynamics_error_db,spectral_held_out_esr\n";
+            std::wcout << L"\nk_multiplier  max_dynamics_error_db  rms_dynamics_error_db  spectral_held_out_esr\n";
+            for (const auto& r : results) {
+                csv << r.kMultiplier << L"," << r.maxDynamicsErrorDb << L"," << r.rmsDynamicsErrorDb << L","
+                    << r.spectralHeldOutEsr << L"\n";
+                std::wcout << r.kMultiplier << L"\t" << r.maxDynamicsErrorDb << L"\t" << r.rmsDynamicsErrorDb
+                           << L"\t" << r.spectralHeldOutEsr << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            std::wofstream errFile(outputCsv.wstring() + L".err");
+            errFile << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -1644,6 +1690,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessLevelResponseIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessKSweepIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.

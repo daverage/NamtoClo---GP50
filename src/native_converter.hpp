@@ -314,4 +314,34 @@ bool measureLevelResponse(const fs::path& inputNam,
                           std::string& error,
                           const StatusCallback& status = {});
 
+// Dynamics-aware fitting, Step 1 (see CLAUDE.md's dynamic-range section):
+// one K-multiplier candidate's dynamics/fidelity numbers, from
+// runKSweepExperiment below. maxDynamicsErrorDb/rmsDynamicsErrorDb use the
+// exact same relative-anchoring formula as LevelResponsePoint, so
+// kMultiplier=1.0's row is directly comparable to a prior
+// measureLevelResponse() run on the same (NAM, DI clip) pair -- the sanity
+// check this experiment's plan calls for before trusting the other rows.
+struct KSweepResult {
+    double kMultiplier = 0.0;
+    double maxDynamicsErrorDb = 0.0;
+    double rmsDynamicsErrorDb = 0.0;
+    double spectralHeldOutEsr = 0.0;
+};
+
+// Converts inputNam via convertNamToClo (default/production settings, same
+// as measureLevelResponse -- this tests the real shipped weakness, not a
+// synthetic candidate), builds the same 6-level ({-24,-18,-12,-6,0,+6} dB)
+// set of (input, Full-A2-target) clips from diClipWav, and sweeps
+// kMultiplier in {0.75,1.0,1.25,1.5,2.0,3.0,4.0} via
+// ntc::sweepKAndSolveSharedB (clo_refiner.hpp) -- one shared Block B solved
+// jointly across all six levels per candidate, instead of the production
+// conversion's single-operating-point solve. Comparative/measurement only:
+// does not modify or replace inputNam's actual shipped conversion. See
+// CLAUDE.md's dynamic-range section for the result.
+bool runKSweepExperiment(const fs::path& inputNam,
+                         const fs::path& diClipWav,
+                         std::vector<KSweepResult>& outResults,
+                         std::string& error,
+                         const StatusCallback& status = {});
+
 } // namespace ntc
