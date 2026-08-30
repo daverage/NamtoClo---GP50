@@ -136,6 +136,34 @@ struct QualityExperimentResult {
     // numbers. Not yet wired into convertNamToClo's production output.
     double gp5DirectBSolveHeldOutLoss = -1.0;
 
+    // Same candidate as gp5DirectBSolveHeldOutLoss (today's fixed Post,
+    // freqScale=1.0 implicitly), scored on the benchmark-only subset
+    // instead of the full validationClips set -- the fair baseline to
+    // compare gp5PostSearchHeldOutLoss against, since that candidate's own
+    // fitting saw the selection subset and can't be scored on the full set
+    // without leaking. -1 when not computed.
+    double gp5DirectBSolveBenchmarkHeldOutLoss = -1.0;
+
+    // Constrained Post-biquad-frequency-scale search (see
+    // clo_refiner.hpp's searchPostAndSolveB), alternating a fresh direct B
+    // solve with each Post candidate. gp5PostSearchFreqScale==1.0 means the
+    // search kept today's fixed postForRate() value (either no improving
+    // candidate was found, or no selection clips were available to search
+    // against); any other value means a different corner-frequency scale
+    // won. gp5PostSearchHeldOutLoss is scored against the same disjoint
+    // benchmark subset as gp5PureHeldOutLoss, for the same reason (this
+    // candidate's own fitting saw the selection subset). Compare against
+    // gp5DirectBSolveBenchmarkHeldOutLoss specifically (same subset, fair
+    // freqScale=1.0 baseline) -- not gp5DirectBSolveHeldOutLoss, which uses
+    // the full validation set and isn't comparable. -1 when not computed.
+    //
+    // Measured (see clo_refiner.hpp's searchPostAndSolveB doc comment):
+    // freqScale=2.0 won every case tested but the benchmark effect was
+    // small and inconsistent, including one regression. Not a verified win;
+    // not wired into convertNamToClo.
+    double gp5PostSearchFreqScale = 1.0;
+    double gp5PostSearchHeldOutLoss = -1.0;
+
     // "Pure" candidate: a GP-5/GP-50 model fit directly at the device tap
     // budget from a neutral seed, including a bounded local P/K search (see
     // gp5_optimizer.hpp), with no dependency on the GP-200 2048-tap fit at

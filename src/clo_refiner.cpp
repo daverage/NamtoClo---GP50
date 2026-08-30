@@ -11,6 +11,7 @@
 #include <fstream>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <vector>
 
 namespace ntc {
@@ -361,6 +362,82 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     return true;
 }
 
+namespace {
+
+// Core of solveBlockBLeastSquares(), factored out so searchPostAndSolveB()
+// (below) can re-solve B in memory for each Post candidate without a
+// round-trip through a temp CLO file. Regularized (Tikhonov/Wiener-style)
+// frequency-domain deconvolution: solves for the causal FIR B minimizing
+// ||conv(preBTail, B) - targetTail||^2. Zero-pads by bTaps beyond the
+// analysis window so the causal front of the resulting impulse response
+// isn't corrupted by circular wraparound.
+void solveBlockBFromPreB(const std::vector<float>& preBTail, const std::vector<float>& targetTail,
+                          std::size_t bTaps, std::vector<float>& outB) {
+    const std::size_t tailFrames = preBTail.size();
+    const std::size_t fftSize = nextPow2(tailFrames + bTaps);
+    std::vector<std::complex<float>> P(fftSize), T(fftSize);
+    for (std::size_t i = 0; i < tailFrames; ++i) {
+        P[i] = std::complex<float>(preBTail[i], 0.0f);
+        T[i] = std::complex<float>(targetTail[i], 0.0f);
+    }
+    fft(P, false);
+    fft(T, false);
+
+    double powerSum = 0.0;
+    for (const auto& v : P) powerSum += static_cast<double>(std::norm(v));
+    const float meanPower = static_cast<float>(powerSum / static_cast<double>(fftSize));
+    constexpr float kRegularization = 1e-3f; // fraction of mean |P(f)|^2; the one tunable knob here
+    const float eps = std::max(kRegularization * meanPower, 1e-20f);
+
+    std::vector<std::complex<float>> H(fftSize);
+    for (std::size_t k = 0; k < fftSize; ++k) {
+        const float power = std::norm(P[k]);
+        H[k] = std::conj(P[k]) * T[k] / (power + eps);
+    }
+    fft(H, true);
+
+    outB.assign(bTaps, 0.0f);
+    for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
+}
+
+// Generalizes native_converter.cpp's postForRate(sr) (duplicated here since
+// this file has its own Biquad/Model types -- see the existing Model/parseModel
+// duplication above) with a corner-frequency scale: freqScale=1.0 reproduces
+// postForRate() exactly (same reverse-engineered constants from GP-200.exe,
+// see native_converter.cpp's doc comment). Both the damping term (c) and the
+// corner-frequency term (w2) scale together so Q stays constant and only the
+// corner frequency moves -- keeps the filter physically sensible and stable
+// for any positive freqScale, no separate stability check needed.
+Biquad postForRateScaled(double fs, double freqScale) {
+    constexpr float c = 177.7158051f, w2 = 15791.45215f;
+    const float cs = c * static_cast<float>(freqScale);
+    const float w2s = w2 * static_cast<float>(freqScale * freqScale);
+    const float f = static_cast<float>(fs), f2 = f * f, D = f2 + cs * f + w2s;
+    const float b0 = f2 / D, b1 = -2.0f * b0, b2 = b0;
+    const float a1 = -(2.0f * f2 - 2.0f * w2s) / D;
+    const float a2 = (f2 - cs * f + w2s) / D;
+    Biquad q; q.b0 = b0; q.b1 = b1; q.b2 = b2; q.a1 = a1; q.a2 = a2; return q;
+}
+
+// Error-to-signal ratio: sum((rendered-target)^2) / sum(target^2). Same
+// metric family NAM's own training/eval tooling reports (see the sweep
+// capture guide), used here only for searchPostAndSolveB()'s internal
+// candidate comparison -- the caller (native_converter.cpp) does its own
+// authoritative scoring of the winning result via evaluateModelLoss.
+double esrLoss(const std::vector<float>& rendered, const std::vector<float>& target) {
+    const std::size_t n = std::min(rendered.size(), target.size());
+    if (n == 0) return 0.0;
+    double num = 0.0, den = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double d = static_cast<double>(rendered[i]) - static_cast<double>(target[i]);
+        num += d * d;
+        den += static_cast<double>(target[i]) * static_cast<double>(target[i]);
+    }
+    return den > 1e-30 ? num / den : 0.0;
+}
+
+} // namespace
+
 bool solveBlockBLeastSquares(const fs::path& sourceClo,
                               const fs::path& stimulusWav,
                               const fs::path& targetWav,
@@ -403,36 +480,88 @@ bool solveBlockBLeastSquares(const fs::path& sourceClo,
     std::vector<float> preBTail(preB.begin() + static_cast<std::ptrdiff_t>(sourceStart), preB.end());
     std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
 
-    // Regularized (Tikhonov/Wiener-style) frequency-domain deconvolution:
-    // solve for the causal FIR B minimizing ||conv(preBTail, B) - targetTail||^2.
-    // Zero-pad by bTaps beyond the analysis window so the causal front of the
-    // resulting impulse response isn't corrupted by circular wraparound.
     if (status) status(L"Solving Block B directly against the residual (least squares)...");
-    const std::size_t fftSize = nextPow2(tailFrames + bTaps);
-    std::vector<std::complex<float>> P(fftSize), T(fftSize);
-    for (std::size_t i = 0; i < tailFrames; ++i) {
-        P[i] = std::complex<float>(preBTail[i], 0.0f);
-        T[i] = std::complex<float>(targetTail[i], 0.0f);
-    }
-    fft(P, false);
-    fft(T, false);
-
-    double powerSum = 0.0;
-    for (const auto& v : P) powerSum += static_cast<double>(std::norm(v));
-    const float meanPower = static_cast<float>(powerSum / static_cast<double>(fftSize));
-    constexpr float kRegularization = 1e-3f; // fraction of mean |P(f)|^2; the one tunable knob here
-    const float eps = std::max(kRegularization * meanPower, 1e-20f);
-
-    std::vector<std::complex<float>> H(fftSize);
-    for (std::size_t k = 0; k < fftSize; ++k) {
-        const float power = std::norm(P[k]);
-        H[k] = std::conj(P[k]) * T[k] / (power + eps);
-    }
-    fft(H, true);
-
-    outB.assign(bTaps, 0.0f);
-    for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
+    solveBlockBFromPreB(preBTail, targetTail, bTaps, outB);
     return true;
+}
+
+PostSearchResult searchPostAndSolveB(const fs::path& sourceClo,
+                                      const fs::path& stimulusWav,
+                                      const fs::path& targetWav,
+                                      const std::vector<Gp5SelectionClip>& selectionClips,
+                                      std::string& error,
+                                      const RefineStatusCallback& status) {
+    PostSearchResult r;
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return r;
+
+    Model baseModel;
+    if (!parseModel(bytes, baseModel, error)) return r;
+    const std::size_t bTaps = baseModel.B.size();
+    if (bTaps == 0) { error = "Source CLO has an empty Block B."; return r; }
+
+    std::vector<float> in, target;
+    if (!readMono44100(stimulusWav, in, error) || !readMono44100(targetWav, target, error)) return r;
+
+    const std::size_t tailFrames = 20u * kSampleRate;
+    if (in.size() < tailFrames + kV26Fft) {
+        error = "The conversion stimulus is too short for the final-20-s analysis window";
+        return r;
+    }
+    if (target.size() < tailFrames) {
+        error = "The refinement target WAV must contain at least 20.000 seconds of audio";
+        return r;
+    }
+
+    // Pre->A->shaper is unaffected by Post; compute once and reuse per candidate.
+    auto aout = precomputeA(baseModel, in, in.size(), 1.0f);
+    const std::size_t targetStart = target.size() - tailFrames;
+    std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
+
+    static constexpr double kCandidates[] = {0.5, 0.7, 0.85, 1.0, 1.15, 1.3, 1.5, 2.0};
+    double bestLoss = std::numeric_limits<double>::max();
+    for (double freqScale : kCandidates) {
+        Model candidate = baseModel;
+        candidate.post = postForRateScaled(kSampleRate, freqScale);
+        std::vector<float> preB;
+        renderPreB(candidate, aout, candidate.pp, candidate.pn, candidate.kp, candidate.kn, preB);
+        const std::size_t sourceStart = preB.size() - tailFrames;
+        std::vector<float> preBTail(preB.begin() + static_cast<std::ptrdiff_t>(sourceStart), preB.end());
+
+        std::vector<float> candB;
+        solveBlockBFromPreB(preBTail, targetTail, bTaps, candB);
+
+        double loss;
+        if (selectionClips.empty()) {
+            // No selection set available: fall back to scoring against the
+            // same analysis window the solve itself used. Matches
+            // gp5_optimizer.hpp's fallback for the same case.
+            std::vector<float> rendered;
+            renderWithB(preBTail, candB, rendered, 1.0f);
+            loss = esrLoss(rendered, targetTail);
+        } else {
+            double sum = 0.0;
+            for (const auto& clip : selectionClips) {
+                auto clipAout = precomputeA(candidate, clip.clip44100, clip.clip44100.size(), 1.0f);
+                std::vector<float> clipPreB;
+                renderPreB(candidate, clipAout, candidate.pp, candidate.pn, candidate.kp, candidate.kn, clipPreB);
+                std::vector<float> clipRendered;
+                renderWithB(clipPreB, candB, clipRendered, 1.0f);
+                sum += esrLoss(clipRendered, clip.target44100);
+            }
+            loss = sum / static_cast<double>(selectionClips.size());
+        }
+
+        if (status) {
+            std::wostringstream os;
+            os << L"GP-5/GP-50 post search: freqScale=" << freqScale << L" -- loss=" << loss;
+            status(os.str());
+        }
+        if (loss < bestLoss) { bestLoss = loss; r.postFreqScale = freqScale; r.b = candB; }
+    }
+
+    r.ok = true;
+    return r;
 }
 
 } // namespace ntc

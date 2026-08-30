@@ -532,6 +532,23 @@ Biquad postForRate(double fs){
     Biquad q;q.b0=static_cast<double>(b0);q.b1=static_cast<double>(b1);q.b2=static_cast<double>(b2);q.a1=static_cast<double>(a1);q.a2=static_cast<double>(a2);return q;
 }
 
+// Generalizes postForRate() above with a corner-frequency scale: freqScale=1.0
+// reproduces postForRate() exactly. Both the damping term (c) and the
+// corner-frequency term (w2) scale together so Q stays constant and only the
+// corner frequency moves. Mirrors clo_refiner.cpp's own copy of this function
+// (that file has its own Biquad type, same duplication pattern as Model/PK
+// already has between the two files) -- keep both in sync if either changes.
+Biquad postForRateScaled(double fs,double freqScale){
+    constexpr float c=177.7158051f,w2=15791.45215f;
+    const float cs=c*static_cast<float>(freqScale);
+    const float w2s=w2*static_cast<float>(freqScale*freqScale);
+    const float f=static_cast<float>(fs),f2=f*f,D=f2+cs*f+w2s;
+    const float b0=f2/D,b1=-2.0f*b0,b2=b0;
+    const float a1=-(2.0f*f2-2.0f*w2s)/D;
+    const float a2=(f2-cs*f+w2s)/D;
+    Biquad q;q.b0=static_cast<double>(b0);q.b1=static_cast<double>(b1);q.b2=static_cast<double>(b2);q.a1=static_cast<double>(a1);q.a2=static_cast<double>(a2);return q;
+}
+
 namespace {
 
 struct AP{float a=0,s=0;float p(float x){const float y=s+a*x;s=x-a*y;return y;}};
@@ -2401,8 +2418,42 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                         if(solveBlockBLeastSquares(gp5PreToneMatchClo,tmStimulusPath,targetWav,directB,solveError,status)){
                             Model directModel44=preModel44;directModel44.B=directB;
                             qr.gp5DirectBSolveHeldOutLoss=heldOutLossFor(directModel44,44100.0);
+                            // Same candidate (today's fixed post, freqScale=1.0 implicitly),
+                            // scored on the benchmark-only subset -- the fair baseline for
+                            // gp5PostSearchHeldOutLoss below, which uses that same subset
+                            // because its own fitting saw the selection subset.
+                            // heldOutLossFor's full-set number above is not comparable to it.
+                            qr.gp5DirectBSolveBenchmarkHeldOutLoss=pureBenchmarkLossFor(directModel44,44100.0);
                         }else{
                             report(status,L"Quality experiment ["+sub.label+L"]: GP-5/GP-50 direct B solve skipped: "+std::wstring(solveError.begin(),solveError.end()));
+                        }
+
+                        // Constrained Post-frequency-scale search, alternating with a fresh
+                        // direct B solve per candidate (see clo_refiner.hpp's
+                        // searchPostAndSolveB). Gated on gp5SelectionTruths -- a search, not
+                        // a closed-form solve, so it's graded the same disciplined way the
+                        // P/K search above is: the final result is scored against
+                        // pureBenchmarkLossFor (the disjoint benchmark subset), never
+                        // heldOutLossFor's full set, since this candidate's own fitting saw
+                        // the selection subset.
+                        std::vector<Gp5SelectionClip> gp5PostSelectionClips;
+                        gp5PostSelectionClips.reserve(gp5SelectionTruths.size());
+                        for(const auto& gt:gp5SelectionTruths){
+                            Gp5SelectionClip c;
+                            c.clip44100=gt.clip44100;
+                            c.target44100=resampleR8Brain24(gt.target,gt.rate,44100.0);
+                            gp5PostSelectionClips.push_back(std::move(c));
+                        }
+                        std::string postSearchError;
+                        const auto postSearch=searchPostAndSolveB(gp5PreToneMatchClo,tmStimulusPath,targetWav,gp5PostSelectionClips,postSearchError,status);
+                        if(postSearch.ok){
+                            Model postSearchModel44=preModel44;
+                            postSearchModel44.post=postForRateScaled(44100.0,postSearch.postFreqScale);
+                            postSearchModel44.B=postSearch.b;
+                            qr.gp5PostSearchFreqScale=postSearch.postFreqScale;
+                            qr.gp5PostSearchHeldOutLoss=pureBenchmarkLossFor(postSearchModel44,44100.0);
+                        }else{
+                            report(status,L"Quality experiment ["+sub.label+L"]: GP-5/GP-50 post search skipped: "+std::wstring(postSearchError.begin(),postSearchError.end()));
                         }
                     }
                 }
@@ -2421,6 +2472,8 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                 os<<L" | GP-5/GP-50 Tone Match held-out: before="<<qr.gp5ChosenDeviceHeldOutLoss
                   <<L", after (correction-IR)="<<qr.gp5PostToneMatchHeldOutLoss
                   <<L", after (direct B solve)="<<qr.gp5DirectBSolveHeldOutLoss;
+            if(qr.gp5PostSearchHeldOutLoss>=0.0)
+                os<<L", after (post search, freqScale="<<qr.gp5PostSearchFreqScale<<L")="<<qr.gp5PostSearchHeldOutLoss;
             os<<L" (lower is better).";report(status,os.str());}
         results.push_back(std::move(qr));
     }
@@ -2432,7 +2485,8 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
              "gp5_truncated_512_held_out_loss,gp5_direct_fit_512_held_out_loss,"
              "gp5_pure_512_loss,gp5_pure_512_held_out_loss,"
              "gp5_chosen_strategy,gp5_chosen_device_held_out_loss,gp5_post_tonematch_held_out_loss,"
-             "gp5_direct_b_solve_held_out_loss,"
+             "gp5_direct_b_solve_held_out_loss,gp5_direct_b_solve_benchmark_held_out_loss,"
+             "gp5_post_search_freq_scale,gp5_post_search_held_out_loss,"
              "pk_pp,pk_pn,pk_kp,pk_kn,"
              "gp200_output,gp5gp50_output,gp5gp50_pure_output\n";
         for(const auto&r:results){
@@ -2442,7 +2496,8 @@ std::vector<QualityExperimentResult> runQualityExperiments(const fs::path& input
                <<r.gp5TruncatedHeldOutLoss<<","<<r.gp5DirectFitHeldOutLoss<<","
                <<r.gp5PureLoss<<","<<r.gp5PureHeldOutLoss<<","
                <<strategy<<","<<r.gp5ChosenDeviceHeldOutLoss<<","<<r.gp5PostToneMatchHeldOutLoss<<","
-               <<r.gp5DirectBSolveHeldOutLoss<<","
+               <<r.gp5DirectBSolveHeldOutLoss<<","<<r.gp5DirectBSolveBenchmarkHeldOutLoss<<","
+               <<r.gp5PostSearchFreqScale<<","<<r.gp5PostSearchHeldOutLoss<<","
                <<r.pkPp<<","<<r.pkPn<<","<<r.pkKp<<","<<r.pkKn<<","
                <<pathToUtf8(r.conversion.gp2001024)<<","<<pathToUtf8(r.conversion.gp5gp50Compact)<<","<<pathToUtf8(r.gp5PureCompact)<<"\n";
         }

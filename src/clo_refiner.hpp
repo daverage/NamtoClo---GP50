@@ -97,4 +97,60 @@ bool solveBlockBLeastSquares(const fs::path& sourceClo,
                               std::string& error,
                               const RefineStatusCallback& status = {});
 
+// A real-playing-content (dry, Full-A2-rendered target) pair used only to
+// gate searchPostAndSolveB()'s round acceptance -- never to fit anything
+// directly. Both fields must already be at 44.1kHz (the caller resamples
+// native_converter.cpp's GroundTruth::target from its native trainer rate
+// before building this -- clo_refiner.cpp has no resampler of its own).
+struct Gp5SelectionClip {
+    std::vector<float> clip44100;
+    std::vector<float> target44100;
+};
+
+struct PostSearchResult {
+    bool ok = false;
+    std::string error;
+    double postFreqScale = 1.0; // 1.0 reproduces native_converter.cpp's postForRate() exactly
+    std::vector<float> b;       // Block B solved against the winning post
+};
+
+// Constrained search over the Post biquad's corner-frequency scale (a small
+// fixed grid including 1.0, which reproduces native_converter.cpp's
+// postForRate() -- today's fixed, reverse-engineered-from-GP-200.exe value
+// -- exactly), re-solving Block B via the same least-squares approach as
+// solveBlockBLeastSquares() after each candidate (Pre/A/P-K frozen). Keeps
+// whichever (freqScale, B) pair scores the lowest average loss across
+// selectionClips. 1.0 is always a candidate, so this can never score worse
+// than today's fixed Post *on selectionClips itself* -- but that is not a
+// held-out guarantee: the winner can still score worse than freqScale=1.0
+// on a disjoint benchmark set, exactly as a small selection set is prone to
+// (see MEASURED below). Always score the returned result against a
+// benchmark set before trusting it, the same discipline gp5_optimizer.hpp's
+// P/K search needed.
+//
+// selectionClips gates acceptance the same way gp5_optimizer.hpp's P/K
+// search gates on its own selection set, for the same reason: this is a
+// search over real signal, not a closed-form solve, so grading it against
+// its own training/analysis window would let it overfit exactly like the
+// P/K search originally did. Pass a benchmark subset disjoint from
+// selectionClips to score the final result, as the caller already does for
+// the P/K search.
+//
+// MEASURED (2026-08-30, see test_assets/quality_results/*_PureCandidate/
+// quality_experiment_results_post_search.csv): freqScale=2.0 (the top of
+// the grid) won on all 4 (NAM, submodel) combinations tested, but the
+// benchmark-scored effect was small and inconsistent -- +4.0%/+0.9%/~0%
+// (noise) on three, and a -1.6% regression on the fourth (Meshuggah Lite).
+// Not wired into convertNamToClo. Always hitting the grid's boundary
+// suggests either real headroom beyond 2.0 or (more likely, given the
+// regression) that 2-3 selection clips isn't enough signal to trust this
+// search's verdict yet -- see CLAUDE.md's "Post-biquad frequency-scale
+// search" section.
+PostSearchResult searchPostAndSolveB(const fs::path& sourceClo,
+                                      const fs::path& stimulusWav,
+                                      const fs::path& targetWav,
+                                      const std::vector<Gp5SelectionClip>& selectionClips,
+                                      std::string& error,
+                                      const RefineStatusCallback& status = {});
+
 } // namespace ntc
