@@ -1874,6 +1874,54 @@ bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+
+// Headless entry point: NamToClo.exe --verify-gp5-multilevel <nam> <diClip.wav>
+//   <outputCsv> <heldOutClip1> [heldOutClip2...]
+// Direct verification of the multi-level B-solve Tone Match candidate on the
+// TRUE GP-5/GP-50 512-tap path against Full A2 -- see
+// ntc::verifyGp5MultiLevelWiring's doc comment for why this exists (every
+// official-vs-ours benchmark result was inadvertently scored against the
+// GP-200 candidate instead).
+bool runHeadlessGp5MultiLevelVerifyIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 5 && std::wstring(argv[1]) == L"--verify-gp5-multilevel") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path diClipWav = argv[3];
+        const fs::path outputCsv = argv[4];
+        std::vector<fs::path> heldOutClips;
+        for (int i = 5; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"GP-5/GP-50 multi-level verify: " << inputNam.wstring() << L"\n";
+        ntc::Gp5MultiLevelVerifyResult result;
+        std::string error;
+        if (ntc::verifyGp5MultiLevelWiring(inputNam, diClipWav, heldOutClips, result, error,
+                                            [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"metric,baseline_default_mode,candidate_auto_mode\n";
+            csv << L"dynamics_max_err_db," << result.baselineMaxRelativeErrorDb << L"," << result.candidateMaxRelativeErrorDb << L"\n";
+            csv << L"dynamics_rms_err_db," << result.baselineRmsRelativeErrorDb << L"," << result.candidateRmsRelativeErrorDb << L"\n";
+            csv << L"mean_held_out_esr," << result.baselineMeanHeldOutEsr << L"," << result.candidateMeanHeldOutEsr << L"\n";
+            std::wcout << L"\nDynamics (vs Full A2): baseline max=" << result.baselineMaxRelativeErrorDb << L"dB rms=" << result.baselineRmsRelativeErrorDb
+                       << L"dB | candidate max=" << result.candidateMaxRelativeErrorDb << L"dB rms=" << result.candidateRmsRelativeErrorDb << L"dB\n";
+            std::wcout << L"Held-out ESR (vs Full A2): baseline=" << result.baselineMeanHeldOutEsr << L" | candidate=" << result.candidateMeanHeldOutEsr << L"\n";
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            std::wofstream errFile(outputCsv.wstring() + L".err");
+            errFile << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -1899,6 +1947,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessOfficialBenchmarkIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessGp5MultiLevelVerifyIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.

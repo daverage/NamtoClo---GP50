@@ -382,6 +382,32 @@ bool runPkDynamicsAudition(const fs::path& inputNam,
                            std::string& error,
                            const StatusCallback& status = {});
 
+// Direct verification of the multi-level B-solve Tone Match candidate wired
+// into convertNamToClo's GP-5/GP-50 (true 512-tap compact) path -- every
+// official-vs-ours benchmark result above was inadvertently scored against
+// the GP-200 1024/2048-tap candidate (all user-supplied "official SnapTone"
+// files turned out to be 8840-byte GP-200-format files, not the 2696-byte
+// GP-5/GP-50 compact format), so that evidence never actually exercised the
+// real GP-5/GP-50 code path this candidate was wired into. This compares
+// TWO real conversions of the SAME NAM -- Default Tone Match reference mode
+// (multi-level candidate never fires, refine.referenceWav stays empty) vs.
+// Auto (the GUI's actual default, which does supply a reference clip) --
+// against Full A2 directly, sidestepping the official-file mislabeling
+// entirely. "Candidate" is the Auto-mode gp5gp50Compact; "baseline" is the
+// Default-mode one.
+struct Gp5MultiLevelVerifyResult {
+    bool ok = false;
+    std::string error;
+    double baselineMaxRelativeErrorDb = 0.0, baselineRmsRelativeErrorDb = 0.0, baselineMeanHeldOutEsr = 0.0;
+    double candidateMaxRelativeErrorDb = 0.0, candidateRmsRelativeErrorDb = 0.0, candidateMeanHeldOutEsr = 0.0;
+};
+bool verifyGp5MultiLevelWiring(const fs::path& inputNam,
+                               const fs::path& diClipWav,
+                               const std::vector<fs::path>& heldOutClips,
+                               Gp5MultiLevelVerifyResult& out,
+                               std::string& error,
+                               const StatusCallback& status = {});
+
 // Definitive official-vs-ours benchmark (resources/GP50_SnapTone_Conversion_
 // Benchmark_Plan_v2.md, section 14): given a real official SnapTone CLO
 // captured/converted by Valeton's own tooling for inputNam, compares it

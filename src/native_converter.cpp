@@ -2907,6 +2907,109 @@ bool runPkDynamicsAudition(const fs::path& inputNam,
     return true;
 }
 
+// See native_converter.hpp's doc comment: verifies the multi-level Tone
+// Match candidate wired into convertNamToClo's GP-5/GP-50 path directly
+// against Full A2, since every official-vs-ours benchmark result was
+// inadvertently scored against the GP-200 candidate instead (all supplied
+// "official SnapTone" files turned out to be GP-200-format).
+bool verifyGp5MultiLevelWiring(const fs::path& inputNam,
+                               const fs::path& diClipWav,
+                               const std::vector<fs::path>& heldOutClips,
+                               Gp5MultiLevelVerifyResult& out,
+                               std::string& error,
+                               const StatusCallback& status){
+    out=Gp5MultiLevelVerifyResult{};
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_gp5_ml_verify_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"GP-5/GP-50 multi-level verify: converting (Default reference -- baseline, no multi-level candidate)...");
+    NativeConverterConfig converter;
+    CloRefineConfig refineDefault;refineDefault.enabled=true;refineDefault.referenceMode=ToneMatchReferenceMode::Default;
+    auto baseline=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refineDefault,converter,status);
+    if(!baseline.ok||baseline.gp5gp50Compact.empty()){
+        error=baseline.error.empty()?"Baseline conversion did not produce a GP-5/GP-50 output.":baseline.error;
+        fs::remove_all(work,ec);return false;
+    }
+
+    report(status,L"GP-5/GP-50 multi-level verify: converting (Auto reference -- the GUI's actual default, multi-level candidate can fire)...");
+    CloRefineConfig refineAuto;refineAuto.enabled=true;refineAuto.referenceMode=ToneMatchReferenceMode::Auto;
+    auto candidate=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refineAuto,converter,status);
+    if(!candidate.ok||candidate.gp5gp50Compact.empty()){
+        error=candidate.error.empty()?"Candidate conversion did not produce a GP-5/GP-50 output.":candidate.error;
+        fs::remove_all(work,ec);return false;
+    }
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    struct Point{double levelDb=0,fullA2=0,baseline=0,candidate=0;};
+    std::vector<Point> points;
+    static constexpr double kLevelsDb[]={-24.0,-18.0,-12.0,-6.0,0.0,6.0};
+    for(double levelDb:kLevelsDb){
+        report(status,L"GP-5/GP-50 multi-level verify: dynamics sweep at "+std::to_wstring(levelDb)+L" dB...");
+        const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
+        std::vector<float> scaled(dry.size());
+        for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
+
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+        if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+        std::vector<float> baselineOutput,candidateOutput;
+        if(!renderCloOnSignal(baseline.gp5gp50Compact,scaled,baselineOutput,stepError))continue;
+        if(!renderCloOnSignal(candidate.gp5gp50Compact,scaled,candidateOutput,stepError))continue;
+
+        Point p;p.levelDb=levelDb;p.fullA2=rmsDb(fullA2Output);p.baseline=rmsDb(baselineOutput);p.candidate=rmsDb(candidateOutput);
+        points.push_back(p);
+    }
+    if(points.empty()){error="No level clips rendered successfully.";fs::remove_all(work,ec);return false;}
+
+    const auto zeroIt=std::find_if(points.begin(),points.end(),[](const Point&p){return std::abs(p.levelDb)<1e-9;});
+    if(zeroIt!=points.end()){
+        const double fullA2Zero=zeroIt->fullA2,baselineZero=zeroIt->baseline,candidateZero=zeroIt->candidate;
+        double baselineSumSq=0.0,candidateSumSq=0.0;
+        for(const auto&p:points){
+            const double fullA2Rel=p.fullA2-fullA2Zero;
+            const double baselineErr=(p.baseline-baselineZero)-fullA2Rel;
+            const double candidateErr=(p.candidate-candidateZero)-fullA2Rel;
+            out.baselineMaxRelativeErrorDb=std::max(out.baselineMaxRelativeErrorDb,std::abs(baselineErr));
+            out.candidateMaxRelativeErrorDb=std::max(out.candidateMaxRelativeErrorDb,std::abs(candidateErr));
+            baselineSumSq+=baselineErr*baselineErr;candidateSumSq+=candidateErr*candidateErr;
+        }
+        out.baselineRmsRelativeErrorDb=std::sqrt(baselineSumSq/static_cast<double>(points.size()));
+        out.candidateRmsRelativeErrorDb=std::sqrt(candidateSumSq/static_cast<double>(points.size()));
+    }
+
+    double baselineEsrSum=0.0,candidateEsrSum=0.0;std::size_t heldOutCount=0;
+    for(const auto& clipPath:heldOutClips){
+        report(status,L"GP-5/GP-50 multi-level verify: held-out clip "+clipPath.filename().wstring()+L"...");
+        std::vector<float> clipDry;std::string stepError;
+        if(!loadClipAsMono44100(clipPath,clipDry,stepError))continue;
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
+        if(!renderNamOnSignal(fullModelPath,clipDry,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+        const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+
+        std::vector<float> baselineOutput,candidateOutput;
+        if(!renderCloOnSignal(baseline.gp5gp50Compact,clipDry,baselineOutput,stepError))continue;
+        if(!renderCloOnSignal(candidate.gp5gp50Compact,clipDry,candidateOutput,stepError))continue;
+
+        baselineEsrSum+=levelResponseEsr(baselineOutput,fullA2At44100);
+        candidateEsrSum+=levelResponseEsr(candidateOutput,fullA2At44100);
+        ++heldOutCount;
+    }
+    if(heldOutCount>0){
+        out.baselineMeanHeldOutEsr=baselineEsrSum/static_cast<double>(heldOutCount);
+        out.candidateMeanHeldOutEsr=candidateEsrSum/static_cast<double>(heldOutCount);
+    }
+
+    fs::remove_all(work,ec);
+    out.ok=true;
+    return true;
+}
+
 namespace {
 // Peeks the VTSI header's declared A/B tap counts (offsets 0x7c/0x84, same
 // layout parseModel() in clo_refiner.cpp reads) without fully parsing the
