@@ -746,11 +746,17 @@ void computeLayout(int clientW, int clientH) {
     gUi.sectionCorrective = RECT{ margin, y, clientW - margin, y + 86 }; y += 86 + gap;
     gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 134 }; y += 134 + gap;
     gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
-    gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
+    const int footerTop = std::max(clientH - footerH, static_cast<int>(gUi.buttonArea.bottom) + 16);
+    gUi.footer = RECT{ 0, footerTop, clientW, std::max(clientH, footerTop + footerH) };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
                         gUi.sectionRecorded.right - 16, gUi.sectionRecorded.top + 96 };
     gUi.uploaderCard = RECT{ margin, 145, clientW - margin, 535 };
 }
+
+// Minimum client size needed so no section, the button row, or the footer
+// ever overlaps — mirrors computeLayout's fixed vertical math.
+constexpr int kMinClientWidth = 960;
+constexpr int kMinClientHeight = 128 + (76 + 70 + 66 + 105 + 86 + 134) + 6 * 7 + 38 + 16 + 38 + 16;
 
 void layoutControls(HWND hwnd) {
     RECT rc{};
@@ -1201,6 +1207,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         layoutControls(hwnd);
         InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
+    case WM_GETMINMAXINFO: {
+        RECT rc{ 0, 0, kMinClientWidth, kMinClientHeight };
+        AdjustWindowRectEx(&rc, static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)), FALSE,
+                            static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)));
+        auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        mmi->ptMinTrackSize.x = rc.right - rc.left;
+        mmi->ptMinTrackSize.y = rc.bottom - rc.top;
+        return 0;
+    }
     case WM_CTLCOLORSTATIC: {
         HDC hdc = reinterpret_cast<HDC>(wParam);
         SetBkMode(hdc, TRANSPARENT);
@@ -2019,9 +2034,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&wc);
 
     const std::wstring windowTitle = L"NAM to CLO";
-    HWND hwnd = CreateWindowExW(0, kClassName, windowTitle.c_str(),
-                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 800,
+    const DWORD windowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX |
+                              WS_MAXIMIZEBOX | WS_THICKFRAME;
+    RECT initialRect{ 0, 0, kMinClientWidth + 60, kMinClientHeight + 20 };
+    AdjustWindowRectEx(&initialRect, windowStyle, FALSE, 0);
+    HWND hwnd = CreateWindowExW(0, kClassName, windowTitle.c_str(), windowStyle,
+                                CW_USEDEFAULT, CW_USEDEFAULT,
+                                initialRect.right - initialRect.left,
+                                initialRect.bottom - initialRect.top,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);
