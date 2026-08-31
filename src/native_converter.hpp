@@ -401,16 +401,19 @@ struct BenchmarkLevelPoint {
     double fullA2RelativeDb = 0.0, officialRelativeDb = 0.0, oursRelativeDb = 0.0;
     double officialRelativeErrorDb = 0.0; // officialRelativeDb - fullA2RelativeDb
     double oursRelativeErrorDb = 0.0;     // oursRelativeDb - fullA2RelativeDb
+    // Populated only when optimization (trainDiClipWav/selectionDiClipWav) was requested and succeeded.
+    double optimizedRelativeDb = 0.0, optimizedRelativeErrorDb = 0.0;
 };
 struct BenchmarkHeldOutPoint {
     std::wstring clipName;
     double officialEsr = 0.0; // waveform error-to-signal ratio vs Full A2 (levelResponseEsr)
     double oursEsr = 0.0;
+    double optimizedEsr = 0.0; // populated only when optimization succeeded
 };
 struct BenchmarkResult {
     bool ok = false;
     std::string error;
-    float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f; // ours, for gain-character context
+    float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f; // ours (shipped), for gain-character context
     fs::path oursClo;
 
     // Six-level ({-24,-18,-12,-6,0,+6} dB) dynamics/compression-curve sweep,
@@ -423,14 +426,36 @@ struct BenchmarkResult {
     // spectral/waveform fidelity per clip plus the mean across clips.
     std::vector<BenchmarkHeldOutPoint> heldOut;
     double officialMeanHeldOutEsr = 0.0, oursMeanHeldOutEsr = 0.0;
+
+    // Step 2 dynamics-aware P/K search (see CLAUDE.md's Step 2 section),
+    // run against our own conversion and scored the SAME way as official/
+    // ours above -- true only when trainDiClipWav/selectionDiClipWav were
+    // both supplied to runOfficialSnaptoneBenchmark and the search
+    // succeeded. Answers the question the plain official-vs-shipped
+    // comparison above cannot: does our unshipped dynamics-aware candidate
+    // actually beat the official file, not just our own shipped baseline?
+    bool optimizedComputed = false;
+    float optimizedPp = 0.0f, optimizedPn = 0.0f, optimizedKp = 0.0f, optimizedKn = 0.0f;
+    double optimizedMaxRelativeErrorDb = 0.0, optimizedRmsRelativeErrorDb = 0.0;
+    double optimizedMeanHeldOutEsr = 0.0;
 };
 
+// trainDiClipWav/selectionDiClipWav are optional (pass empty paths to skip):
+// when both are supplied, also runs Step 2's searchPkForDynamics against our
+// own conversion (using diClipWav itself as the disjoint benchmark clip for
+// the search's round-acceptance gate, matching the discipline every other
+// search in this codebase uses) and scores the resulting optimized candidate
+// against the SAME official file and Full A2 reference as the shipped
+// candidate -- see BenchmarkResult::optimizedComputed.
 bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
                                   const fs::path& officialSnapClo,
                                   const fs::path& diClipWav,
                                   const std::vector<fs::path>& heldOutClips,
                                   BenchmarkResult& out,
                                   std::string& error,
-                                  const StatusCallback& status = {});
+                                  const StatusCallback& status = {},
+                                  const fs::path& trainDiClipWav = {},
+                                  const fs::path& selectionDiClipWav = {},
+                                  double optimizationLambda = 0.3);
 
 } // namespace ntc

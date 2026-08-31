@@ -1788,12 +1788,21 @@ bool runHeadlessPkDynamicsAuditionIfRequested(int& exitCode) {
 // Benchmark_Plan_v2.md, section 14): compares a real official SnapTone CLO
 // against our own conversion of the same NAM, both judged against Full A2.
 // See ntc::runOfficialSnaptoneBenchmark's doc comment.
+//
+// NamToClo.exe --official-benchmark <nam> <officialSnapClo> <diClipWav>
+//   <outputCsv> <trainClip|-> <selectionClip|-> <lambda> <heldOutClip1> [...]
+// trainClip/selectionClip may be "-" to skip the optional Step 2
+// dynamics-aware P/K search comparison (BenchmarkResult::optimizedComputed
+// stays false); when both are real clips, the search runs against our own
+// conversion (diClipWav itself serves as its disjoint benchmark clip) and
+// the resulting optimized candidate is scored against the same official
+// file and Full A2 reference as the shipped candidate.
 bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) return false;
     bool handled = false;
-    if (argc >= 7 && std::wstring(argv[1]) == L"--official-benchmark") {
+    if (argc >= 10 && std::wstring(argv[1]) == L"--official-benchmark") {
         handled = true;
         AllocConsole();
         FILE* dummy = nullptr;
@@ -1802,37 +1811,50 @@ bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
         const fs::path officialSnapClo = argv[3];
         const fs::path diClipWav = argv[4];
         const fs::path outputCsv = argv[5];
+        const std::wstring trainArg = argv[6];
+        const std::wstring selectionArg = argv[7];
+        const fs::path trainClip = (trainArg == L"-") ? fs::path{} : fs::path(trainArg);
+        const fs::path selectionClip = (selectionArg == L"-") ? fs::path{} : fs::path(selectionArg);
+        const double lambda = std::wcstod(argv[8], nullptr);
         std::vector<fs::path> heldOutClips;
-        for (int i = 6; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        for (int i = 9; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
         std::wcout << L"Official benchmark: " << inputNam.wstring() << L" vs " << officialSnapClo.wstring() << L"\n";
         ntc::BenchmarkResult result;
         std::string error;
         if (ntc::runOfficialSnaptoneBenchmark(inputNam, officialSnapClo, diClipWav, heldOutClips, result, error,
-                                               [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+                                               [](const std::wstring& s) { std::wcout << s << L"\n"; },
+                                               trainClip, selectionClip, lambda)) {
             std::wofstream csv(outputCsv);
-            csv << L"section,level_db_or_clip,full_a2_relative_db,official_relative_db,ours_relative_db,"
-                   L"official_relative_error_db,ours_relative_error_db,official_esr,ours_esr\n";
+            csv << L"section,level_db_or_clip,full_a2_relative_db,official_relative_db,ours_relative_db,optimized_relative_db,"
+                   L"official_relative_error_db,ours_relative_error_db,optimized_relative_error_db,official_esr,ours_esr,optimized_esr\n";
             for (const auto& p : result.levels) {
                 csv << L"level," << p.levelDb << L"," << p.fullA2RelativeDb << L"," << p.officialRelativeDb << L","
-                    << p.oursRelativeDb << L"," << p.officialRelativeErrorDb << L"," << p.oursRelativeErrorDb << L",,\n";
+                    << p.oursRelativeDb << L"," << p.optimizedRelativeDb << L"," << p.officialRelativeErrorDb << L","
+                    << p.oursRelativeErrorDb << L"," << p.optimizedRelativeErrorDb << L",,,\n";
             }
             for (const auto& h : result.heldOut) {
-                csv << L"held_out," << h.clipName << L",,,,," << L"," << h.officialEsr << L"," << h.oursEsr << L"\n";
+                csv << L"held_out," << h.clipName << L",,,,,,,," << h.officialEsr << L"," << h.oursEsr << L"," << h.optimizedEsr << L"\n";
             }
             csv << L"summary,dynamics_max_err_db," << result.officialMaxRelativeErrorDb << L"," << result.oursMaxRelativeErrorDb
-                << L",,,,,\n";
+                << L"," << result.optimizedMaxRelativeErrorDb << L",,,,,,\n";
             csv << L"summary,dynamics_rms_err_db," << result.officialRmsRelativeErrorDb << L"," << result.oursRmsRelativeErrorDb
-                << L",,,,,\n";
+                << L"," << result.optimizedRmsRelativeErrorDb << L",,,,,,\n";
             csv << L"summary,mean_held_out_esr," << result.officialMeanHeldOutEsr << L"," << result.oursMeanHeldOutEsr
-                << L",,,,,\n";
+                << L"," << result.optimizedMeanHeldOutEsr << L",,,,,,\n";
 
             std::wcout << L"\nDynamics (six-level sweep vs Full A2):\n";
             std::wcout << L"  official: max=" << result.officialMaxRelativeErrorDb << L"dB rms=" << result.officialRmsRelativeErrorDb << L"dB\n";
             std::wcout << L"  ours:     max=" << result.oursMaxRelativeErrorDb << L"dB rms=" << result.oursRmsRelativeErrorDb << L"dB\n";
+            if (result.optimizedComputed)
+                std::wcout << L"  optimized:max=" << result.optimizedMaxRelativeErrorDb << L"dB rms=" << result.optimizedRmsRelativeErrorDb << L"dB\n";
             std::wcout << L"\nHeld-out real playing (mean ESR vs Full A2, lower is better):\n";
             std::wcout << L"  official: " << result.officialMeanHeldOutEsr << L"\n";
             std::wcout << L"  ours:     " << result.oursMeanHeldOutEsr << L"\n";
+            if (result.optimizedComputed)
+                std::wcout << L"  optimized:" << result.optimizedMeanHeldOutEsr << L"\n";
             std::wcout << L"\npk (ours): pp=" << result.pkPp << L" pn=" << result.pkPn << L" kp=" << result.pkKp << L" kn=" << result.pkKn << L"\n";
+            if (result.optimizedComputed)
+                std::wcout << L"pk (optimized): pp=" << result.optimizedPp << L" pn=" << result.optimizedPn << L" kp=" << result.optimizedKp << L" kn=" << result.optimizedKn << L"\n";
             std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
             exitCode = 0;
         } else {

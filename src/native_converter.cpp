@@ -2899,7 +2899,10 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
                                   const std::vector<fs::path>& heldOutClips,
                                   BenchmarkResult& out,
                                   std::string& error,
-                                  const StatusCallback& status){
+                                  const StatusCallback& status,
+                                  const fs::path& trainDiClipWav,
+                                  const fs::path& selectionDiClipWav,
+                                  double optimizationLambda){
     out=BenchmarkResult{};
     std::error_code ec;
     const fs::path work=fs::temp_directory_path(ec)/(L"ntc_official_benchmark_"+inputNam.stem().wstring());
@@ -2930,6 +2933,34 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
     if(out.oursClo.empty()){
         error="Conversion did not produce a matching-architecture candidate for the official file's B tap count ("+std::to_string(officialBTaps)+").";
         fs::remove_all(work,ec);return false;
+    }
+
+    // Optional Step 2 dynamics-aware P/K search (see CLAUDE.md's Step 2
+    // section) against our own conversion, scored the same way as
+    // official/ours below. diClipWav itself is used as the disjoint
+    // benchmark clip for the search's round-acceptance gate -- it's never
+    // used to fit or select the optimized candidate, only to score the
+    // shipped/official candidates below, matching the discipline every
+    // other search in this codebase uses (train/selection/benchmark all
+    // disjoint).
+    PkDynamicsResult search;
+    const bool wantOptimize=!trainDiClipWav.empty()&&!selectionDiClipWav.empty();
+    if(wantOptimize){
+        report(status,L"Official benchmark: running Step 2 P/K dynamics search...");
+        std::vector<MultiLevelClip> trainClips,selectionClips,benchmarkClips;
+        std::string searchError;
+        const bool built=
+            buildLevelClips(fullModelPath,trainDiClipWav,trainClips,searchError,status,L"Official benchmark optimize (train)")&&
+            buildLevelClips(fullModelPath,selectionDiClipWav,selectionClips,searchError,status,L"Official benchmark optimize (selection)")&&
+            buildLevelClips(fullModelPath,diClipWav,benchmarkClips,searchError,status,L"Official benchmark optimize (benchmark)");
+        if(built){
+            search=ntc::searchPkForDynamics(out.oursClo,trainClips,selectionClips,benchmarkClips,optimizationLambda,searchError,status);
+            if(!search.ok) report(status,L"Official benchmark: Step 2 search failed ("+std::wstring(searchError.begin(),searchError.end())+L"), continuing without an optimized candidate.");
+        } else {
+            report(status,L"Official benchmark: could not build optimize clip sets ("+std::wstring(searchError.begin(),searchError.end())+L"), continuing without an optimized candidate.");
+        }
+        out.optimizedComputed=search.ok;
+        if(search.ok){out.optimizedPp=search.pp;out.optimizedPn=search.pn;out.optimizedKp=search.kp;out.optimizedKn=search.kn;}
     }
 
     std::vector<float> dry;
@@ -2964,6 +2995,11 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         p.fullA2RelativeDb=rmsDb(fullA2Output);
         p.officialRelativeDb=rmsDb(officialOutput);
         p.oursRelativeDb=rmsDb(oursOutput);
+        if(search.ok){
+            std::vector<float> optimizedOutput;
+            if(renderCloWithOverrideOnSignal(out.oursClo,search.pp,search.pn,search.kp,search.kn,search.b,scaled,optimizedOutput,stepError))
+                p.optimizedRelativeDb=rmsDb(optimizedOutput);
+        }
         out.levels.push_back(p);
     }
     if(out.levels.empty()){error="No level clips rendered successfully.";fs::remove_all(work,ec);return false;}
@@ -2972,7 +3008,8 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         [](const BenchmarkLevelPoint&p){return std::abs(p.levelDb)<1e-9;});
     if(zeroIt!=out.levels.end()){
         const double fullA2Zero=zeroIt->fullA2RelativeDb,officialZero=zeroIt->officialRelativeDb,oursZero=zeroIt->oursRelativeDb;
-        double officialSumSq=0.0,oursSumSq=0.0;
+        const double optimizedZero=zeroIt->optimizedRelativeDb;
+        double officialSumSq=0.0,oursSumSq=0.0,optimizedSumSq=0.0;
         for(auto&p:out.levels){
             p.fullA2RelativeDb-=fullA2Zero;
             p.officialRelativeDb-=officialZero;
@@ -2983,12 +3020,19 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
             out.oursMaxRelativeErrorDb=std::max(out.oursMaxRelativeErrorDb,std::abs(p.oursRelativeErrorDb));
             officialSumSq+=p.officialRelativeErrorDb*p.officialRelativeErrorDb;
             oursSumSq+=p.oursRelativeErrorDb*p.oursRelativeErrorDb;
+            if(search.ok){
+                p.optimizedRelativeDb-=optimizedZero;
+                p.optimizedRelativeErrorDb=p.optimizedRelativeDb-p.fullA2RelativeDb;
+                out.optimizedMaxRelativeErrorDb=std::max(out.optimizedMaxRelativeErrorDb,std::abs(p.optimizedRelativeErrorDb));
+                optimizedSumSq+=p.optimizedRelativeErrorDb*p.optimizedRelativeErrorDb;
+            }
         }
         out.officialRmsRelativeErrorDb=std::sqrt(officialSumSq/static_cast<double>(out.levels.size()));
         out.oursRmsRelativeErrorDb=std::sqrt(oursSumSq/static_cast<double>(out.levels.size()));
+        if(search.ok) out.optimizedRmsRelativeErrorDb=std::sqrt(optimizedSumSq/static_cast<double>(out.levels.size()));
     }
 
-    double officialEsrSum=0.0,oursEsrSum=0.0;std::size_t heldOutCount=0;
+    double officialEsrSum=0.0,oursEsrSum=0.0,optimizedEsrSum=0.0;std::size_t heldOutCount=0;
     for(const auto& clipPath:heldOutClips){
         report(status,L"Official benchmark: held-out clip "+clipPath.filename().wstring()+L"...");
         std::vector<float> clipDry;
@@ -3015,12 +3059,18 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         hp.clipName=clipPath.filename().wstring();
         hp.officialEsr=levelResponseEsr(officialOutput,fullA2At44100);
         hp.oursEsr=levelResponseEsr(oursOutput,fullA2At44100);
+        if(search.ok){
+            std::vector<float> optimizedOutput;
+            if(renderCloWithOverrideOnSignal(out.oursClo,search.pp,search.pn,search.kp,search.kn,search.b,clipDry,optimizedOutput,stepError))
+                hp.optimizedEsr=levelResponseEsr(optimizedOutput,fullA2At44100);
+        }
         out.heldOut.push_back(hp);
-        officialEsrSum+=hp.officialEsr;oursEsrSum+=hp.oursEsr;++heldOutCount;
+        officialEsrSum+=hp.officialEsr;oursEsrSum+=hp.oursEsr;optimizedEsrSum+=hp.optimizedEsr;++heldOutCount;
     }
     if(heldOutCount>0){
         out.officialMeanHeldOutEsr=officialEsrSum/static_cast<double>(heldOutCount);
         out.oursMeanHeldOutEsr=oursEsrSum/static_cast<double>(heldOutCount);
+        if(search.ok) out.optimizedMeanHeldOutEsr=optimizedEsrSum/static_cast<double>(heldOutCount);
     }
 
     fs::remove_all(work,ec);
