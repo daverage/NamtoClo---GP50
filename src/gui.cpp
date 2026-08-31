@@ -67,6 +67,7 @@ constexpr int IDC_GP5_UPLOAD = 136;
 constexpr int IDC_GP5_DEVICE = 137;
 constexpr int IDC_GP5_PROGRESS = 138;
 constexpr int IDC_REFINE_MODE = 139;
+constexpr int IDC_DYNAMICS_AWARE = 140;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -129,6 +130,7 @@ HWND gRefineCheck = nullptr;
 HWND gRefineModeCombo = nullptr;
 HWND gRefineTargetEdit = nullptr;
 HWND gBrowseRefineTargetButton = nullptr;
+HWND gDynamicsAwareCheck = nullptr;
 HWND gVersion = nullptr;
 HWND gInfo = nullptr;
 HWND gSubtitle = nullptr;
@@ -249,7 +251,7 @@ void showConversionUi(HWND hwnd, bool show) {
         gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
         gConvertButton, gOpenButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
         gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineCheck,
-        gRefineModeCombo, gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
+        gRefineModeCombo, gRefineTargetEdit, gBrowseRefineTargetButton, gDynamicsAwareCheck, gInfo
     };
     for (HWND h : controls) showControl(h, show);
     for (int id : {1002,1003,1005,1006,1008,1009,1010})
@@ -329,8 +331,10 @@ void enableControls(bool enable) {
     EnableWindow(gCorrectiveCheck, enable);
     EnableWindow(gRefineCheck, enable);
     if (!enable) {
+        EnableWindow(gRefineModeCombo, FALSE);
         EnableWindow(gRefineTargetEdit, FALSE);
         EnableWindow(gBrowseRefineTargetButton, FALSE);
+        EnableWindow(gDynamicsAwareCheck, FALSE);
     }
     if (!enable) {
         EnableWindow(gRecordedEdit, FALSE);
@@ -500,6 +504,16 @@ void updateTailControls() {
     const bool refineCustom = refineModeSel == 6; // "Custom WAV..." is the last item
     EnableWindow(gRefineTargetEdit, (refineEnabled && refineCustom) ? TRUE : FALSE);
     EnableWindow(gBrowseRefineTargetButton, (refineEnabled && refineCustom) ? TRUE : FALSE);
+    // Dynamics-aware fitting only does anything when Tone Match has a real
+    // reference clip to measure against (bundled Auto/Clean/Moderate/High/
+    // Bass modes, or Custom with a file already chosen) -- Default mode has
+    // no reference clip, so the gate never fires (see convertNamToClo's
+    // dynamics-aware fitting gate). Greyed out rather than hidden so the
+    // control's own tooltip/label still explains why.
+    const bool refineHasReferenceClip = refineEnabled
+        && (refineModeSel != 0)  // not Default
+        && (!refineCustom || !getText(gRefineTargetEdit).empty());
+    EnableWindow(gDynamicsAwareCheck, refineHasReferenceClip ? TRUE : FALSE);
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -560,6 +574,7 @@ void startConversion(HWND hwnd) {
 
     enableControls(false);
     ntc::NativeConverterConfig nativeConfig;
+    nativeConfig.dynamicsAwareFitting = SendMessageW(gDynamicsAwareCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (gInputMode == InputMode::SingleNam) {
         setText(gStatus, L"Starting conversion...");
         std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
@@ -729,7 +744,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
     gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionCorrective = RECT{ margin, y, clientW - margin, y + 86 }; y += 86 + gap;
-    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 108 }; y += 108 + gap;
+    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 134 }; y += 134 + gap;
     gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
@@ -789,6 +804,8 @@ void layoutControls(HWND hwnd) {
     const int refineTargetEditW = (gUi.sectionRefine.right - sectionRightInset - 124 - 8) - refineTargetEditX;
     moveCtrl(gRefineTargetEdit, refineTargetEditX, gUi.sectionRefine.top + 78, refineTargetEditW, 28);
     moveCtrl(gBrowseRefineTargetButton, gUi.sectionRefine.right - sectionRightInset - 124, gUi.sectionRefine.top + 76, 124, 32);
+    moveCtrl(gDynamicsAwareCheck, contentX, gUi.sectionRefine.top + 108,
+             (gUi.sectionRefine.right - sectionRightInset) - contentX, 22);
 
     const int center = rc.right / 2;
     moveCtrl(gConvertButton, center - 222, gUi.buttonArea.top, 200, 36);
@@ -929,6 +946,13 @@ void createUi(HWND hwnd) {
     gBrowseRefineTargetButton = CreateWindowW(L"BUTTON", L"Browse WAV...",
                                                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                0, 0, 124, 32, hwnd, controlId(IDC_BROWSE_REFINE_TARGET), nullptr, nullptr);
+
+    gDynamicsAwareCheck = CreateWindowW(L"BUTTON",
+                                        L"Dynamics-aware fitting for high/extreme-gain amps (adds up to ~2 min when it measurably helps)",
+                                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                        0, 0, 560, 24, hwnd, controlId(IDC_DYNAMICS_AWARE), nullptr, nullptr);
+    applyFont(gDynamicsAwareCheck);
+    SendMessageW(gDynamicsAwareCheck, BM_SETCHECK, BST_CHECKED, 0); // on by default, matches NativeConverterConfig::dynamicsAwareFitting
 
     createSectionLabel(hwnd, 1011, L"GP-200 CLO (.clo, 1024-tap)");
     createSectionLabel(hwnd, 1012, L"Destination SnapTone slot");
@@ -1376,6 +1400,17 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (!r->toneMatchReferenceUsed.empty()) {
                 resultMessage += L"\r\n\r\nTone Match reference: " + r->toneMatchReferenceUsed.filename().wstring();
+            }
+            if (!r->gp5ToneMatchMethod.empty() && r->gp5ToneMatchMethod != L"none") {
+                resultMessage += L"\r\nGP-5/GP-50 Tone Match applied: " + r->gp5ToneMatchMethod;
+            }
+            if (r->gp5MeasuredDynamicsRmsDb >= 0.0) {
+                wchar_t buf[128];
+                swprintf_s(buf, L"\r\nMeasured dynamics-tracking error: %.2f dB", r->gp5MeasuredDynamicsRmsDb);
+                resultMessage += buf;
+                resultMessage += (r->gp5ToneMatchMethod == L"Step 2 P/K search")
+                    ? L" (above threshold -- ran the extra dynamics-aware fitting pass)"
+                    : L" (within normal range -- skipped the extra dynamics-aware fitting pass)";
             }
             resultMessage += L"\r\n\r\nBoth Uploader tabs have been pre-filled with the right file -- "
                               L"just switch tabs and press Upload.";

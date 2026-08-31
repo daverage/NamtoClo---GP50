@@ -2254,6 +2254,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                         sumSq+=err*err;
                     }
                     const double measuredDynamicsRmsDb=std::sqrt(sumSq/static_cast<double>(gp5LevelClips.size()));
+                    r.gp5MeasuredDynamicsRmsDb=measuredDynamicsRmsDb;
                     report(status,L"GP-5/GP-50: measured dynamics-tracking RMS error "+std::to_wstring(measuredDynamicsRmsDb)+L"dB (threshold "+std::to_wstring(trainer.dynamicsSearchThresholdDb)+L"dB).");
 
                     if(measuredDynamicsRmsDb>trainer.dynamicsSearchThresholdDb){
@@ -2309,11 +2310,11 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     }
                 }
 
-                if(gp5DynamicsSearchWon)os<<L" -- using Step 2 P/K search.";
-                else if(gp5MultiLevelSolveWon)os<<L" -- using multi-level B solve.";
-                else if(gp5DirectSolveWon)os<<L" -- using direct B solve.";
-                else if(!gp5ToneMatchIr.empty())os<<L" -- using correction-IR.";
-                else os<<L" -- not applying (baseline wins).";
+                if(gp5DynamicsSearchWon){os<<L" -- using Step 2 P/K search.";r.gp5ToneMatchMethod=L"Step 2 P/K search";}
+                else if(gp5MultiLevelSolveWon){os<<L" -- using multi-level B solve.";r.gp5ToneMatchMethod=L"multi-level B solve";}
+                else if(gp5DirectSolveWon){os<<L" -- using direct B solve.";r.gp5ToneMatchMethod=L"direct B solve";}
+                else if(!gp5ToneMatchIr.empty()){os<<L" -- using correction-IR.";r.gp5ToneMatchMethod=L"correction-IR";}
+                else{os<<L" -- not applying (baseline wins).";r.gp5ToneMatchMethod=L"none";}
                 report(status,os.str());
             }
         }

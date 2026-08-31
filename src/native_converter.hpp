@@ -37,6 +37,20 @@ struct ConversionResult {
     // regardless of which candidate is chosen. 0 if conversion failed before
     // fitPk() ran.
     float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f;
+
+    // Which GP-5/GP-50 device-specific Tone Match candidate actually won (see
+    // convertNamToClo's GP-5/GP-50 Tone Match block): "none", "correction-IR",
+    // "direct B solve", "multi-level B solve", or "Step 2 P/K search". Empty
+    // when GP-5/GP-50 Tone Match didn't run at all (no gp5Chosen, or Tone
+    // Match disabled).
+    std::wstring gp5ToneMatchMethod;
+    // The dynamics-aware fitting gate's own measurement (see
+    // NativeConverterConfig::dynamicsAwareFitting) of the already-chosen
+    // candidate's dynamics-tracking RMS error against Full A2, in dB. -1 when
+    // not computed (no reference clip available, or dynamicsAwareFitting was
+    // off). Meaningful even when the Step 2 search didn't end up winning --
+    // shows whether the gate considered running it and why it did/didn't.
+    double gp5MeasuredDynamicsRmsDb = -1.0;
 };
 
 struct BatchConversionResult {
