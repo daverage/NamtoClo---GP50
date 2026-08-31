@@ -1601,12 +1601,17 @@ bool runHeadlessConvertIfRequested(int& exitCode) {
                 std::wcout << L"Tone Match reference WAV: " << refine.referenceWav.wstring() << L"\n";
             }
         }
+        ntc::NativeConverterConfig converter;
+        if (argc >= 6) {
+            converter.dynamicsSearchThresholdDb = std::wcstod(argv[5], nullptr);
+            std::wcout << L"Dynamics search threshold override: " << converter.dynamicsSearchThresholdDb << L"dB\n";
+        }
         std::wcout << L"Converting " << inputNam.wstring() << L" -> " << outputDir.wstring() << L"\n";
         std::error_code logEc;
         fs::create_directories(outputDir, logEc);
         std::wofstream logFile(outputDir / L"convert.log");
         auto r = ntc::convertNamToClo(inputNam, outputDir, ntc::StimulusConfig{}, ntc::CorrectiveIrConfig{}, refine,
-                                       ntc::NativeConverterConfig{}, [&](const std::wstring& s) { std::wcout << s << L"\n"; logFile << s << L"\n"; });
+                                       converter, [&](const std::wstring& s) { std::wcout << s << L"\n"; logFile << s << L"\n"; });
         if (r.ok) {
             std::wcout << L"\nOK.\nGP-200 output: " << r.gp2001024.wstring() << L"\n";
             if (!r.gp5gp50Compact.empty()) std::wcout << L"GP-5/GP-50 output: " << r.gp5gp50Compact.wstring() << L"\n";
