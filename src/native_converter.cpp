@@ -1861,6 +1861,24 @@ fs::path firstClipWithPrefix(const fs::path& dir,const std::wstring& prefix){
     return matches.front();
 }
 
+// The second (alphabetically) bundled clip for a bucket, when one exists --
+// used only by the optional dynamics-aware P/K search gate below as a
+// disjoint selection clip alongside firstClipWithPrefix's train clip. Empty
+// if the bucket has only one bundled clip.
+fs::path secondClipWithPrefix(const fs::path& dir,const std::wstring& prefix){
+    std::error_code ec;
+    std::vector<fs::path> matches;
+    for(const auto& entry:fs::directory_iterator(dir,ec)){
+        if(ec||!entry.is_regular_file(ec)||ec)continue;
+        auto name=entry.path().filename().wstring();
+        std::transform(name.begin(),name.end(),name.begin(),[](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});
+        if(name.rfind(prefix,0)==0)matches.push_back(entry.path());
+    }
+    if(matches.size()<2)return {};
+    std::sort(matches.begin(),matches.end());
+    return matches[1];
+}
+
 } // namespace
 
 AmpGainBucket classifyGainBucket(float kp,float kn){
@@ -1977,11 +1995,13 @@ bool renderClipThroughNam(const fs::path& namPath,const fs::path& inputWav,const
 }
 
 namespace {
-// Forward declaration: defined later in this file (near runKSweepExperiment),
-// needed here for the GP-5/GP-50 multi-level Tone Match candidate below.
+// Forward declarations: defined later in this file (near runKSweepExperiment),
+// needed here for the GP-5/GP-50 multi-level Tone Match candidate and the
+// dynamics-aware search gate below.
 bool buildLevelClips(const fs::path& fullModelPath,const fs::path& diClipWav,
                      std::vector<MultiLevelClip>& out,std::string& error,
                      const StatusCallback& status,const std::wstring& logPrefix);
+double rmsDb(const std::vector<float>& x);
 }
 
 ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& outputDirectory,
@@ -2139,9 +2159,11 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     // multi-level candidate can only ship if it's ALSO at least as good on that
     // held-out-style yardstick, not merely because it was fit against more data.
     std::vector<float> gp5ToneMatchIr;
+    std::vector<float> gp5CorrectionB44;
     std::vector<float> gp5DirectSolveB44;
     bool gp5DirectSolveWon=false;
     bool gp5MultiLevelSolveWon=false;
+    bool gp5DynamicsSearchWon=false;
     if(gp5Chosen&&refine.enabled){
         report(status,L"GP-5/GP-50: performing device-specific Tone Match...");
         const fs::path gp5PreToneMatchClo=work/L"gp5_512_pre_tonematch.clo";
@@ -2172,7 +2194,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     if(applyCorrectiveIrToB44(postM.B,candidateIr,0.0,applyErr)){
                         const double lossPost=evaluateModelLoss(postM,analysisInput,analysisTarget,44100.0);
                         os<<L", correction-IR="<<lossPost;
-                        if(lossPost<bestLoss){bestLoss=lossPost;gp5ToneMatchIr=candidateIr;gp5DirectSolveWon=false;}
+                        if(lossPost<bestLoss){bestLoss=lossPost;gp5ToneMatchIr=candidateIr;gp5CorrectionB44=postM.B;gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;}
                     }
                 }
 
@@ -2184,8 +2206,9 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     if(lossDirect<bestLoss){bestLoss=lossDirect;gp5ToneMatchIr.clear();gp5DirectSolveB44=directB;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;}
                 }
 
+                std::vector<MultiLevelClip> gp5LevelClips;
                 if(!refine.referenceWav.empty()){
-                    std::vector<MultiLevelClip> gp5LevelClips;std::string levelError;
+                    std::string levelError;
                     if(buildLevelClips(modelPath,refine.referenceWav,gp5LevelClips,levelError,status,L"GP-5/GP-50 multi-level Tone Match")){
                         std::vector<KSweepCandidate> mlCandidates;std::string mlError;
                         if(sweepKAndSolveSharedB(gp5PreToneMatchClo,{1.0},gp5LevelClips,mlCandidates,mlError,status)
@@ -2198,7 +2221,96 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     }
                 }
 
-                if(gp5MultiLevelSolveWon)os<<L" -- using multi-level B solve.";
+                // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2"):
+                // optional and gated, per NativeConverterConfig::dynamicsAwareFitting's
+                // doc comment -- only runs the expensive P/K coordinate-descent search
+                // (~120s measured) when the already-chosen candidate's OWN measured
+                // dynamics-tracking error against Full A2 exceeds
+                // dynamicsSearchThresholdDb, using the six-level sweep already built
+                // above (gp5LevelClips) so this costs one more render pass, not a
+                // fresh Full A2 render. Needs a second bundled reference clip from the
+                // same gain bucket as a disjoint selection clip for the search's
+                // round-acceptance gate -- skipped (no search) if the reference clip
+                // wasn't a bundled one (Custom mode) or its bucket has only one clip.
+                if(trainer.dynamicsAwareFitting&&!gp5LevelClips.empty()){
+                    const std::vector<float>& winningB44=gp5DirectSolveWon?gp5DirectSolveB44:
+                        (!gp5ToneMatchIr.empty()?gp5CorrectionB44:B44Pre);
+                    std::size_t zeroIdx=0;double bestDist=std::numeric_limits<double>::max();
+                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
+                        const double d=std::abs(gp5LevelClips[i].levelDb);
+                        if(d<bestDist){bestDist=d;zeroIdx=i;}
+                    }
+                    std::vector<double> renderedDb(gp5LevelClips.size()),targetDb(gp5LevelClips.size());
+                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
+                        std::vector<float> rendered;std::string stepErr;
+                        if(renderCloWithOverrideOnSignal(gp5PreToneMatchClo,gp5Chosen->pk.pp,gp5Chosen->pk.pn,gp5Chosen->pk.kp,gp5Chosen->pk.kn,
+                                                         winningB44,gp5LevelClips[i].input44100,rendered,stepErr))
+                            renderedDb[i]=rmsDb(rendered);
+                        targetDb[i]=rmsDb(gp5LevelClips[i].target44100);
+                    }
+                    double sumSq=0.0;
+                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
+                        const double err=(renderedDb[i]-renderedDb[zeroIdx])-(targetDb[i]-targetDb[zeroIdx]);
+                        sumSq+=err*err;
+                    }
+                    const double measuredDynamicsRmsDb=std::sqrt(sumSq/static_cast<double>(gp5LevelClips.size()));
+                    report(status,L"GP-5/GP-50: measured dynamics-tracking RMS error "+std::to_wstring(measuredDynamicsRmsDb)+L"dB (threshold "+std::to_wstring(trainer.dynamicsSearchThresholdDb)+L"dB).");
+
+                    if(measuredDynamicsRmsDb>trainer.dynamicsSearchThresholdDb){
+                        std::wstring bucketPrefix;
+                        switch(refine.referenceMode){
+                            case ToneMatchReferenceMode::Bass: bucketPrefix=L"bass_"; break;
+                            case ToneMatchReferenceMode::Clean: bucketPrefix=L"clean_"; break;
+                            case ToneMatchReferenceMode::Moderate: bucketPrefix=L"moderate_"; break;
+                            case ToneMatchReferenceMode::High: bucketPrefix=L"high_"; break;
+                            case ToneMatchReferenceMode::Auto:
+                                switch(classifyGainBucket(gp5Chosen->pk.kp,gp5Chosen->pk.kn)){
+                                    case AmpGainBucket::Clean: bucketPrefix=L"clean_"; break;
+                                    case AmpGainBucket::Moderate: bucketPrefix=L"moderate_"; break;
+                                    case AmpGainBucket::High: bucketPrefix=L"high_"; break;
+                                }
+                                break;
+                            default: break; // Custom/Default: no bundled sibling clip to use
+                        }
+                        fs::path selectionClipPath;
+                        if(!bucketPrefix.empty()){
+                            const fs::path clipsDir=resolveReferenceClipsDir();
+                            if(!clipsDir.empty())selectionClipPath=secondClipWithPrefix(clipsDir,bucketPrefix);
+                        }
+                        if(selectionClipPath.empty()){
+                            report(status,L"GP-5/GP-50: dynamics error exceeds threshold, but no second bundled reference clip is available for the search's selection gate -- skipping the P/K search.");
+                        }else{
+                            report(status,L"GP-5/GP-50: dynamics error exceeds threshold -- running Step 2 P/K search...");
+                            std::vector<MultiLevelClip> selectionClips;std::string selError;
+                            if(buildLevelClips(modelPath,selectionClipPath,selectionClips,selError,status,L"GP-5/GP-50 dynamics search (selection)")){
+                                std::string searchError;
+                                auto search=ntc::searchPkForDynamics(gp5PreToneMatchClo,gp5LevelClips,selectionClips,gp5LevelClips,0.3,searchError,status);
+                                os<<L", P/K search: selection dynamics rms "<<search.initialRmsDynamicsErrorDb<<L" -> "<<search.optimizedRmsDynamicsErrorDb;
+                                // Accept using the search's OWN acceptance signal (a genuine,
+                                // already-verified improvement in dynamics tracking on the
+                                // disjoint selection clip -- searchPkForDynamics only keeps a
+                                // round that clears both this AND its internal ESR/safety-floor
+                                // checks), NOT evaluateModelLoss's single-level spectral-
+                                // magnitude Tone Match loss -- that metric is blind to dynamics
+                                // improvements by design (CLAUDE.md's "22.7 CLOSED as a
+                                // selection method" -- an earlier version of this gate made
+                                // exactly this mistake and silently discarded every search win).
+                                if(search.ok&&search.optimizedRmsDynamicsErrorDb<search.initialRmsDynamicsErrorDb){
+                                    Model searchM=preM;searchM.pk.pp=search.pp;searchM.pk.pn=search.pn;searchM.pk.kp=search.kp;searchM.pk.kn=search.kn;searchM.B=search.b;
+                                    bestLoss=evaluateModelLoss(searchM,analysisInput,analysisTarget,44100.0);
+                                    gp5ToneMatchIr.clear();gp5DirectSolveB44=search.b;
+                                    gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;gp5DynamicsSearchWon=true;
+                                    gp5Chosen->pk.pp=search.pp;gp5Chosen->pk.pn=search.pn;gp5Chosen->pk.kp=search.kp;gp5Chosen->pk.kn=search.kn;
+                                }else if(!search.ok){
+                                    report(status,L"GP-5/GP-50: P/K search failed ("+std::wstring(searchError.begin(),searchError.end())+L").");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if(gp5DynamicsSearchWon)os<<L" -- using Step 2 P/K search.";
+                else if(gp5MultiLevelSolveWon)os<<L" -- using multi-level B solve.";
                 else if(gp5DirectSolveWon)os<<L" -- using direct B solve.";
                 else if(!gp5ToneMatchIr.empty())os<<L" -- using correction-IR.";
                 else os<<L" -- not applying (baseline wins).";
@@ -2224,9 +2336,10 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         }
         {std::wostringstream os;os<<L"GP-5/GP-50 CLO written using "<<(gp5UsedDirectFit?L"direct-fit":L"truncated")
             <<(correction.enabled?L", Corrective IR applied":L"")
-            <<(gp5MultiLevelSolveWon?L", device-specific Tone Match applied (multi-level B solve)":
+            <<(gp5DynamicsSearchWon?L", device-specific Tone Match applied (Step 2 P/K search)":
+               (gp5MultiLevelSolveWon?L", device-specific Tone Match applied (multi-level B solve)":
                (gp5DirectSolveWon?L", device-specific Tone Match applied (direct B solve)":
-               (!gp5ToneMatchIr.empty()?L", device-specific Tone Match applied (correction-IR)":(refine.enabled?L", Tone Match not applied":L""))))
+               (!gp5ToneMatchIr.empty()?L", device-specific Tone Match applied (correction-IR)":(refine.enabled?L", Tone Match not applied":L"")))))
             <<L".";report(status,os.str());}
     }
 

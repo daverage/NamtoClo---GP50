@@ -85,6 +85,41 @@ struct NativeConverterConfig {
     // truncation and sometimes a large win (~22% lower loss on the highest-gain model
     // tested) -- see test_assets/quality_results/*/quality_experiment_results.csv.
     bool gp5DirectFit = true;
+
+    // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2" --
+    // full P/K coordinate-descent search). Measured cost: ~120s added per
+    // conversion (~6x a normal conversion's ~23.5s), so it is never run
+    // unconditionally. When true (default) and a Tone Match reference clip
+    // is available (refine.enabled && refine.referenceWav non-empty, i.e.
+    // Tone Match reference mode isn't Default/Custom-without-a-clip),
+    // convertNamToClo first cheaply measures the winning GP-5/GP-50 Tone
+    // Match candidate's own dynamics-tracking error against Full A2 (reusing
+    // the six-level sweep already built for the multi-level B-solve
+    // candidate -- no extra Full A2 renders). Only when that measured RMS
+    // relative error exceeds dynamicsSearchThresholdDb does it run the full
+    // P/K search and ship the result if it beats the already-chosen
+    // candidate on a disjoint selection clip. Gated on MEASURED error, not
+    // amp category or a Kp/Kn threshold -- CLAUDE.md explicitly cautions
+    // against hard-coding a gain-based rule (insufficient evidence for a
+    // stable threshold across the small dataset measured so far).
+    bool dynamicsAwareFitting = true;
+    // Threshold recalibrated (2026-08-31) against the ACTUAL measurement
+    // this gate performs in production: the already-chosen candidate (i.e.
+    // AFTER the cheap multi-level B solve above has already run and
+    // possibly helped), scored against whichever bundled reference_clips
+    // WAV the fitted gain bucket resolves to -- not the pre-correction
+    // baseline, and not the same DI clip CLAUDE.md's other measurements
+    // used, so this number is not directly comparable to those. 4 real
+    // production-path data points measured at this exact methodology:
+    // Fender Super Reverb (clean) 0.134dB -- correctly skips; Fortin
+    // Meshuggah 0.516dB -- borderline, chosen to trigger; Bogner Uberschall
+    // 1.344dB and JCM800 HighGain 2.504dB -- both clearly trigger and both
+    // verified to find and ship a large genuine dynamics improvement
+    // (Bogner selection rms 3.48->1.21dB, JCM800 3.64->0.80dB). 0.4dB
+    // catches Meshuggah while keeping clear margin under Bogner/JCM800 and
+    // over Fender. Still a small sample (4 amps) -- revisit if a larger
+    // corpus measured this same way shows a different boundary is needed.
+    double dynamicsSearchThresholdDb = 0.4;
 };
 
 ConversionResult convertNamToClo(const fs::path& inputNam,
