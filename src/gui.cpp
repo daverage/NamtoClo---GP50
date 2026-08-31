@@ -1782,6 +1782,69 @@ bool runHeadlessPkDynamicsAuditionIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+// Headless entry point: NamToClo.exe --official-benchmark <nam> <officialSnapClo>
+//   <diClipWav> <outputCsv> <heldOutClip1> [heldOutClip2] ...
+// Definitive official-vs-ours benchmark (resources/GP50_SnapTone_Conversion_
+// Benchmark_Plan_v2.md, section 14): compares a real official SnapTone CLO
+// against our own conversion of the same NAM, both judged against Full A2.
+// See ntc::runOfficialSnaptoneBenchmark's doc comment.
+bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 7 && std::wstring(argv[1]) == L"--official-benchmark") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path officialSnapClo = argv[3];
+        const fs::path diClipWav = argv[4];
+        const fs::path outputCsv = argv[5];
+        std::vector<fs::path> heldOutClips;
+        for (int i = 6; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"Official benchmark: " << inputNam.wstring() << L" vs " << officialSnapClo.wstring() << L"\n";
+        ntc::BenchmarkResult result;
+        std::string error;
+        if (ntc::runOfficialSnaptoneBenchmark(inputNam, officialSnapClo, diClipWav, heldOutClips, result, error,
+                                               [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"section,level_db_or_clip,full_a2_relative_db,official_relative_db,ours_relative_db,"
+                   L"official_relative_error_db,ours_relative_error_db,official_esr,ours_esr\n";
+            for (const auto& p : result.levels) {
+                csv << L"level," << p.levelDb << L"," << p.fullA2RelativeDb << L"," << p.officialRelativeDb << L","
+                    << p.oursRelativeDb << L"," << p.officialRelativeErrorDb << L"," << p.oursRelativeErrorDb << L",,\n";
+            }
+            for (const auto& h : result.heldOut) {
+                csv << L"held_out," << h.clipName << L",,,,," << L"," << h.officialEsr << L"," << h.oursEsr << L"\n";
+            }
+            csv << L"summary,dynamics_max_err_db," << result.officialMaxRelativeErrorDb << L"," << result.oursMaxRelativeErrorDb
+                << L",,,,,\n";
+            csv << L"summary,dynamics_rms_err_db," << result.officialRmsRelativeErrorDb << L"," << result.oursRmsRelativeErrorDb
+                << L",,,,,\n";
+            csv << L"summary,mean_held_out_esr," << result.officialMeanHeldOutEsr << L"," << result.oursMeanHeldOutEsr
+                << L",,,,,\n";
+
+            std::wcout << L"\nDynamics (six-level sweep vs Full A2):\n";
+            std::wcout << L"  official: max=" << result.officialMaxRelativeErrorDb << L"dB rms=" << result.officialRmsRelativeErrorDb << L"dB\n";
+            std::wcout << L"  ours:     max=" << result.oursMaxRelativeErrorDb << L"dB rms=" << result.oursRmsRelativeErrorDb << L"dB\n";
+            std::wcout << L"\nHeld-out real playing (mean ESR vs Full A2, lower is better):\n";
+            std::wcout << L"  official: " << result.officialMeanHeldOutEsr << L"\n";
+            std::wcout << L"  ours:     " << result.oursMeanHeldOutEsr << L"\n";
+            std::wcout << L"\npk (ours): pp=" << result.pkPp << L" pn=" << result.pkPn << L" kp=" << result.pkKp << L" kn=" << result.pkKn << L"\n";
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            std::wofstream errFile(outputCsv.wstring() + L".err");
+            errFile << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -1804,6 +1867,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessPkDynamicsAuditionIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessOfficialBenchmarkIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.

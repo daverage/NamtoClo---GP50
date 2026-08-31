@@ -2870,4 +2870,162 @@ bool runPkDynamicsAudition(const fs::path& inputNam,
     return true;
 }
 
+namespace {
+// Peeks the VTSI header's declared A/B tap counts (offsets 0x7c/0x84, same
+// layout parseModel() in clo_refiner.cpp reads) without fully parsing the
+// CLO, just to decide which of our own conversion candidates -- gp2001024
+// (128/2048-tap) or gp5gp50Compact (128/512-tap) -- has the matching
+// architecture to compare against a given official file.
+bool peekCloBTapCount(const fs::path& path,std::size_t& outBTaps,std::string& error){
+    std::vector<std::uint8_t> bytes;
+    if(!readFileBytes(path,bytes,error))return false;
+    if(bytes.size()<0x88||std::memcmp(bytes.data(),"VTSI",4)!=0){error="Invalid VTSI CLO: "+pathToUtf8(path);return false;}
+    auto le32=[&](std::size_t off){return static_cast<std::uint32_t>(bytes[off])|(static_cast<std::uint32_t>(bytes[off+1])<<8)|(static_cast<std::uint32_t>(bytes[off+2])<<16)|(static_cast<std::uint32_t>(bytes[off+3])<<24);};
+    outBTaps=le32(0x84);
+    return true;
+}
+}
+
+// See native_converter.hpp's doc comment. Renders the same DI clip (as a
+// 6-level dynamics sweep) and the same held-out real-playing clips through
+// Full A2, the official SnapTone, and our own conversion of the identical
+// NAM -- all via the same 44.1kHz software renderer -- to answer the plan's
+// central question: does our added optimization produce a measurably
+// better GP-50/GP-200 approximation than Valeton's own converter, judged
+// against the same Full A2 reference both are trying to reproduce?
+bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
+                                  const fs::path& officialSnapClo,
+                                  const fs::path& diClipWav,
+                                  const std::vector<fs::path>& heldOutClips,
+                                  BenchmarkResult& out,
+                                  std::string& error,
+                                  const StatusCallback& status){
+    out=BenchmarkResult{};
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_official_benchmark_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    std::size_t officialBTaps=0;
+    if(!peekCloBTapCount(officialSnapClo,officialBTaps,error)){fs::remove_all(work,ec);return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Official benchmark: converting "+inputNam.filename().wstring()+L" (production settings)...");
+    NativeConverterConfig converter;
+    CloRefineConfig refine;refine.enabled=true;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok){
+        error=conversion.error.empty()?"Conversion failed.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+    out.pkPp=conversion.pkPp;out.pkPn=conversion.pkPn;out.pkKp=conversion.pkKp;out.pkKn=conversion.pkKn;
+
+    // 512 B taps -> match the GP-5/GP-50 compact candidate; anything else
+    // (the GP-200 native 2048-tap layout) -> match the GP-200 candidate.
+    // Both candidates share the exact 0x88-onward VTSI byte layout
+    // parseModel() reads, differing only in A/B tap counts.
+    out.oursClo=(officialBTaps==512)?conversion.gp5gp50Compact:conversion.gp2001024;
+    if(out.oursClo.empty()){
+        error="Conversion did not produce a matching-architecture candidate for the official file's B tap count ("+std::to_string(officialBTaps)+").";
+        fs::remove_all(work,ec);return false;
+    }
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    static constexpr double kLevelsDb[]={-24.0,-18.0,-12.0,-6.0,0.0,6.0};
+    for(double levelDb:kLevelsDb){
+        report(status,L"Official benchmark: dynamics sweep at "+std::to_wstring(levelDb)+L" dB...");
+        const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
+        std::vector<float> scaled(dry.size());
+        for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
+
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+        if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+            report(status,L"Official benchmark: skipped "+std::to_wstring(levelDb)+L" dB (Full A2 render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+        std::vector<float> officialOutput,oursOutput;
+        if(!renderCloOnSignal(officialSnapClo,scaled,officialOutput,stepError)){
+            report(status,L"Official benchmark: skipped "+std::to_wstring(levelDb)+L" dB (official render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+        if(!renderCloOnSignal(out.oursClo,scaled,oursOutput,stepError)){
+            report(status,L"Official benchmark: skipped "+std::to_wstring(levelDb)+L" dB (ours render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+
+        BenchmarkLevelPoint p;
+        p.levelDb=levelDb;
+        // Store raw RMS-dB in the "relative" fields for now; converted to
+        // true 0dB-anchored values in the pass below once all levels exist.
+        p.fullA2RelativeDb=rmsDb(fullA2Output);
+        p.officialRelativeDb=rmsDb(officialOutput);
+        p.oursRelativeDb=rmsDb(oursOutput);
+        out.levels.push_back(p);
+    }
+    if(out.levels.empty()){error="No level clips rendered successfully.";fs::remove_all(work,ec);return false;}
+
+    const auto zeroIt=std::find_if(out.levels.begin(),out.levels.end(),
+        [](const BenchmarkLevelPoint&p){return std::abs(p.levelDb)<1e-9;});
+    if(zeroIt!=out.levels.end()){
+        const double fullA2Zero=zeroIt->fullA2RelativeDb,officialZero=zeroIt->officialRelativeDb,oursZero=zeroIt->oursRelativeDb;
+        double officialSumSq=0.0,oursSumSq=0.0;
+        for(auto&p:out.levels){
+            p.fullA2RelativeDb-=fullA2Zero;
+            p.officialRelativeDb-=officialZero;
+            p.oursRelativeDb-=oursZero;
+            p.officialRelativeErrorDb=p.officialRelativeDb-p.fullA2RelativeDb;
+            p.oursRelativeErrorDb=p.oursRelativeDb-p.fullA2RelativeDb;
+            out.officialMaxRelativeErrorDb=std::max(out.officialMaxRelativeErrorDb,std::abs(p.officialRelativeErrorDb));
+            out.oursMaxRelativeErrorDb=std::max(out.oursMaxRelativeErrorDb,std::abs(p.oursRelativeErrorDb));
+            officialSumSq+=p.officialRelativeErrorDb*p.officialRelativeErrorDb;
+            oursSumSq+=p.oursRelativeErrorDb*p.oursRelativeErrorDb;
+        }
+        out.officialRmsRelativeErrorDb=std::sqrt(officialSumSq/static_cast<double>(out.levels.size()));
+        out.oursRmsRelativeErrorDb=std::sqrt(oursSumSq/static_cast<double>(out.levels.size()));
+    }
+
+    double officialEsrSum=0.0,oursEsrSum=0.0;std::size_t heldOutCount=0;
+    for(const auto& clipPath:heldOutClips){
+        report(status,L"Official benchmark: held-out clip "+clipPath.filename().wstring()+L"...");
+        std::vector<float> clipDry;
+        std::string stepError;
+        if(!loadClipAsMono44100(clipPath,clipDry,stepError)){
+            report(status,L"Official benchmark: skipped held-out clip "+clipPath.filename().wstring()+L" ("+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
+        if(!renderNamOnSignal(fullModelPath,clipDry,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+            report(status,L"Official benchmark: skipped held-out clip "+clipPath.filename().wstring()+L" (Full A2 render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+        const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+
+        std::vector<float> officialOutput,oursOutput;
+        if(!renderCloOnSignal(officialSnapClo,clipDry,officialOutput,stepError)||
+           !renderCloOnSignal(out.oursClo,clipDry,oursOutput,stepError)){
+            report(status,L"Official benchmark: skipped held-out clip "+clipPath.filename().wstring()+L" (CLO render failed: "+std::wstring(stepError.begin(),stepError.end())+L")");
+            continue;
+        }
+
+        BenchmarkHeldOutPoint hp;
+        hp.clipName=clipPath.filename().wstring();
+        hp.officialEsr=levelResponseEsr(officialOutput,fullA2At44100);
+        hp.oursEsr=levelResponseEsr(oursOutput,fullA2At44100);
+        out.heldOut.push_back(hp);
+        officialEsrSum+=hp.officialEsr;oursEsrSum+=hp.oursEsr;++heldOutCount;
+    }
+    if(heldOutCount>0){
+        out.officialMeanHeldOutEsr=officialEsrSum/static_cast<double>(heldOutCount);
+        out.oursMeanHeldOutEsr=oursEsrSum/static_cast<double>(heldOutCount);
+    }
+
+    fs::remove_all(work,ec);
+    out.ok=true;
+    return true;
+}
+
 } // namespace ntc

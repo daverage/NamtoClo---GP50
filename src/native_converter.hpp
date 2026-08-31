@@ -382,4 +382,55 @@ bool runPkDynamicsAudition(const fs::path& inputNam,
                            std::string& error,
                            const StatusCallback& status = {});
 
+// Definitive official-vs-ours benchmark (resources/GP50_SnapTone_Conversion_
+// Benchmark_Plan_v2.md, section 14): given a real official SnapTone CLO
+// captured/converted by Valeton's own tooling for inputNam, compares it
+// against our own conversion of the SAME NAM, both rendered through the
+// SAME software renderer (renderCloOnSignal -- parseModel() is A/B-tap-
+// count-agnostic, so this works whether the official file is GP-200's
+// 128/2048-tap layout or GP-5/GP-50's 128/512-tap compact layout; whichever
+// it is, "ours" is built via the matching architecture: gp2001024 for a
+// 128/2048-tap official file, gp5gp50Compact for a 128/512-tap one), with
+// Full A2 (NAMCore) as the ground truth both are judged against. Removes
+// hardware/capture confounds from the comparison, per the plan's section 15
+// -- a one-time physical-pedal check that the renderer matches real
+// hardware is a separate, manual validation step, not part of this
+// function.
+struct BenchmarkLevelPoint {
+    double levelDb = 0.0;
+    double fullA2RelativeDb = 0.0, officialRelativeDb = 0.0, oursRelativeDb = 0.0;
+    double officialRelativeErrorDb = 0.0; // officialRelativeDb - fullA2RelativeDb
+    double oursRelativeErrorDb = 0.0;     // oursRelativeDb - fullA2RelativeDb
+};
+struct BenchmarkHeldOutPoint {
+    std::wstring clipName;
+    double officialEsr = 0.0; // waveform error-to-signal ratio vs Full A2 (levelResponseEsr)
+    double oursEsr = 0.0;
+};
+struct BenchmarkResult {
+    bool ok = false;
+    std::string error;
+    float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f; // ours, for gain-character context
+    fs::path oursClo;
+
+    // Six-level ({-24,-18,-12,-6,0,+6} dB) dynamics/compression-curve sweep,
+    // same relative-anchoring convention as LevelResponsePoint.
+    std::vector<BenchmarkLevelPoint> levels;
+    double officialMaxRelativeErrorDb = 0.0, officialRmsRelativeErrorDb = 0.0;
+    double oursMaxRelativeErrorDb = 0.0, oursRmsRelativeErrorDb = 0.0;
+
+    // Held-out real playing material (never used to fit either model),
+    // spectral/waveform fidelity per clip plus the mean across clips.
+    std::vector<BenchmarkHeldOutPoint> heldOut;
+    double officialMeanHeldOutEsr = 0.0, oursMeanHeldOutEsr = 0.0;
+};
+
+bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
+                                  const fs::path& officialSnapClo,
+                                  const fs::path& diClipWav,
+                                  const std::vector<fs::path>& heldOutClips,
+                                  BenchmarkResult& out,
+                                  std::string& error,
+                                  const StatusCallback& status = {});
+
 } // namespace ntc
