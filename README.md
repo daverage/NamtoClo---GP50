@@ -200,6 +200,18 @@ Custom WAV...
 
 For any reference WAV (bundled or custom), the audio is adapted automatically in the same way as Recorded Audio: channel conversion, sample-rate adaptation, trimming and padding are handled by the application.
 
+### GP-5/GP-50 Tone Match method
+
+Whenever Tone Match has a real reference clip to work with (any mode except **Default**), the GP-5/GP-50 512-tap output is fit using whichever of the following measures best against that reference, not a single fixed method:
+
+- a corrective-IR convolution (the older approach, kept as a fallback candidate);
+- a direct least-squares solve of Block B against the reference at a single operating point;
+- a multi-level solve of Block B jointly across a six-point gain sweep (`-24` to `+6` dB) of the reference clip, which better preserves how the amp responds to playing dynamics, not just tone at one volume.
+
+**Dynamics-aware fitting for high/extreme-gain amps** is an additional checkbox in the Tone Match section (checked by default, greyed out until Tone Match has a real reference clip). When enabled, the converter measures how closely the chosen candidate tracks the NAM's own dynamic response across that gain sweep; only when the measured error exceeds a threshold does it run an additional multi-round search (adds up to roughly two minutes) that adjusts the gain-shaper curve itself and re-fits Block B to reduce that error. Clean and low/medium-gain amps typically fall under the threshold and skip the extra pass entirely; high and extreme-gain amps are the ones that benefit.
+
+After a conversion, the result dialog reports which Tone Match method was applied to the GP-5/GP-50 output and, when measured, the dynamics-tracking error in dB and whether it was above or below the threshold that triggers the extra search pass.
+
 ---
 
 ## Conversion status
@@ -491,6 +503,10 @@ on GP-5/GP-50 conversion quality and confirming GP-50 hardware support end-to-en
   GP-200 output on every conversion.
 - **Corrective IR and Tone Match now reach the GP-5/GP-50 output.** Previously both only
   applied to the GP-200 1024-tap CLO; the GP-5/GP-50 file silently missed them.
+- **Dynamics-aware GP-5/GP-50 fitting.** The GP-5/GP-50 Tone Match step now also tries a
+  multi-level Block B solve across a gain sweep, and, on high/extreme-gain amps where
+  measured dynamics-tracking error exceeds a threshold, runs an additional gain-shaper
+  search pass. See [GP-5/GP-50 Tone Match method](#gp-5gp-50-tone-match-method) below.
 - **A2 submodel selection (Full vs. Lite) made explicit and validated**, rather than an
   unexamined assumption.
 - **A held-out validation tool** (`--quality-experiment`, see below) for scoring
