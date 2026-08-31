@@ -2944,6 +2944,8 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
     // other search in this codebase uses (train/selection/benchmark all
     // disjoint).
     PkDynamicsResult search;
+    std::vector<float> bOnlyB; // B-only candidate: shipped P/K frozen, B solved jointly across trainClips
+    bool bOnlyOk=false;
     const bool wantOptimize=!trainDiClipWav.empty()&&!selectionDiClipWav.empty();
     if(wantOptimize){
         report(status,L"Official benchmark: running Step 2 P/K dynamics search...");
@@ -2956,11 +2958,26 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         if(built){
             search=ntc::searchPkForDynamics(out.oursClo,trainClips,selectionClips,benchmarkClips,optimizationLambda,searchError,status);
             if(!search.ok) report(status,L"Official benchmark: Step 2 search failed ("+std::wstring(searchError.begin(),searchError.end())+L"), continuing without an optimized candidate.");
+
+            // Isolate the direct-B-solve mechanism from the P/K search: same
+            // trainClips, same joint multi-level solve, but P/K frozen at
+            // the shipped value (kMultiplier=1.0 -- sweepKAndSolveSharedB
+            // reuses the model's own kp/kn unchanged).
+            report(status,L"Official benchmark: solving B-only (shipped P/K, no search) candidate...");
+            std::vector<KSweepCandidate> bOnlyCandidates;
+            std::string bOnlyError;
+            if(sweepKAndSolveSharedB(out.oursClo,{1.0},trainClips,bOnlyCandidates,bOnlyError,status)&&!bOnlyCandidates.empty()&&!bOnlyCandidates.front().b.empty()){
+                bOnlyB=bOnlyCandidates.front().b;
+                bOnlyOk=true;
+            } else {
+                report(status,L"Official benchmark: B-only solve failed ("+std::wstring(bOnlyError.begin(),bOnlyError.end())+L"), continuing without a B-only candidate.");
+            }
         } else {
             report(status,L"Official benchmark: could not build optimize clip sets ("+std::wstring(searchError.begin(),searchError.end())+L"), continuing without an optimized candidate.");
         }
         out.optimizedComputed=search.ok;
         if(search.ok){out.optimizedPp=search.pp;out.optimizedPn=search.pn;out.optimizedKp=search.kp;out.optimizedKn=search.kn;}
+        out.bOnlyComputed=bOnlyOk;
     }
 
     std::vector<float> dry;
@@ -3000,6 +3017,11 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
             if(renderCloWithOverrideOnSignal(out.oursClo,search.pp,search.pn,search.kp,search.kn,search.b,scaled,optimizedOutput,stepError))
                 p.optimizedRelativeDb=rmsDb(optimizedOutput);
         }
+        if(bOnlyOk){
+            std::vector<float> bOnlyOutput;
+            if(renderCloWithOverrideOnSignal(out.oursClo,out.pkPp,out.pkPn,out.pkKp,out.pkKn,bOnlyB,scaled,bOnlyOutput,stepError))
+                p.bOnlyRelativeDb=rmsDb(bOnlyOutput);
+        }
         out.levels.push_back(p);
     }
     if(out.levels.empty()){error="No level clips rendered successfully.";fs::remove_all(work,ec);return false;}
@@ -3009,7 +3031,8 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
     if(zeroIt!=out.levels.end()){
         const double fullA2Zero=zeroIt->fullA2RelativeDb,officialZero=zeroIt->officialRelativeDb,oursZero=zeroIt->oursRelativeDb;
         const double optimizedZero=zeroIt->optimizedRelativeDb;
-        double officialSumSq=0.0,oursSumSq=0.0,optimizedSumSq=0.0;
+        const double bOnlyZero=zeroIt->bOnlyRelativeDb;
+        double officialSumSq=0.0,oursSumSq=0.0,optimizedSumSq=0.0,bOnlySumSq=0.0;
         for(auto&p:out.levels){
             p.fullA2RelativeDb-=fullA2Zero;
             p.officialRelativeDb-=officialZero;
@@ -3026,13 +3049,20 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
                 out.optimizedMaxRelativeErrorDb=std::max(out.optimizedMaxRelativeErrorDb,std::abs(p.optimizedRelativeErrorDb));
                 optimizedSumSq+=p.optimizedRelativeErrorDb*p.optimizedRelativeErrorDb;
             }
+            if(bOnlyOk){
+                p.bOnlyRelativeDb-=bOnlyZero;
+                p.bOnlyRelativeErrorDb=p.bOnlyRelativeDb-p.fullA2RelativeDb;
+                out.bOnlyMaxRelativeErrorDb=std::max(out.bOnlyMaxRelativeErrorDb,std::abs(p.bOnlyRelativeErrorDb));
+                bOnlySumSq+=p.bOnlyRelativeErrorDb*p.bOnlyRelativeErrorDb;
+            }
         }
         out.officialRmsRelativeErrorDb=std::sqrt(officialSumSq/static_cast<double>(out.levels.size()));
         out.oursRmsRelativeErrorDb=std::sqrt(oursSumSq/static_cast<double>(out.levels.size()));
         if(search.ok) out.optimizedRmsRelativeErrorDb=std::sqrt(optimizedSumSq/static_cast<double>(out.levels.size()));
+        if(bOnlyOk) out.bOnlyRmsRelativeErrorDb=std::sqrt(bOnlySumSq/static_cast<double>(out.levels.size()));
     }
 
-    double officialEsrSum=0.0,oursEsrSum=0.0,optimizedEsrSum=0.0;std::size_t heldOutCount=0;
+    double officialEsrSum=0.0,oursEsrSum=0.0,optimizedEsrSum=0.0,bOnlyEsrSum=0.0;std::size_t heldOutCount=0;
     for(const auto& clipPath:heldOutClips){
         report(status,L"Official benchmark: held-out clip "+clipPath.filename().wstring()+L"...");
         std::vector<float> clipDry;
@@ -3064,13 +3094,19 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
             if(renderCloWithOverrideOnSignal(out.oursClo,search.pp,search.pn,search.kp,search.kn,search.b,clipDry,optimizedOutput,stepError))
                 hp.optimizedEsr=levelResponseEsr(optimizedOutput,fullA2At44100);
         }
+        if(bOnlyOk){
+            std::vector<float> bOnlyOutput;
+            if(renderCloWithOverrideOnSignal(out.oursClo,out.pkPp,out.pkPn,out.pkKp,out.pkKn,bOnlyB,clipDry,bOnlyOutput,stepError))
+                hp.bOnlyEsr=levelResponseEsr(bOnlyOutput,fullA2At44100);
+        }
         out.heldOut.push_back(hp);
-        officialEsrSum+=hp.officialEsr;oursEsrSum+=hp.oursEsr;optimizedEsrSum+=hp.optimizedEsr;++heldOutCount;
+        officialEsrSum+=hp.officialEsr;oursEsrSum+=hp.oursEsr;optimizedEsrSum+=hp.optimizedEsr;bOnlyEsrSum+=hp.bOnlyEsr;++heldOutCount;
     }
     if(heldOutCount>0){
         out.officialMeanHeldOutEsr=officialEsrSum/static_cast<double>(heldOutCount);
         out.oursMeanHeldOutEsr=oursEsrSum/static_cast<double>(heldOutCount);
         if(search.ok) out.optimizedMeanHeldOutEsr=optimizedEsrSum/static_cast<double>(heldOutCount);
+        if(bOnlyOk) out.bOnlyMeanHeldOutEsr=bOnlyEsrSum/static_cast<double>(heldOutCount);
     }
 
     fs::remove_all(work,ec);

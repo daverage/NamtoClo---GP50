@@ -1825,33 +1825,40 @@ bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
                                                [](const std::wstring& s) { std::wcout << s << L"\n"; },
                                                trainClip, selectionClip, lambda)) {
             std::wofstream csv(outputCsv);
-            csv << L"section,level_db_or_clip,full_a2_relative_db,official_relative_db,ours_relative_db,optimized_relative_db,"
-                   L"official_relative_error_db,ours_relative_error_db,optimized_relative_error_db,official_esr,ours_esr,optimized_esr\n";
+            csv << L"section,level_db_or_clip,full_a2_relative_db,official_relative_db,ours_relative_db,optimized_relative_db,b_only_relative_db,"
+                   L"official_relative_error_db,ours_relative_error_db,optimized_relative_error_db,b_only_relative_error_db,"
+                   L"official_esr,ours_esr,optimized_esr,b_only_esr\n";
             for (const auto& p : result.levels) {
                 csv << L"level," << p.levelDb << L"," << p.fullA2RelativeDb << L"," << p.officialRelativeDb << L","
-                    << p.oursRelativeDb << L"," << p.optimizedRelativeDb << L"," << p.officialRelativeErrorDb << L","
-                    << p.oursRelativeErrorDb << L"," << p.optimizedRelativeErrorDb << L",,,\n";
+                    << p.oursRelativeDb << L"," << p.optimizedRelativeDb << L"," << p.bOnlyRelativeDb << L","
+                    << p.officialRelativeErrorDb << L"," << p.oursRelativeErrorDb << L"," << p.optimizedRelativeErrorDb << L","
+                    << p.bOnlyRelativeErrorDb << L",,,,\n";
             }
             for (const auto& h : result.heldOut) {
-                csv << L"held_out," << h.clipName << L",,,,,,,," << h.officialEsr << L"," << h.oursEsr << L"," << h.optimizedEsr << L"\n";
+                csv << L"held_out," << h.clipName << L",,,,,,,,,," << h.officialEsr << L"," << h.oursEsr << L"," << h.optimizedEsr
+                    << L"," << h.bOnlyEsr << L"\n";
             }
             csv << L"summary,dynamics_max_err_db," << result.officialMaxRelativeErrorDb << L"," << result.oursMaxRelativeErrorDb
-                << L"," << result.optimizedMaxRelativeErrorDb << L",,,,,,\n";
+                << L"," << result.optimizedMaxRelativeErrorDb << L"," << result.bOnlyMaxRelativeErrorDb << L",,,,,,,\n";
             csv << L"summary,dynamics_rms_err_db," << result.officialRmsRelativeErrorDb << L"," << result.oursRmsRelativeErrorDb
-                << L"," << result.optimizedRmsRelativeErrorDb << L",,,,,,\n";
+                << L"," << result.optimizedRmsRelativeErrorDb << L"," << result.bOnlyRmsRelativeErrorDb << L",,,,,,,\n";
             csv << L"summary,mean_held_out_esr," << result.officialMeanHeldOutEsr << L"," << result.oursMeanHeldOutEsr
-                << L"," << result.optimizedMeanHeldOutEsr << L",,,,,,\n";
+                << L"," << result.optimizedMeanHeldOutEsr << L"," << result.bOnlyMeanHeldOutEsr << L",,,,,,,\n";
 
             std::wcout << L"\nDynamics (six-level sweep vs Full A2):\n";
-            std::wcout << L"  official: max=" << result.officialMaxRelativeErrorDb << L"dB rms=" << result.officialRmsRelativeErrorDb << L"dB\n";
-            std::wcout << L"  ours:     max=" << result.oursMaxRelativeErrorDb << L"dB rms=" << result.oursRmsRelativeErrorDb << L"dB\n";
+            std::wcout << L"  official:  max=" << result.officialMaxRelativeErrorDb << L"dB rms=" << result.officialRmsRelativeErrorDb << L"dB\n";
+            std::wcout << L"  ours:      max=" << result.oursMaxRelativeErrorDb << L"dB rms=" << result.oursRmsRelativeErrorDb << L"dB\n";
+            if (result.bOnlyComputed)
+                std::wcout << L"  B-only:    max=" << result.bOnlyMaxRelativeErrorDb << L"dB rms=" << result.bOnlyRmsRelativeErrorDb << L"dB\n";
             if (result.optimizedComputed)
-                std::wcout << L"  optimized:max=" << result.optimizedMaxRelativeErrorDb << L"dB rms=" << result.optimizedRmsRelativeErrorDb << L"dB\n";
+                std::wcout << L"  optimized: max=" << result.optimizedMaxRelativeErrorDb << L"dB rms=" << result.optimizedRmsRelativeErrorDb << L"dB\n";
             std::wcout << L"\nHeld-out real playing (mean ESR vs Full A2, lower is better):\n";
-            std::wcout << L"  official: " << result.officialMeanHeldOutEsr << L"\n";
-            std::wcout << L"  ours:     " << result.oursMeanHeldOutEsr << L"\n";
+            std::wcout << L"  official:  " << result.officialMeanHeldOutEsr << L"\n";
+            std::wcout << L"  ours:      " << result.oursMeanHeldOutEsr << L"\n";
+            if (result.bOnlyComputed)
+                std::wcout << L"  B-only:    " << result.bOnlyMeanHeldOutEsr << L"\n";
             if (result.optimizedComputed)
-                std::wcout << L"  optimized:" << result.optimizedMeanHeldOutEsr << L"\n";
+                std::wcout << L"  optimized: " << result.optimizedMeanHeldOutEsr << L"\n";
             std::wcout << L"\npk (ours): pp=" << result.pkPp << L" pn=" << result.pkPn << L" kp=" << result.pkKp << L" kn=" << result.pkKn << L"\n";
             if (result.optimizedComputed)
                 std::wcout << L"pk (optimized): pp=" << result.optimizedPp << L" pn=" << result.optimizedPn << L" kp=" << result.optimizedKp << L" kn=" << result.optimizedKn << L"\n";

@@ -403,12 +403,18 @@ struct BenchmarkLevelPoint {
     double oursRelativeErrorDb = 0.0;     // oursRelativeDb - fullA2RelativeDb
     // Populated only when optimization (trainDiClipWav/selectionDiClipWav) was requested and succeeded.
     double optimizedRelativeDb = 0.0, optimizedRelativeErrorDb = 0.0;
+    // Populated only when optimization succeeded: a B-only candidate (P/K frozen at the
+    // shipped values, Block B solved jointly across trainDiClipWav's levels the same way
+    // Step 2's search solves B per P/K candidate) -- isolates how much of "optimized"'s
+    // win is the direct B-solve mechanism alone, vs. the P/K search on top of it.
+    double bOnlyRelativeDb = 0.0, bOnlyRelativeErrorDb = 0.0;
 };
 struct BenchmarkHeldOutPoint {
     std::wstring clipName;
     double officialEsr = 0.0; // waveform error-to-signal ratio vs Full A2 (levelResponseEsr)
     double oursEsr = 0.0;
     double optimizedEsr = 0.0; // populated only when optimization succeeded
+    double bOnlyEsr = 0.0;     // populated only when optimization succeeded
 };
 struct BenchmarkResult {
     bool ok = false;
@@ -438,6 +444,16 @@ struct BenchmarkResult {
     float optimizedPp = 0.0f, optimizedPn = 0.0f, optimizedKp = 0.0f, optimizedKn = 0.0f;
     double optimizedMaxRelativeErrorDb = 0.0, optimizedRmsRelativeErrorDb = 0.0;
     double optimizedMeanHeldOutEsr = 0.0;
+
+    // B-only candidate: shipped P/K frozen, Block B solved jointly across
+    // trainDiClipWav's six levels (ntc::sweepKAndSolveSharedB with
+    // kMultiplier=1.0 -- P/K unchanged, same solve mechanism Step 2 uses
+    // per P/K candidate). Isolates how much of optimizedComputed's win is
+    // the direct B-solve alone vs. the P/K search on top of it. True only
+    // when optimizedComputed is also true (built from the same train clips).
+    bool bOnlyComputed = false;
+    double bOnlyMaxRelativeErrorDb = 0.0, bOnlyRmsRelativeErrorDb = 0.0;
+    double bOnlyMeanHeldOutEsr = 0.0;
 };
 
 // trainDiClipWav/selectionDiClipWav are optional (pass empty paths to skip):
