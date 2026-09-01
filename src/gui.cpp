@@ -68,8 +68,6 @@ constexpr int IDC_GP5_UPLOAD = 136;
 constexpr int IDC_GP5_DEVICE = 137;
 constexpr int IDC_GP5_PROGRESS = 138;
 constexpr int IDC_REFINE_MODE = 139;
-constexpr int IDC_DYNAMICS_AWARE = 140;
-
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
 constexpr COLORREF kColorBorder = RGB(220, 226, 235);
@@ -131,7 +129,6 @@ HWND gRefineCheck = nullptr;
 HWND gRefineModeCombo = nullptr;
 HWND gRefineTargetEdit = nullptr;
 HWND gBrowseRefineTargetButton = nullptr;
-HWND gDynamicsAwareCheck = nullptr;
 HWND gVersion = nullptr;
 HWND gInfo = nullptr;
 HWND gSubtitle = nullptr;
@@ -259,7 +256,7 @@ void showConversionUi(HWND hwnd, bool show) {
         gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
         gConvertButton, gOpenButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
         gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineCheck,
-        gRefineModeCombo, gRefineTargetEdit, gBrowseRefineTargetButton, gDynamicsAwareCheck, gInfo
+        gRefineModeCombo, gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
     };
     for (HWND h : controls) showControl(h, show);
     for (int id : {1002,1003,1005,1006,1008,1009,1010})
@@ -383,7 +380,6 @@ void enableControls(bool enable) {
         EnableWindow(gRefineModeCombo, FALSE);
         EnableWindow(gRefineTargetEdit, FALSE);
         EnableWindow(gBrowseRefineTargetButton, FALSE);
-        EnableWindow(gDynamicsAwareCheck, FALSE);
     }
     if (!enable) {
         EnableWindow(gRecordedEdit, FALSE);
@@ -553,16 +549,6 @@ void updateTailControls() {
     const bool refineCustom = refineModeSel == 6; // "Custom WAV..." is the last item
     EnableWindow(gRefineTargetEdit, (refineEnabled && refineCustom) ? TRUE : FALSE);
     EnableWindow(gBrowseRefineTargetButton, (refineEnabled && refineCustom) ? TRUE : FALSE);
-    // Dynamics-aware fitting only does anything when Tone Match has a real
-    // reference clip to measure against (bundled Auto/Clean/Moderate/High/
-    // Bass modes, or Custom with a file already chosen) -- Default mode has
-    // no reference clip, so the gate never fires (see convertNamToClo's
-    // dynamics-aware fitting gate). Greyed out rather than hidden so the
-    // control's own tooltip/label still explains why.
-    const bool refineHasReferenceClip = refineEnabled
-        && (refineModeSel != 0)  // not Default
-        && (!refineCustom || !getText(gRefineTargetEdit).empty());
-    EnableWindow(gDynamicsAwareCheck, refineHasReferenceClip ? TRUE : FALSE);
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -622,8 +608,13 @@ void startConversion(HWND hwnd) {
     }
 
     enableControls(false);
+    // dynamicsAwareFitting stays at its default (false) -- see CLAUDE.md's "CoreRevert"
+    // pass: hardware listening + the --valeton-comparison tooling found this experimental
+    // P/K search regresses fidelity on at least one amp for no measured benefit elsewhere,
+    // so the GUI no longer exposes a control for it. searchPkForDynamics() itself and the
+    // --pk-dynamics-search/--pk-dynamics-audition headless flags remain available for
+    // research.
     ntc::NativeConverterConfig nativeConfig;
-    nativeConfig.dynamicsAwareFitting = SendMessageW(gDynamicsAwareCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (gInputMode == InputMode::SingleNam) {
         setText(gStatus, L"Starting conversion...");
         std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
@@ -793,7 +784,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
     gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionCorrective = RECT{ margin, y, clientW - margin, y + 86 }; y += 86 + gap;
-    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 134 }; y += 134 + gap;
+    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 114 }; y += 114 + gap;
     gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
     const int footerTop = std::max(clientH - footerH, static_cast<int>(gUi.buttonArea.bottom) + 16);
     gUi.footer = RECT{ 0, footerTop, clientW, std::max(clientH, footerTop + footerH) };
@@ -859,8 +850,6 @@ void layoutControls(HWND hwnd) {
     const int refineTargetEditW = (gUi.sectionRefine.right - sectionRightInset - 124 - 8) - refineTargetEditX;
     moveCtrl(gRefineTargetEdit, refineTargetEditX, gUi.sectionRefine.top + 78, refineTargetEditW, 28);
     moveCtrl(gBrowseRefineTargetButton, gUi.sectionRefine.right - sectionRightInset - 124, gUi.sectionRefine.top + 76, 124, 32);
-    moveCtrl(gDynamicsAwareCheck, contentX, gUi.sectionRefine.top + 108,
-             (gUi.sectionRefine.right - sectionRightInset) - contentX, 22);
 
     const int center = rc.right / 2;
     moveCtrl(gConvertButton, center - 222, gUi.buttonArea.top, 200, 36);
@@ -1001,13 +990,6 @@ void createUi(HWND hwnd) {
     gBrowseRefineTargetButton = CreateWindowW(L"BUTTON", L"Browse WAV...",
                                                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                0, 0, 124, 32, hwnd, controlId(IDC_BROWSE_REFINE_TARGET), nullptr, nullptr);
-
-    gDynamicsAwareCheck = CreateWindowW(L"BUTTON",
-                                        L"Dynamics-aware fitting for high/extreme-gain amps (adds up to ~2 min when it measurably helps)",
-                                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                        0, 0, 560, 24, hwnd, controlId(IDC_DYNAMICS_AWARE), nullptr, nullptr);
-    applyFont(gDynamicsAwareCheck);
-    SendMessageW(gDynamicsAwareCheck, BM_SETCHECK, BST_CHECKED, 0); // on by default, matches NativeConverterConfig::dynamicsAwareFitting
 
     createSectionLabel(hwnd, 1011, L"GP-200 CLO (.clo, 1024-tap)");
     createSectionLabel(hwnd, 1012, L"Destination SnapTone slot");
@@ -2063,6 +2045,65 @@ bool runHeadlessGp5MultiLevelVerifyIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+
+// "CoreRevert" pass (2026-09-01): compares the Valeton-style baseline,
+// target-production, and current-experimental GP-5/GP-50 candidates -- see
+// ntc::runValetonComparisonExperiment's doc comment in native_converter.hpp.
+bool runHeadlessValetonComparisonIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 4 && std::wstring(argv[1]) == L"--valeton-comparison") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path diClipWav = argv[3];
+        const fs::path outputDir = argv[4];
+        std::vector<fs::path> heldOutClips;
+        for (int i = 5; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"Valeton comparison: " << inputNam.wstring() << L"\n";
+        std::vector<ntc::ValetonComparisonResult> results;
+        std::string error;
+        if (ntc::runValetonComparisonExperiment(inputNam, diClipWav, heldOutClips, results, error,
+                                                 [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::error_code ec;
+            fs::create_directories(outputDir, ec);
+            const fs::path outputCsv = outputDir / (inputNam.stem().wstring() + L"_valeton_comparison.csv");
+            std::wofstream csv(outputCsv);
+            csv << L"candidate,level_db,full_a2_abs_rms_db,candidate_abs_rms_db,absolute_gain_error_db,"
+                   L"relative_error_db,normalized_spectral_loss,aligned_esr,correlation\n";
+            for (const auto& r : results) {
+                std::wcout << L"\nCandidate \"" << r.label << L"\": ";
+                if (!r.ok) {
+                    std::wcout << L"FAILED (" << ntc::fromUtf8(r.error) << L")\n";
+                    csv << r.label << L",,,,,,,\"" << ntc::fromUtf8(r.error) << L"\"\n";
+                    continue;
+                }
+                std::wcout << L"pk=(" << r.pkPp << L"," << r.pkPn << L"," << r.pkKp << L"," << r.pkKn << L")\n";
+                std::wcout << L"  mean absolute gain error=" << r.meanAbsoluteGainErrorDb << L"dB, max relative error="
+                           << r.maxRelativeErrorDb << L"dB, rms relative error=" << r.rmsRelativeErrorDb << L"dB\n";
+                std::wcout << L"  mean normalized spectral loss=" << r.meanNormalizedSpectralLoss
+                           << L", mean aligned ESR=" << r.meanAlignedEsr << L", mean correlation=" << r.meanCorrelation << L"\n";
+                std::wcout << L"  mean held-out ESR=" << r.meanHeldOutEsr << L"\n";
+                for (const auto& p : r.levels) {
+                    csv << r.label << L"," << p.levelDb << L"," << p.fullA2AbsoluteRmsDb << L"," << p.candidateAbsoluteRmsDb << L","
+                        << p.absoluteGainErrorDb << L"," << p.relativeErrorDb << L"," << p.normalizedSpectralLoss << L","
+                        << p.alignedEsr << L"," << p.correlation << L"\n";
+                }
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -2091,6 +2132,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessGp5MultiLevelVerifyIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessValetonComparisonIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.

@@ -3415,4 +3415,205 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
     return true;
 }
 
+namespace {
+// Cross-correlation-based lag search: finds the integer sample lag (within
+// +/-maxLagSamples) minimizing residual energy between `candidate` and
+// `reference`, then reports ESR and Pearson correlation at that lag. Added
+// for the "CoreRevert" pass's level-normalized timbre comparison --
+// CLAUDE.md's dynamic-range work already flagged that raw (unaligned) ESR
+// between renderNamOnSignal's and renderCloOnSignal's independent render
+// chains is sensitive to a small group-delay mismatch; this removes that
+// confound instead of just noting it.
+void alignedEsrAndCorrelation(const std::vector<float>& candidate,const std::vector<float>& reference,
+                              int maxLagSamples,double& outEsr,double& outCorrelation){
+    outEsr=0.0;outCorrelation=0.0;
+    const std::size_t n=std::min(candidate.size(),reference.size());
+    if(n<static_cast<std::size_t>(maxLagSamples)*2+16)return;
+
+    auto residualEnergyAtLag=[&](int lag)->double{
+        double sum=0.0;std::size_t count=0;
+        for(std::size_t i=0;i<n;++i){
+            const long long j=static_cast<long long>(i)+lag;
+            if(j<0||j>=static_cast<long long>(n))continue;
+            const double d=static_cast<double>(candidate[static_cast<std::size_t>(j)])-static_cast<double>(reference[i]);
+            sum+=d*d;++count;
+        }
+        return count>0?sum/static_cast<double>(count):std::numeric_limits<double>::infinity();
+    };
+
+    int bestLag=0;double bestEnergy=residualEnergyAtLag(0);
+    for(int lag=-maxLagSamples;lag<=maxLagSamples;++lag){
+        if(lag==0)continue;
+        const double e=residualEnergyAtLag(lag);
+        if(e<bestEnergy){bestEnergy=e;bestLag=lag;}
+    }
+
+    double candMean=0.0,refMean=0.0;std::size_t count=0;
+    for(std::size_t i=0;i<n;++i){
+        const long long j=static_cast<long long>(i)+bestLag;
+        if(j<0||j>=static_cast<long long>(n))continue;
+        candMean+=static_cast<double>(candidate[static_cast<std::size_t>(j)]);
+        refMean+=static_cast<double>(reference[i]);
+        ++count;
+    }
+    if(count==0)return;
+    candMean/=static_cast<double>(count);refMean/=static_cast<double>(count);
+
+    double covar=0.0,candVar=0.0,refVar=0.0,sqErr=0.0,refEnergy=0.0;
+    for(std::size_t i=0;i<n;++i){
+        const long long j=static_cast<long long>(i)+bestLag;
+        if(j<0||j>=static_cast<long long>(n))continue;
+        const double c=static_cast<double>(candidate[static_cast<std::size_t>(j)])-candMean;
+        const double r=static_cast<double>(reference[i])-refMean;
+        covar+=c*r;candVar+=c*c;refVar+=r*r;
+        const double rawRef=static_cast<double>(reference[i]);
+        const double d=static_cast<double>(candidate[static_cast<std::size_t>(j)])-rawRef;
+        sqErr+=d*d;refEnergy+=rawRef*rawRef;
+    }
+    outEsr=refEnergy>1e-30?sqErr/refEnergy:0.0;
+    outCorrelation=(candVar>1e-30&&refVar>1e-30)?covar/std::sqrt(candVar*refVar):0.0;
+}
+
+// Scales `candidate` by a pure gain so its RMS matches `reference`'s RMS (a scalar
+// operation, so it cannot alter timbre/waveform shape) -- removes loudness as a variable
+// so every metric computed on the result (spectral loss, aligned ESR, correlation) isolates
+// timbre/cleanup error at a given drive level, independent of the absolute gain error.
+std::vector<float> rmsNormalizeToReference(const std::vector<float>& candidate,const std::vector<float>& reference){
+    double candSumSq=0.0;for(float v:candidate)candSumSq+=static_cast<double>(v)*static_cast<double>(v);
+    double refSumSq=0.0;for(float v:reference)refSumSq+=static_cast<double>(v)*static_cast<double>(v);
+    if(candSumSq<1e-30||refSumSq<1e-30)return candidate;
+    const double gain=std::sqrt(refSumSq/candSumSq);
+    std::vector<float> scaled(candidate.size());
+    for(std::size_t i=0;i<candidate.size();++i)scaled[i]=static_cast<float>(candidate[i]*gain);
+    return scaled;
+}
+
+// Reuses the same ratioSpectrumF/lossFromRatioF machinery evaluateModelLoss uses
+// elsewhere in this file, against an already RMS-normalized candidate.
+double normalizedSpectralLoss(const std::vector<float>& normalizedCandidate,const std::vector<float>& reference,double sr){
+    const auto residual=ratioSpectrumF(normalizedCandidate,reference,sr);
+    return static_cast<double>(lossFromRatioF(residual,sr));
+}
+} // namespace
+
+// See native_converter.hpp's doc comment. Builds the three CoreRevert
+// comparison candidates from the SAME NAM via convertNamToClo with different
+// NativeConverterConfig/CloRefineConfig settings, then scores each against
+// Full A2 at 7 gain levels (absolute gain error, relative dynamics-shape
+// error, and level-normalized timbre error) plus mean held-out spectral ESR.
+bool runValetonComparisonExperiment(const fs::path& inputNam,
+                                    const fs::path& diClipWav,
+                                    const std::vector<fs::path>& heldOutClips,
+                                    std::vector<ValetonComparisonResult>& out,
+                                    std::string& error,
+                                    const StatusCallback& status){
+    out.clear();
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_valeton_comparison_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    struct CandidateSpec{const wchar_t*label;bool gp5DirectFit;bool refineEnabled;bool dynamicsAware;};
+    // gp5DirectFit stays true for every candidate here: it's convertNamToClo's
+    // always-on, per-NAM dynamic pick between the direct-at-512-taps fit and
+    // truncating the 2048-tap fit (whichever scores lower), not something this
+    // pass touches -- and it's also required for gp5Chosen (and therefore any
+    // gp5gp50Compact output at all) to be populated. What varies between
+    // candidates is only whether Tone Match runs (which is what can apply our
+    // direct B512 least-squares solve, gp5DirectFit's own truncation choice
+    // aside) and whether the dynamics-aware P/K search can reopen P/K within it.
+    static const CandidateSpec specs[]={
+        {L"valeton",true,false,false},
+        {L"production",true,true,false},
+        {L"experimental",true,true,true},
+    };
+    static constexpr double kLevelsDb[]={0.0,-3.0,-6.0,-9.0,-12.0,-18.0,-24.0};
+    static constexpr int kMaxLagSamples=256; // ~5.8ms at 44.1kHz, generous vs. this pipeline's short FIR/biquad latency
+
+    for(const auto& spec:specs){
+        ValetonComparisonResult r;r.label=spec.label;
+        report(status,L"Valeton comparison: converting candidate \""+r.label+L"\"...");
+
+        NativeConverterConfig converter;converter.gp5DirectFit=spec.gp5DirectFit;converter.dynamicsAwareFitting=spec.dynamicsAware;
+        CloRefineConfig refine;refine.enabled=spec.refineEnabled;
+        if(spec.refineEnabled)refine.referenceMode=ToneMatchReferenceMode::Auto;
+
+        auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+        if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+            r.error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
+            out.push_back(r);continue;
+        }
+        r.pkPp=conversion.pkPp;r.pkPn=conversion.pkPn;r.pkKp=conversion.pkKp;r.pkKn=conversion.pkKn;
+
+        double gainErrSum=0.0,specSum=0.0,esrSum=0.0,corrSum=0.0;std::size_t nLevels=0;
+        for(double levelDb:kLevelsDb){
+            const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
+            std::vector<float> scaled(dry.size());
+            for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
+
+            std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+            if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+            const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+            std::vector<float> candOutput;
+            if(!renderCloOnSignal(conversion.gp5gp50Compact,scaled,candOutput,stepError))continue;
+
+            ValetonComparisonLevelPoint p;p.levelDb=levelDb;
+            p.fullA2AbsoluteRmsDb=rmsDb(fullA2At44100);p.candidateAbsoluteRmsDb=rmsDb(candOutput);
+            p.absoluteGainErrorDb=p.candidateAbsoluteRmsDb-p.fullA2AbsoluteRmsDb;
+            const auto candNormalized=rmsNormalizeToReference(candOutput,fullA2At44100);
+            p.normalizedSpectralLoss=normalizedSpectralLoss(candNormalized,fullA2At44100,44100.0);
+            alignedEsrAndCorrelation(candNormalized,fullA2At44100,kMaxLagSamples,p.alignedEsr,p.correlation);
+            r.levels.push_back(p);
+
+            gainErrSum+=p.absoluteGainErrorDb;specSum+=p.normalizedSpectralLoss;esrSum+=p.alignedEsr;corrSum+=p.correlation;++nLevels;
+        }
+        if(r.levels.empty()){
+            r.error="No level clips rendered successfully.";out.push_back(r);continue;
+        }
+        // Anchor to this candidate's own 0dB point for the relative/compression-shape
+        // numbers, same convention as LevelResponsePoint/BenchmarkLevelPoint elsewhere.
+        const auto zeroIt=std::find_if(r.levels.begin(),r.levels.end(),[](const ValetonComparisonLevelPoint&p){return std::abs(p.levelDb)<1e-9;});
+        if(zeroIt!=r.levels.end()){
+            const double fullA2Zero=zeroIt->fullA2AbsoluteRmsDb,candZero=zeroIt->candidateAbsoluteRmsDb;
+            double sumSq=0.0;
+            for(auto&p:r.levels){
+                p.fullA2RelativeDb=p.fullA2AbsoluteRmsDb-fullA2Zero;
+                p.candidateRelativeDb=p.candidateAbsoluteRmsDb-candZero;
+                p.relativeErrorDb=p.candidateRelativeDb-p.fullA2RelativeDb;
+                r.maxRelativeErrorDb=std::max(r.maxRelativeErrorDb,std::abs(p.relativeErrorDb));
+                sumSq+=p.relativeErrorDb*p.relativeErrorDb;
+            }
+            r.rmsRelativeErrorDb=std::sqrt(sumSq/static_cast<double>(r.levels.size()));
+        }
+        r.meanAbsoluteGainErrorDb=gainErrSum/static_cast<double>(nLevels);
+        r.meanNormalizedSpectralLoss=specSum/static_cast<double>(nLevels);
+        r.meanAlignedEsr=esrSum/static_cast<double>(nLevels);
+        r.meanCorrelation=corrSum/static_cast<double>(nLevels);
+
+        double heldOutSum=0.0;std::size_t heldOutCount=0;
+        for(const auto& clipPath:heldOutClips){
+            std::vector<float> clipDry;std::string stepError;
+            if(!loadClipAsMono44100(clipPath,clipDry,stepError))continue;
+            std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
+            if(!renderNamOnSignal(fullModelPath,clipDry,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+            const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+            std::vector<float> candOutput;
+            if(!renderCloOnSignal(conversion.gp5gp50Compact,clipDry,candOutput,stepError))continue;
+            heldOutSum+=levelResponseEsr(candOutput,fullA2At44100);++heldOutCount;
+        }
+        if(heldOutCount>0)r.meanHeldOutEsr=heldOutSum/static_cast<double>(heldOutCount);
+
+        r.ok=true;out.push_back(r);
+    }
+
+    fs::remove_all(work,ec);
+    return true;
+}
+
 } // namespace ntc

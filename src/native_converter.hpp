@@ -110,22 +110,31 @@ struct NativeConverterConfig {
     bool gp5DirectFit = true;
 
     // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2" --
-    // full P/K coordinate-descent search). Measured cost: ~120s added per
-    // conversion (~6x a normal conversion's ~23.5s), so it is never run
-    // unconditionally. When true (default) and a Tone Match reference clip
-    // is available (refine.enabled && refine.referenceWav non-empty, i.e.
-    // Tone Match reference mode isn't Default/Custom-without-a-clip),
-    // convertNamToClo first cheaply measures the winning GP-5/GP-50 Tone
-    // Match candidate's own dynamics-tracking error against Full A2 (reusing
-    // the six-level sweep already built for the multi-level B-solve
-    // candidate -- no extra Full A2 renders). Only when that measured RMS
-    // relative error exceeds dynamicsSearchThresholdDb does it run the full
-    // P/K search and ship the result if it beats the already-chosen
-    // candidate on a disjoint selection clip. Gated on MEASURED error, not
-    // amp category or a Kp/Kn threshold -- CLAUDE.md explicitly cautions
-    // against hard-coding a gain-based rule (insufficient evidence for a
-    // stable threshold across the small dataset measured so far).
-    bool dynamicsAwareFitting = true;
+    // full P/K coordinate-descent search). EXPERIMENTAL / DIAGNOSTIC ONLY --
+    // defaults to false as of the 2026-09-01 "CoreRevert" pass. Real hardware
+    // listening found that letting this gate reopen and move Pp/Pn/Kp/Kn away
+    // from the frozen Valeton-style fitPk() result produces a behavioral
+    // regression: converted patches end up substantially quieter than the
+    // official SnapTone conversion, and rolling off guitar volume mostly just
+    // makes them quieter rather than cleaning up the distortion the way the
+    // official conversion does. The six-level zero-anchored RMS metric this
+    // gate optimizes against can improve while that metric is blind to
+    // exactly this failure mode. Kept in the codebase as an experiment/
+    // diagnostic tool (see the headless --pk-dynamics-search /
+    // --pk-dynamics-audition CLI flags and searchPkForDynamics() itself,
+    // clo_refiner.hpp) but must not run by default. When true and a Tone
+    // Match reference clip is available (refine.enabled &&
+    // refine.referenceWav non-empty, i.e. Tone Match reference mode isn't
+    // Default/Custom-without-a-clip), convertNamToClo first cheaply measures
+    // the winning GP-5/GP-50 Tone Match candidate's own dynamics-tracking
+    // error against Full A2 (reusing the six-level sweep already built for
+    // the multi-level B-solve candidate -- no extra Full A2 renders). Only
+    // when that measured RMS relative error exceeds dynamicsSearchThresholdDb
+    // does it run the full P/K search and ship the result if it beats the
+    // already-chosen candidate on a disjoint selection clip. The threshold
+    // calibration notes below are retained as historical context from when
+    // this was production behavior, not a recommendation to re-enable it.
+    bool dynamicsAwareFitting = false;
     // Threshold recalibrated (2026-08-31) against the ACTUAL measurement
     // this gate performs in production: the already-chosen candidate (i.e.
     // AFTER the cheap multi-level B solve above has already run and
@@ -572,5 +581,74 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
                                   const fs::path& trainDiClipWav = {},
                                   const fs::path& selectionDiClipWav = {},
                                   double optimizationLambda = 0.3);
+
+// "CoreRevert" pass (2026-09-01, see CLAUDE.md): compares three internal
+// GP-5/GP-50 candidates built from the SAME NAM, to check whether restoring
+// Valeton-style P/K/A fitting -- while keeping only the direct B512 solve --
+// recovers correct guitar-volume cleanup without losing the B512 win.
+//   "valeton"      -- Tone Match disabled entirely, so none of Tone Match's B
+//                      candidates (including our direct B512 least-squares
+//                      solve) or the dynamics-aware P/K search ever run. What
+//                      ships is exactly convertNamToClo's always-on fitPk()/
+//                      fitAB() result, with B taken from its existing dynamic
+//                      pick between direct-at-512-taps and truncating the
+//                      2048-tap fit (whichever scores lower for this NAM --
+//                      that pick predates and is independent of the Tone
+//                      Match-driven B512 solve this pass is about, so it's
+//                      left on for every candidate here). The closest
+//                      approximation this codebase can produce to "Valeton's
+//                      own B for the 512-tap budget" without a real captured
+//                      512-tap official SnapTone file to fit against.
+//   "production"    -- Tone Match enabled (Auto reference mode, matching the
+//                      GUI's default), so the B512 solve competes and can
+//                      ship; dynamicsAwareFitting=false so P/K stays frozen
+//                      at the Valeton-style fitPk() result. Production AFTER
+//                      this pass.
+//   "experimental"  -- same as "production" but dynamicsAwareFitting=true, so
+//                      the P/K search can reopen and move P/K. Production
+//                      BEFORE this pass -- comparison only, not shipped.
+struct ValetonComparisonLevelPoint {
+    double levelDb = 0.0;
+    double fullA2AbsoluteRmsDb = 0.0;
+    double candidateAbsoluteRmsDb = 0.0;
+    double absoluteGainErrorDb = 0.0; // candidateAbsoluteRmsDb - fullA2AbsoluteRmsDb, NOT anchored --
+                                       // the first-class loudness metric the user asked for.
+    double fullA2RelativeDb = 0.0;    // anchored to this candidate's own 0dB point (compression shape only)
+    double candidateRelativeDb = 0.0;
+    double relativeErrorDb = 0.0;     // candidateRelativeDb - fullA2RelativeDb
+
+    // Level-normalized timbre: candidate RMS-matched to Full A2 at THIS level (a pure
+    // scalar gain, so it cannot change spectral/waveform shape) before comparison --
+    // removes loudness as a variable so this isolates whether the candidate still
+    // sounds like Full A2 at this drive level, independent of absoluteGainErrorDb above.
+    double normalizedSpectralLoss = 0.0; // ratioSpectrumF/lossFromRatioF after RMS-matching
+    double alignedEsr = 0.0;             // waveform ESR at the best-aligning lag (removes group-delay confound)
+    double correlation = 0.0;            // waveform correlation coefficient at that same lag
+};
+struct ValetonComparisonResult {
+    bool ok = false;
+    std::string error;
+    std::wstring label; // "valeton" | "production" | "experimental"
+    float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f;
+    std::vector<ValetonComparisonLevelPoint> levels; // {0,-3,-6,-9,-12,-18,-24} dB
+    double meanAbsoluteGainErrorDb = 0.0;
+    double maxRelativeErrorDb = 0.0, rmsRelativeErrorDb = 0.0;
+    double meanNormalizedSpectralLoss = 0.0, meanAlignedEsr = 0.0, meanCorrelation = 0.0;
+    // Held-out real playing clips (never used to fit anything): mean spectral fidelity
+    // via the same levelResponseEsr metric used elsewhere in this file.
+    double meanHeldOutEsr = 0.0;
+};
+
+// Builds and scores all three candidates above for inputNam against
+// diClipWav (rendered at the seven levels) and heldOutClips (spectral
+// fidelity only, at 0dB). Always writes exactly 3 entries into out, in the
+// order valeton/production/experimental -- check .ok per entry, since one
+// candidate's conversion can fail independently of the others.
+bool runValetonComparisonExperiment(const fs::path& inputNam,
+                                    const fs::path& diClipWav,
+                                    const std::vector<fs::path>& heldOutClips,
+                                    std::vector<ValetonComparisonResult>& out,
+                                    std::string& error,
+                                    const StatusCallback& status = {});
 
 } // namespace ntc
