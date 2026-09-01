@@ -1,6 +1,5 @@
 build/
 dist/
-release/
 .vs/
 *.user
 test_assets/
