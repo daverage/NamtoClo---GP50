@@ -3424,12 +3424,8 @@ namespace {
 // between renderNamOnSignal's and renderCloOnSignal's independent render
 // chains is sensitive to a small group-delay mismatch; this removes that
 // confound instead of just noting it.
-void alignedEsrAndCorrelation(const std::vector<float>& candidate,const std::vector<float>& reference,
-                              int maxLagSamples,double& outEsr,double& outCorrelation){
-    outEsr=0.0;outCorrelation=0.0;
+int bestAlignmentLag(const std::vector<float>& candidate,const std::vector<float>& reference,int maxLagSamples){
     const std::size_t n=std::min(candidate.size(),reference.size());
-    if(n<static_cast<std::size_t>(maxLagSamples)*2+16)return;
-
     auto residualEnergyAtLag=[&](int lag)->double{
         double sum=0.0;std::size_t count=0;
         for(std::size_t i=0;i<n;++i){
@@ -3440,13 +3436,39 @@ void alignedEsrAndCorrelation(const std::vector<float>& candidate,const std::vec
         }
         return count>0?sum/static_cast<double>(count):std::numeric_limits<double>::infinity();
     };
-
     int bestLag=0;double bestEnergy=residualEnergyAtLag(0);
     for(int lag=-maxLagSamples;lag<=maxLagSamples;++lag){
         if(lag==0)continue;
         const double e=residualEnergyAtLag(lag);
         if(e<bestEnergy){bestEnergy=e;bestLag=lag;}
     }
+    return bestLag;
+}
+
+// Builds the actual aligned+trimmed sample pair for a caller (like the band-energy
+// diagnostic below) that needs the aligned waveforms themselves, not just a scalar
+// ESR/correlation.
+void alignSignals(const std::vector<float>& candidate,const std::vector<float>& reference,int maxLagSamples,
+                  std::vector<float>& outCand,std::vector<float>& outRef){
+    outCand.clear();outRef.clear();
+    const std::size_t n=std::min(candidate.size(),reference.size());
+    if(n<static_cast<std::size_t>(maxLagSamples)*2+16)return;
+    const int bestLag=bestAlignmentLag(candidate,reference,maxLagSamples);
+    if(bestLag>=0){
+        for(std::size_t i=0;i+static_cast<std::size_t>(bestLag)<n;++i){outCand.push_back(candidate[i+static_cast<std::size_t>(bestLag)]);outRef.push_back(reference[i]);}
+    }else{
+        const std::size_t shift=static_cast<std::size_t>(-bestLag);
+        for(std::size_t i=0;i+shift<n;++i){outCand.push_back(candidate[i]);outRef.push_back(reference[i+shift]);}
+    }
+}
+
+void alignedEsrAndCorrelation(const std::vector<float>& candidate,const std::vector<float>& reference,
+                              int maxLagSamples,double& outEsr,double& outCorrelation){
+    outEsr=0.0;outCorrelation=0.0;
+    const std::size_t n=std::min(candidate.size(),reference.size());
+    if(n<static_cast<std::size_t>(maxLagSamples)*2+16)return;
+
+    const int bestLag=bestAlignmentLag(candidate,reference,maxLagSamples);
 
     double candMean=0.0,refMean=0.0;std::size_t count=0;
     for(std::size_t i=0;i<n;++i){
@@ -3494,6 +3516,157 @@ double normalizedSpectralLoss(const std::vector<float>& normalizedCandidate,cons
     const auto residual=ratioSpectrumF(normalizedCandidate,reference,sr);
     return static_cast<double>(lossFromRatioF(residual,sr));
 }
+
+// Diagnostic-only spectral-BALANCE ("EQ") check, distinct from normalizedSpectralLoss's
+// magnitude-RATIO loss: % of total STFT energy per frequency band -- sub/bass <120Hz,
+// low-mid 120-500Hz, mid 500-2000Hz, presence 2000-5000Hz, high 5000-12000Hz, air
+// >12000Hz -- via the same windowed-STFT machinery (Hamming, L=ceil(0.125*fs), 50%
+// overlap, Ooura RDFT) ratioSpectrumF uses elsewhere in this file. Added for the
+// "CoreRevert" pass: a candidate can have low magnitude-ratio loss and still skew
+// audibly bassier/duller than Full A2 (see CLAUDE.md), which per-band energy share
+// makes directly visible and comparable across candidates.
+std::array<double,6> bandEnergyPercent(const std::vector<float>& signal,double sr){
+    std::array<double,6> out{};
+    const float fs=static_cast<float>(sr);
+    const int Li=static_cast<int>(static_cast<double>(fs*0.125f)+0.5);
+    const std::size_t L=static_cast<std::size_t>(std::max(1,Li));
+    const std::size_t hop=std::max<std::size_t>(1,L-L/2);
+    const auto wv=hammingF(L);
+    if(signal.size()<L)return out;
+
+    std::vector<float> sxx(kBins,0.0f);
+    OouraRfft2048Official rdft;
+    std::size_t startPos=0;const std::size_t finalStart=signal.size()-L;
+    for(;;){
+        const std::size_t p=std::min(startPos,finalStart);
+        std::vector<float> xframe(L);float mx=0.0f;
+        for(std::size_t i=0;i<L;++i){xframe[i]=signal[p+i];mx+=xframe[i];}
+        mx/=static_cast<float>(L);
+        std::vector<float> xf(kFft,0.0f);
+        for(std::size_t i=0;i<L;++i){const std::size_t j=i&(kFft-1);xf[j]+=(xframe[i]-mx)*wv[i];}
+        std::array<float,kBins> xr{},xi{};
+        rdft.run(xf,xr,xi);
+        for(std::size_t k=0;k<kBins;++k)sxx[k]+=xr[k]*xr[k]+xi[k]*xi[k];
+        if(p==finalStart)break;
+        startPos+=hop;
+    }
+
+    static constexpr double kBandEdgesHz[]={120.0,500.0,2000.0,5000.0,12000.0};
+    double total=0.0;std::array<double,6> bandSum{};
+    for(std::size_t k=0;k<kBins;++k){
+        const double hz=static_cast<double>(k)*sr/static_cast<double>(kFft);
+        std::size_t band=5;
+        for(std::size_t b=0;b<5;++b){if(hz<kBandEdgesHz[b]){band=b;break;}}
+        bandSum[band]+=static_cast<double>(sxx[k]);
+        total+=static_cast<double>(sxx[k]);
+    }
+    if(total>1e-30)for(std::size_t b=0;b<6;++b)out[b]=100.0*bandSum[b]/total;
+    return out;
+}
+
+ValetonComparisonBandEnergy toBandEnergyStruct(const std::array<double,6>& b){
+    ValetonComparisonBandEnergy r;
+    r.subBassPercent=b[0];r.lowMidPercent=b[1];r.midPercent=b[2];
+    r.presencePercent=b[3];r.highPercent=b[4];r.airPercent=b[5];
+    return r;
+}
+
+using CandidateRenderFn=std::function<bool(const std::vector<float>&,std::vector<float>&,std::string&)>;
+
+// Scores one already-built GP-5/GP-50 candidate against Full A2: the 7-level
+// {0,-3,-6,-9,-12,-18,-24}dB gain-error/relative-dynamics/normalized-timbre sweep on
+// `dry` (already loaded mono 44.1kHz), plus mean held-out ESR and mean per-band EQ
+// energy (RMS-matched+aligned) on heldOutClips. `renderCandidate` renders one signal
+// through the candidate -- a thin wrapper around renderCloOnSignal for a candidate
+// that's an actual CLO file, or renderCloWithOverrideOnSignal for a candidate that's
+// only ever a P/K+B override over some other CLO's frozen Pre/A/Post (no file written).
+// Fills in every field of `r` except .label/.pkPp/.pkPn/.pkKp/.pkKn/.error, which the
+// caller sets. Returns false (with r.error set) only if no level rendered successfully.
+// Shared by runValetonComparisonExperiment and runMultiClipB512Experiment so the exact
+// same methodology backs every GP-5/GP-50 candidate comparison in this codebase.
+bool scoreGp5CandidateAgainstFullA2(const fs::path& fullModelPath,const CandidateRenderFn& renderCandidate,
+                                    const std::vector<float>& dry,const std::vector<fs::path>& heldOutClips,
+                                    ValetonComparisonResult& r){
+    static constexpr double kLevelsDb[]={0.0,-3.0,-6.0,-9.0,-12.0,-18.0,-24.0};
+    static constexpr int kMaxLagSamples=256; // ~5.8ms at 44.1kHz, generous vs. this pipeline's short FIR/biquad latency
+
+    double gainErrSum=0.0,specSum=0.0,esrSum=0.0,corrSum=0.0;std::size_t nLevels=0;
+    for(double levelDb:kLevelsDb){
+        const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
+        std::vector<float> scaled(dry.size());
+        for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
+
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+        if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+        const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+        std::vector<float> candOutput;
+        if(!renderCandidate(scaled,candOutput,stepError))continue;
+
+        ValetonComparisonLevelPoint p;p.levelDb=levelDb;
+        p.fullA2AbsoluteRmsDb=rmsDb(fullA2At44100);p.candidateAbsoluteRmsDb=rmsDb(candOutput);
+        p.absoluteGainErrorDb=p.candidateAbsoluteRmsDb-p.fullA2AbsoluteRmsDb;
+        const auto candNormalized=rmsNormalizeToReference(candOutput,fullA2At44100);
+        p.normalizedSpectralLoss=normalizedSpectralLoss(candNormalized,fullA2At44100,44100.0);
+        alignedEsrAndCorrelation(candNormalized,fullA2At44100,kMaxLagSamples,p.alignedEsr,p.correlation);
+        r.levels.push_back(p);
+
+        gainErrSum+=p.absoluteGainErrorDb;specSum+=p.normalizedSpectralLoss;esrSum+=p.alignedEsr;corrSum+=p.correlation;++nLevels;
+    }
+    if(r.levels.empty()){
+        r.error="No level clips rendered successfully.";return false;
+    }
+    const auto zeroIt=std::find_if(r.levels.begin(),r.levels.end(),[](const ValetonComparisonLevelPoint&p){return std::abs(p.levelDb)<1e-9;});
+    if(zeroIt!=r.levels.end()){
+        const double fullA2Zero=zeroIt->fullA2AbsoluteRmsDb,candZero=zeroIt->candidateAbsoluteRmsDb;
+        double sumSq=0.0;
+        for(auto&p:r.levels){
+            p.fullA2RelativeDb=p.fullA2AbsoluteRmsDb-fullA2Zero;
+            p.candidateRelativeDb=p.candidateAbsoluteRmsDb-candZero;
+            p.relativeErrorDb=p.candidateRelativeDb-p.fullA2RelativeDb;
+            r.maxRelativeErrorDb=std::max(r.maxRelativeErrorDb,std::abs(p.relativeErrorDb));
+            sumSq+=p.relativeErrorDb*p.relativeErrorDb;
+        }
+        r.rmsRelativeErrorDb=std::sqrt(sumSq/static_cast<double>(r.levels.size()));
+    }
+    r.meanAbsoluteGainErrorDb=gainErrSum/static_cast<double>(nLevels);
+    r.meanNormalizedSpectralLoss=specSum/static_cast<double>(nLevels);
+    r.meanAlignedEsr=esrSum/static_cast<double>(nLevels);
+    r.meanCorrelation=corrSum/static_cast<double>(nLevels);
+
+    double heldOutSum=0.0;std::size_t heldOutCount=0;
+    std::array<double,6> bandSum{},fullA2BandSum{};std::size_t bandCount=0;
+    for(const auto& clipPath:heldOutClips){
+        std::vector<float> clipDry;std::string stepError;
+        if(!loadClipAsMono44100(clipPath,clipDry,stepError))continue;
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
+        if(!renderNamOnSignal(fullModelPath,clipDry,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+        const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+        std::vector<float> candOutput;
+        if(!renderCandidate(clipDry,candOutput,stepError))continue;
+        heldOutSum+=levelResponseEsr(candOutput,fullA2At44100);++heldOutCount;
+
+        const auto candNormalized=rmsNormalizeToReference(candOutput,fullA2At44100);
+        std::vector<float> alignedCand,alignedRef;
+        alignSignals(candNormalized,fullA2At44100,kMaxLagSamples,alignedCand,alignedRef);
+        if(!alignedCand.empty()){
+            const auto candBand=bandEnergyPercent(alignedCand,44100.0);
+            const auto refBand=bandEnergyPercent(alignedRef,44100.0);
+            for(std::size_t b=0;b<6;++b){bandSum[b]+=candBand[b];fullA2BandSum[b]+=refBand[b];}
+            ++bandCount;
+        }
+    }
+    if(heldOutCount>0)r.meanHeldOutEsr=heldOutSum/static_cast<double>(heldOutCount);
+    if(bandCount>0){
+        std::array<double,6> bandMean{},fullA2BandMean{};
+        for(std::size_t b=0;b<6;++b){
+            bandMean[b]=bandSum[b]/static_cast<double>(bandCount);
+            fullA2BandMean[b]=fullA2BandSum[b]/static_cast<double>(bandCount);
+        }
+        r.meanBandEnergyPercent=toBandEnergyStruct(bandMean);
+        r.fullA2MeanBandEnergyPercent=toBandEnergyStruct(fullA2BandMean);
+    }
+    return true;
+}
 } // namespace
 
 // See native_converter.hpp's doc comment. Builds the three CoreRevert
@@ -3533,9 +3706,6 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
         {L"production",true,true,false},
         {L"experimental",true,true,true},
     };
-    static constexpr double kLevelsDb[]={0.0,-3.0,-6.0,-9.0,-12.0,-18.0,-24.0};
-    static constexpr int kMaxLagSamples=256; // ~5.8ms at 44.1kHz, generous vs. this pipeline's short FIR/biquad latency
-
     for(const auto& spec:specs){
         ValetonComparisonResult r;r.label=spec.label;
         report(status,L"Valeton comparison: converting candidate \""+r.label+L"\"...");
@@ -3551,65 +3721,224 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
         }
         r.pkPp=conversion.pkPp;r.pkPn=conversion.pkPn;r.pkKp=conversion.pkKp;r.pkKn=conversion.pkKn;
 
-        double gainErrSum=0.0,specSum=0.0,esrSum=0.0,corrSum=0.0;std::size_t nLevels=0;
-        for(double levelDb:kLevelsDb){
-            const float gain=static_cast<float>(std::pow(10.0,levelDb/20.0));
-            std::vector<float> scaled(dry.size());
-            for(std::size_t i=0;i<dry.size();++i)scaled[i]=dry[i]*gain;
+        const fs::path candidateClo=conversion.gp5gp50Compact;
+        CandidateRenderFn renderFn=[candidateClo](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+            return renderCloOnSignal(candidateClo,in,outv,err);
+        };
+        r.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,renderFn,dry,heldOutClips,r);
+        out.push_back(r);
+    }
 
-            std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
-            if(!renderNamOnSignal(fullModelPath,scaled,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
-            const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
-            std::vector<float> candOutput;
-            if(!renderCloOnSignal(conversion.gp5gp50Compact,scaled,candOutput,stepError))continue;
+    fs::remove_all(work,ec);
+    return true;
+}
 
-            ValetonComparisonLevelPoint p;p.levelDb=levelDb;
-            p.fullA2AbsoluteRmsDb=rmsDb(fullA2At44100);p.candidateAbsoluteRmsDb=rmsDb(candOutput);
-            p.absoluteGainErrorDb=p.candidateAbsoluteRmsDb-p.fullA2AbsoluteRmsDb;
-            const auto candNormalized=rmsNormalizeToReference(candOutput,fullA2At44100);
-            p.normalizedSpectralLoss=normalizedSpectralLoss(candNormalized,fullA2At44100,44100.0);
-            alignedEsrAndCorrelation(candNormalized,fullA2At44100,kMaxLagSamples,p.alignedEsr,p.correlation);
-            r.levels.push_back(p);
+// See native_converter.hpp's doc comment.
+bool runValetonAudition(const fs::path& inputNam,
+                        const fs::path& playingClipWav,
+                        const fs::path& outputDirectory,
+                        std::string& error,
+                        const StatusCallback& status){
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_valeton_audition_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
 
-            gainErrSum+=p.absoluteGainErrorDb;specSum+=p.normalizedSpectralLoss;esrSum+=p.alignedEsr;corrSum+=p.correlation;++nLevels;
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Valeton audition: converting "+inputNam.filename().wstring()+L" (Tone Match disabled)...");
+    NativeConverterConfig converter;
+    CloRefineConfig refineOff;refineOff.enabled=false;
+    auto noToneMatch=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refineOff,converter,status);
+    if(!noToneMatch.ok||noToneMatch.gp5gp50Compact.empty()){
+        error=noToneMatch.error.empty()?"No-Tone-Match conversion did not produce a GP-5/GP-50 output.":noToneMatch.error;
+        fs::remove_all(work,ec);return false;
+    }
+
+    report(status,L"Valeton audition: converting "+inputNam.filename().wstring()+L" (production settings)...");
+    CloRefineConfig refineAuto;refineAuto.enabled=true;refineAuto.referenceMode=ToneMatchReferenceMode::Auto;
+    auto production=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refineAuto,converter,status);
+    if(!production.ok||production.gp5gp50Compact.empty()){
+        error=production.error.empty()?"Production conversion did not produce a GP-5/GP-50 output.":production.error;
+        fs::remove_all(work,ec);return false;
+    }
+
+    report(status,L"Valeton audition: rendering "+playingClipWav.filename().wstring()+L"...");
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(playingClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+    if(!renderNamOnSignal(fullModelPath,dry,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+        error="Full A2 render failed: "+stepError;fs::remove_all(work,ec);return false;
+    }
+    auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+
+    std::vector<float> noToneMatchOutput;
+    if(!renderCloOnSignal(noToneMatch.gp5gp50Compact,dry,noToneMatchOutput,error)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> productionOutput;
+    if(!renderCloOnSignal(production.gp5gp50Compact,dry,productionOutput,error)){fs::remove_all(work,ec);return false;}
+
+    fs::remove_all(work,ec);
+
+    std::error_code oec;
+    fs::create_directories(outputDirectory,oec);
+    if(!writeMono44100Wav(outputDirectory/L"full_a2.wav",fullA2At44100,error))return false;
+    if(!writeMono44100Wav(outputDirectory/L"no_tonematch.wav",noToneMatchOutput,error))return false;
+    if(!writeMono44100Wav(outputDirectory/L"production.wav",productionOutput,error))return false;
+
+    report(status,L"Valeton audition: wrote full_a2.wav / no_tonematch.wav / production.wav to "+outputDirectory.wstring());
+    return true;
+}
+
+// See native_converter.hpp's doc comment.
+bool runMultiClipB512Experiment(const fs::path& inputNam,
+                                const std::vector<fs::path>& fitClips,
+                                const fs::path& diClipWav,
+                                const std::vector<fs::path>& heldOutClips,
+                                std::vector<ValetonComparisonResult>& out,
+                                std::string& error,
+                                const StatusCallback& status){
+    out.clear();
+    if(fitClips.empty()){error="runMultiClipB512Experiment: no fit clips supplied.";return false;}
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_multiclip_b512_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Multi-clip B512: converting production candidate...");
+    NativeConverterConfig converter; // gp5DirectFit=true, dynamicsAwareFitting=false (defaults)
+    CloRefineConfig refine;refine.enabled=true;refine.referenceMode=ToneMatchReferenceMode::Auto;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Production conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+    const fs::path productionClo=conversion.gp5gp50Compact;
+    const float pp=conversion.pkPp,pn=conversion.pkPn,kp=conversion.pkKp,kn=conversion.pkKn;
+
+    ValetonComparisonResult prodResult;prodResult.label=L"production";
+    prodResult.pkPp=pp;prodResult.pkPn=pn;prodResult.pkKp=kp;prodResult.pkKn=kn;
+    CandidateRenderFn prodRenderFn=[productionClo](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+        return renderCloOnSignal(productionClo,in,outv,err);
+    };
+    prodResult.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,prodRenderFn,dry,heldOutClips,prodResult);
+    out.push_back(prodResult);
+
+    report(status,L"Multi-clip B512: rendering "+std::to_wstring(fitClips.size())+L" fit clips through Full A2...");
+    std::vector<MultiLevelClip> fitLevelClips;
+    double tag=1.0;
+    for(const auto& clipPath:fitClips){
+        std::vector<float> clipDry;std::string stepError;
+        if(!loadClipAsMono44100(clipPath,clipDry,stepError))continue;
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
+        if(!renderNamOnSignal(fullModelPath,clipDry,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+        MultiLevelClip clip;
+        clip.levelDb=tag;tag+=1.0; // arbitrary distinct tags -- content-diverse clips, not gain levels
+        clip.input44100=clipDry;
+        clip.target44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+        fitLevelClips.push_back(std::move(clip));
+    }
+    if(fitLevelClips.empty()){error="No fit clips rendered successfully.";fs::remove_all(work,ec);return false;}
+
+    report(status,L"Multi-clip B512: solving Block B jointly across "+std::to_wstring(fitLevelClips.size())+L" diverse clips...");
+    std::vector<KSweepCandidate> mcCandidates;
+    std::string solveError;
+    if(!sweepKAndSolveSharedB(productionClo,{1.0},fitLevelClips,mcCandidates,solveError,status)||mcCandidates.empty()||mcCandidates.front().b.empty()){
+        error=solveError.empty()?"Multi-clip Block B solve failed.":solveError;
+        fs::remove_all(work,ec);return false;
+    }
+    const std::vector<float> newB=mcCandidates.front().b;
+
+    ValetonComparisonResult mcResult;mcResult.label=L"multiclip";
+    mcResult.pkPp=pp;mcResult.pkPn=pn;mcResult.pkKp=kp;mcResult.pkKn=kn;
+    CandidateRenderFn mcRenderFn=[productionClo,pp,pn,kp,kn,newB](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+        return renderCloWithOverrideOnSignal(productionClo,pp,pn,kp,kn,newB,in,outv,err);
+    };
+    mcResult.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,mcRenderFn,dry,heldOutClips,mcResult);
+    out.push_back(mcResult);
+
+    fs::remove_all(work,ec);
+    return true;
+}
+
+// See native_converter.hpp's doc comment.
+bool runFrequencyWeightedB512Experiment(const fs::path& inputNam,
+                                        const fs::path& fitClip,
+                                        const std::vector<double>& presenceHighBoostDb,
+                                        const fs::path& diClipWav,
+                                        const std::vector<fs::path>& heldOutClips,
+                                        std::vector<ValetonComparisonResult>& out,
+                                        std::string& error,
+                                        const StatusCallback& status){
+    out.clear();
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_freqweighted_b512_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Frequency-weighted B512: converting production candidate...");
+    NativeConverterConfig converter; // gp5DirectFit=true, dynamicsAwareFitting=false (defaults)
+    CloRefineConfig refine;refine.enabled=true;refine.referenceMode=ToneMatchReferenceMode::Auto;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Production conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+    const fs::path productionClo=conversion.gp5gp50Compact;
+    const float pp=conversion.pkPp,pn=conversion.pkPn,kp=conversion.pkKp,kn=conversion.pkKn;
+
+    ValetonComparisonResult prodResult;prodResult.label=L"production";
+    prodResult.pkPp=pp;prodResult.pkPn=pn;prodResult.pkKp=kp;prodResult.pkKn=kn;
+    CandidateRenderFn prodRenderFn=[productionClo](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+        return renderCloOnSignal(productionClo,in,outv,err);
+    };
+    prodResult.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,prodRenderFn,dry,heldOutClips,prodResult);
+    out.push_back(prodResult);
+
+    report(status,L"Frequency-weighted B512: rendering fit clip through Full A2 + pre-B chain...");
+    std::vector<float> fitDry;
+    if(!loadClipAsMono44100(fitClip,fitDry,error)){fs::remove_all(work,ec);return false;}
+    std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
+    if(!renderNamOnSignal(fullModelPath,fitDry,fullA2Input,fullA2Output,fullA2Rate,error)){fs::remove_all(work,ec);return false;}
+    const auto target=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+    std::vector<float> preB;
+    if(!renderPreBOnSignal(productionClo,fitDry,preB,error)){fs::remove_all(work,ec);return false;}
+
+    constexpr std::size_t kBTaps=512; // fixed GP-5/GP-50 device tap budget (see kGp5BTaps elsewhere in this file)
+    for(double boostDb:presenceHighBoostDb){
+        report(status,L"Frequency-weighted B512: solving with presence/high boost="+std::to_wstring(boostDb)+L"dB...");
+        auto scaleFn=[boostDb](double hz)->double{
+            // Flat boost over the presence/high bands (2-12kHz) this pass's EQ diagnostic
+            // found chronically under-corrected; 0 elsewhere reproduces the plain solve.
+            return (hz>=2000.0&&hz<12000.0)?boostDb:0.0;
+        };
+        std::vector<float> newB;std::string solveError;
+        if(!solveBlockBWeighted(preB,target,kBTaps,44100.0,scaleFn,newB,solveError)){
+            report(status,L"Frequency-weighted B512: solve failed for boost="+std::to_wstring(boostDb)+L"dB ("+std::wstring(solveError.begin(),solveError.end())+L").");
+            continue;
         }
-        if(r.levels.empty()){
-            r.error="No level clips rendered successfully.";out.push_back(r);continue;
-        }
-        // Anchor to this candidate's own 0dB point for the relative/compression-shape
-        // numbers, same convention as LevelResponsePoint/BenchmarkLevelPoint elsewhere.
-        const auto zeroIt=std::find_if(r.levels.begin(),r.levels.end(),[](const ValetonComparisonLevelPoint&p){return std::abs(p.levelDb)<1e-9;});
-        if(zeroIt!=r.levels.end()){
-            const double fullA2Zero=zeroIt->fullA2AbsoluteRmsDb,candZero=zeroIt->candidateAbsoluteRmsDb;
-            double sumSq=0.0;
-            for(auto&p:r.levels){
-                p.fullA2RelativeDb=p.fullA2AbsoluteRmsDb-fullA2Zero;
-                p.candidateRelativeDb=p.candidateAbsoluteRmsDb-candZero;
-                p.relativeErrorDb=p.candidateRelativeDb-p.fullA2RelativeDb;
-                r.maxRelativeErrorDb=std::max(r.maxRelativeErrorDb,std::abs(p.relativeErrorDb));
-                sumSq+=p.relativeErrorDb*p.relativeErrorDb;
-            }
-            r.rmsRelativeErrorDb=std::sqrt(sumSq/static_cast<double>(r.levels.size()));
-        }
-        r.meanAbsoluteGainErrorDb=gainErrSum/static_cast<double>(nLevels);
-        r.meanNormalizedSpectralLoss=specSum/static_cast<double>(nLevels);
-        r.meanAlignedEsr=esrSum/static_cast<double>(nLevels);
-        r.meanCorrelation=corrSum/static_cast<double>(nLevels);
-
-        double heldOutSum=0.0;std::size_t heldOutCount=0;
-        for(const auto& clipPath:heldOutClips){
-            std::vector<float> clipDry;std::string stepError;
-            if(!loadClipAsMono44100(clipPath,clipDry,stepError))continue;
-            std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
-            if(!renderNamOnSignal(fullModelPath,clipDry,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
-            const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
-            std::vector<float> candOutput;
-            if(!renderCloOnSignal(conversion.gp5gp50Compact,clipDry,candOutput,stepError))continue;
-            heldOutSum+=levelResponseEsr(candOutput,fullA2At44100);++heldOutCount;
-        }
-        if(heldOutCount>0)r.meanHeldOutEsr=heldOutSum/static_cast<double>(heldOutCount);
-
-        r.ok=true;out.push_back(r);
+        ValetonComparisonResult r;
+        std::wostringstream label;label<<L"weighted_"<<boostDb<<L"db";r.label=label.str();
+        r.pkPp=pp;r.pkPn=pn;r.pkKp=kp;r.pkKn=kn;
+        CandidateRenderFn renderFn=[productionClo,pp,pn,kp,kn,newB](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+            return renderCloWithOverrideOnSignal(productionClo,pp,pn,kp,kn,newB,in,outv,err);
+        };
+        r.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,renderFn,dry,heldOutClips,r);
+        out.push_back(r);
     }
 
     fs::remove_all(work,ec);

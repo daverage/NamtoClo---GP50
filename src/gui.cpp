@@ -2046,6 +2046,54 @@ bool runHeadlessGp5MultiLevelVerifyIfRequested(int& exitCode) {
     return handled;
 }
 
+// Shared by --valeton-comparison and --multiclip-b512: writes the per-level CSV and the
+// per-band EQ CSV for a set of ValetonComparisonResult candidates, plus a console summary.
+void writeValetonComparisonResults(const fs::path& outputDir, const std::wstring& baseName,
+                                    const std::vector<ntc::ValetonComparisonResult>& results) {
+    std::error_code ec;
+    fs::create_directories(outputDir, ec);
+    const fs::path outputCsv = outputDir / (baseName + L"_valeton_comparison.csv");
+    std::wofstream csv(outputCsv);
+    csv << L"candidate,level_db,full_a2_abs_rms_db,candidate_abs_rms_db,absolute_gain_error_db,"
+           L"relative_error_db,normalized_spectral_loss,aligned_esr,correlation\n";
+    const fs::path bandCsvPath = outputDir / (baseName + L"_valeton_comparison_eq.csv");
+    std::wofstream bandCsv(bandCsvPath);
+    bandCsv << L"candidate,source,sub_bass_lt120hz_pct,low_mid_120_500hz_pct,mid_500_2000hz_pct,"
+               L"presence_2000_5000hz_pct,high_5000_12000hz_pct,air_gt12000hz_pct\n";
+    for (const auto& r : results) {
+        std::wcout << L"\nCandidate \"" << r.label << L"\": ";
+        if (!r.ok) {
+            std::wcout << L"FAILED (" << ntc::fromUtf8(r.error) << L")\n";
+            csv << r.label << L",,,,,,,\"" << ntc::fromUtf8(r.error) << L"\"\n";
+            continue;
+        }
+        std::wcout << L"pk=(" << r.pkPp << L"," << r.pkPn << L"," << r.pkKp << L"," << r.pkKn << L")\n";
+        std::wcout << L"  mean absolute gain error=" << r.meanAbsoluteGainErrorDb << L"dB, max relative error="
+                   << r.maxRelativeErrorDb << L"dB, rms relative error=" << r.rmsRelativeErrorDb << L"dB\n";
+        std::wcout << L"  mean normalized spectral loss=" << r.meanNormalizedSpectralLoss
+                   << L", mean aligned ESR=" << r.meanAlignedEsr << L", mean correlation=" << r.meanCorrelation << L"\n";
+        std::wcout << L"  mean held-out ESR=" << r.meanHeldOutEsr << L"\n";
+        const auto& cb = r.meanBandEnergyPercent;
+        const auto& fb = r.fullA2MeanBandEnergyPercent;
+        std::wcout << L"  EQ (RMS-matched+aligned, % of energy) candidate: bass=" << cb.subBassPercent
+                   << L" low-mid=" << cb.lowMidPercent << L" mid=" << cb.midPercent
+                   << L" presence=" << cb.presencePercent << L" high=" << cb.highPercent << L"\n";
+        std::wcout << L"  EQ full_a2 (same held-out clips):        bass=" << fb.subBassPercent
+                   << L" low-mid=" << fb.lowMidPercent << L" mid=" << fb.midPercent
+                   << L" presence=" << fb.presencePercent << L" high=" << fb.highPercent << L"\n";
+        for (const auto& p : r.levels) {
+            csv << r.label << L"," << p.levelDb << L"," << p.fullA2AbsoluteRmsDb << L"," << p.candidateAbsoluteRmsDb << L","
+                << p.absoluteGainErrorDb << L"," << p.relativeErrorDb << L"," << p.normalizedSpectralLoss << L","
+                << p.alignedEsr << L"," << p.correlation << L"\n";
+        }
+        bandCsv << r.label << L",candidate," << cb.subBassPercent << L"," << cb.lowMidPercent << L","
+                << cb.midPercent << L"," << cb.presencePercent << L"," << cb.highPercent << L"," << cb.airPercent << L"\n";
+        bandCsv << r.label << L",full_a2," << fb.subBassPercent << L"," << fb.lowMidPercent << L","
+                << fb.midPercent << L"," << fb.presencePercent << L"," << fb.highPercent << L"," << fb.airPercent << L"\n";
+    }
+    std::wcout << L"\nWrote " << outputCsv.wstring() << L"\nWrote " << bandCsvPath.wstring() << L"\n";
+}
+
 // "CoreRevert" pass (2026-09-01): compares the Valeton-style baseline,
 // target-production, and current-experimental GP-5/GP-50 candidates -- see
 // ntc::runValetonComparisonExperiment's doc comment in native_converter.hpp.
@@ -2069,32 +2117,108 @@ bool runHeadlessValetonComparisonIfRequested(int& exitCode) {
         std::string error;
         if (ntc::runValetonComparisonExperiment(inputNam, diClipWav, heldOutClips, results, error,
                                                  [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
-            std::error_code ec;
-            fs::create_directories(outputDir, ec);
-            const fs::path outputCsv = outputDir / (inputNam.stem().wstring() + L"_valeton_comparison.csv");
-            std::wofstream csv(outputCsv);
-            csv << L"candidate,level_db,full_a2_abs_rms_db,candidate_abs_rms_db,absolute_gain_error_db,"
-                   L"relative_error_db,normalized_spectral_loss,aligned_esr,correlation\n";
-            for (const auto& r : results) {
-                std::wcout << L"\nCandidate \"" << r.label << L"\": ";
-                if (!r.ok) {
-                    std::wcout << L"FAILED (" << ntc::fromUtf8(r.error) << L")\n";
-                    csv << r.label << L",,,,,,,\"" << ntc::fromUtf8(r.error) << L"\"\n";
-                    continue;
-                }
-                std::wcout << L"pk=(" << r.pkPp << L"," << r.pkPn << L"," << r.pkKp << L"," << r.pkKn << L")\n";
-                std::wcout << L"  mean absolute gain error=" << r.meanAbsoluteGainErrorDb << L"dB, max relative error="
-                           << r.maxRelativeErrorDb << L"dB, rms relative error=" << r.rmsRelativeErrorDb << L"dB\n";
-                std::wcout << L"  mean normalized spectral loss=" << r.meanNormalizedSpectralLoss
-                           << L", mean aligned ESR=" << r.meanAlignedEsr << L", mean correlation=" << r.meanCorrelation << L"\n";
-                std::wcout << L"  mean held-out ESR=" << r.meanHeldOutEsr << L"\n";
-                for (const auto& p : r.levels) {
-                    csv << r.label << L"," << p.levelDb << L"," << p.fullA2AbsoluteRmsDb << L"," << p.candidateAbsoluteRmsDb << L","
-                        << p.absoluteGainErrorDb << L"," << p.relativeErrorDb << L"," << p.normalizedSpectralLoss << L","
-                        << p.alignedEsr << L"," << p.correlation << L"\n";
-                }
-            }
-            std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
+            writeValetonComparisonResults(outputDir, inputNam.stem().wstring(), results);
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// EQ-match follow-up -- see ntc::runMultiClipB512Experiment's doc comment in
+// native_converter.hpp. Usage: --multiclip-b512 <nam> <diClipWav> <outputDir>
+// <fitClip1> <fitClip2> <fitClip3> <heldOutClip1> [heldOutClip2...]
+bool runHeadlessMultiClipB512IfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 8 && std::wstring(argv[1]) == L"--multiclip-b512") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path diClipWav = argv[3];
+        const fs::path outputDir = argv[4];
+        std::vector<fs::path> fitClips = { fs::path(argv[5]), fs::path(argv[6]), fs::path(argv[7]) };
+        std::vector<fs::path> heldOutClips;
+        for (int i = 8; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"Multi-clip B512: " << inputNam.wstring() << L"\n";
+        std::vector<ntc::ValetonComparisonResult> results;
+        std::string error;
+        if (ntc::runMultiClipB512Experiment(inputNam, fitClips, diClipWav, heldOutClips, results, error,
+                                             [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            writeValetonComparisonResults(outputDir, inputNam.stem().wstring() + L"_multiclip", results);
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Second EQ-match follow-up -- see ntc::runFrequencyWeightedB512Experiment's doc comment
+// in native_converter.hpp. Usage: --freq-weighted-b512 <nam> <fitClip> <diClipWav>
+// <outputDir> <heldOutClip1> [heldOutClip2...]. Boost grid is fixed (0/6/12/18 dB
+// reduction in presence/high regularization) rather than parsed from argv.
+bool runHeadlessFrequencyWeightedB512IfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 6 && std::wstring(argv[1]) == L"--freq-weighted-b512") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path fitClip = argv[3];
+        const fs::path diClipWav = argv[4];
+        const fs::path outputDir = argv[5];
+        std::vector<fs::path> heldOutClips;
+        for (int i = 6; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"Frequency-weighted B512: " << inputNam.wstring() << L"\n";
+        std::vector<ntc::ValetonComparisonResult> results;
+        std::string error;
+        const std::vector<double> boostGrid = { 0.0, 6.0, 12.0, 18.0 };
+        if (ntc::runFrequencyWeightedB512Experiment(inputNam, fitClip, boostGrid, diClipWav, heldOutClips, results, error,
+                                                     [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            writeValetonComparisonResults(outputDir, inputNam.stem().wstring() + L"_freqweighted", results);
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Listening-test export -- see ntc::runValetonAudition's doc comment in native_converter.hpp.
+bool runHeadlessValetonAuditionIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 5 && std::wstring(argv[1]) == L"--valeton-audition") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path playingClipWav = argv[3];
+        const fs::path outputDir = argv[4];
+        std::wcout << L"Valeton audition: " << inputNam.wstring() << L"\n";
+        std::string error;
+        if (ntc::runValetonAudition(inputNam, playingClipWav, outputDir, error,
+                                     [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wcout << L"\nWrote full_a2.wav / no_tonematch.wav / production.wav to " << outputDir.wstring() << L"\n";
             exitCode = 0;
         } else {
             std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
@@ -2135,6 +2259,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessValetonComparisonIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessValetonAuditionIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessMultiClipB512IfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessFrequencyWeightedB512IfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.

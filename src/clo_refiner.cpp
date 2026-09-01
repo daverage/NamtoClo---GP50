@@ -400,6 +400,55 @@ void solveBlockBFromPreB(const std::vector<float>& preBTail, const std::vector<f
     for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
 }
 
+} // namespace
+
+// See clo_refiner.hpp's doc comment.
+bool solveBlockBWeighted(const std::vector<float>& preBTail,
+                          const std::vector<float>& targetTail,
+                          std::size_t bTaps,
+                          double sampleRate,
+                          const std::function<double(double)>& regularizationScaleDbForHz,
+                          std::vector<float>& outB,
+                          std::string& error) {
+    if (preBTail.empty() || targetTail.empty()) { error = "solveBlockBWeighted: empty input."; return false; }
+    if (bTaps == 0) { error = "solveBlockBWeighted: bTaps is zero."; return false; }
+
+    const std::size_t tailFrames = preBTail.size();
+    const std::size_t fftSize = nextPow2(tailFrames + bTaps);
+    std::vector<std::complex<float>> P(fftSize), T(fftSize);
+    for (std::size_t i = 0; i < tailFrames; ++i) {
+        P[i] = std::complex<float>(preBTail[i], 0.0f);
+        T[i] = std::complex<float>(i < targetTail.size() ? targetTail[i] : 0.0f, 0.0f);
+    }
+    fft(P, false);
+    fft(T, false);
+
+    double powerSum = 0.0;
+    for (const auto& v : P) powerSum += static_cast<double>(std::norm(v));
+    const float meanPower = static_cast<float>(powerSum / static_cast<double>(fftSize));
+    constexpr float kRegularization = 1e-3f;
+    const float eps0 = std::max(kRegularization * meanPower, 1e-20f);
+
+    std::vector<std::complex<float>> H(fftSize);
+    for (std::size_t k = 0; k < fftSize; ++k) {
+        // Real-signal FFT is conjugate-symmetric; fold bins above Nyquist back onto
+        // [0, fftSize/2] so a bin and its mirror always get the same regularization.
+        const std::size_t kFold = std::min(k, fftSize - k);
+        const double hz = static_cast<double>(kFold) * sampleRate / static_cast<double>(fftSize);
+        const double scaleDb = regularizationScaleDbForHz ? regularizationScaleDbForHz(hz) : 0.0;
+        const float eps = std::max(eps0 * static_cast<float>(std::pow(10.0, -scaleDb / 10.0)), 1e-20f);
+        const float power = std::norm(P[k]);
+        H[k] = std::conj(P[k]) * T[k] / (power + eps);
+    }
+    fft(H, true);
+
+    outB.assign(bTaps, 0.0f);
+    for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
+    return true;
+}
+
+namespace {
+
 // Generalizes solveBlockBFromPreB above to N simultaneous (preB, target)
 // pairs at different gain levels, weighted by wi (already normalized to sum
 // to 1 by the caller): H = (sum wi*conj(Pi)*Ti) / (sum wi*|Pi|^2 + eps).
@@ -949,6 +998,21 @@ bool renderCloWithOverrideOnSignal(const fs::path& sourceClo,
     std::vector<float> preB;
     renderPreB(m, aout, pp, pn, kp, kn, preB);
     renderWithB(preB, b, outputSignal44100, 1.0f);
+    return true;
+}
+
+bool renderPreBOnSignal(const fs::path& sourceClo,
+                        const std::vector<float>& inputSignal44100,
+                        std::vector<float>& outputPreB44100,
+                        std::string& error) {
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return false;
+
+    Model m;
+    if (!parseModel(bytes, m, error)) return false;
+
+    auto aout = precomputeA(m, inputSignal44100, inputSignal44100.size(), 1.0f);
+    renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, outputPreB44100);
     return true;
 }
 

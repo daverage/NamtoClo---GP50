@@ -625,6 +625,19 @@ struct ValetonComparisonLevelPoint {
     double alignedEsr = 0.0;             // waveform ESR at the best-aligning lag (removes group-delay confound)
     double correlation = 0.0;            // waveform correlation coefficient at that same lag
 };
+// Diagnostic-only spectral-BALANCE ("EQ") snapshot: % of total STFT energy per
+// frequency band. Distinct from ValetonComparisonLevelPoint::normalizedSpectralLoss's
+// magnitude-RATIO loss -- a candidate can score well on ratio loss while still skewing
+// audibly bassier/duller than Full A2, which this makes directly visible per band. See
+// CLAUDE.md's "CoreRevert" pass and the manual EQ audit that motivated adding this.
+struct ValetonComparisonBandEnergy {
+    double subBassPercent = 0.0;  // <120Hz
+    double lowMidPercent = 0.0;   // 120-500Hz
+    double midPercent = 0.0;      // 500-2000Hz
+    double presencePercent = 0.0; // 2000-5000Hz
+    double highPercent = 0.0;     // 5000-12000Hz
+    double airPercent = 0.0;      // >12000Hz
+};
 struct ValetonComparisonResult {
     bool ok = false;
     std::string error;
@@ -635,8 +648,12 @@ struct ValetonComparisonResult {
     double maxRelativeErrorDb = 0.0, rmsRelativeErrorDb = 0.0;
     double meanNormalizedSpectralLoss = 0.0, meanAlignedEsr = 0.0, meanCorrelation = 0.0;
     // Held-out real playing clips (never used to fit anything): mean spectral fidelity
-    // via the same levelResponseEsr metric used elsewhere in this file.
+    // via the same levelResponseEsr metric used elsewhere in this file, plus the mean
+    // per-band energy split for this candidate and for Full A2 on the SAME clips (both
+    // RMS-matched and lag-aligned first) -- see ValetonComparisonBandEnergy above.
     double meanHeldOutEsr = 0.0;
+    ValetonComparisonBandEnergy meanBandEnergyPercent;
+    ValetonComparisonBandEnergy fullA2MeanBandEnergyPercent;
 };
 
 // Builds and scores all three candidates above for inputNam against
@@ -650,5 +667,70 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
                                     std::vector<ValetonComparisonResult>& out,
                                     std::string& error,
                                     const StatusCallback& status = {});
+
+// Listening-test export (not a measurement): renders playingClipWav -- a real musical clip,
+// not the synthetic level sweep runValetonComparisonExperiment scores against -- through
+// three paths: Full A2 (ground truth), a GP-5/GP-50 conversion with Tone Match disabled
+// entirely (the "valeton" candidate above -- no B512 solve, no dynamics search), and the
+// actual shipped production conversion (Tone Match enabled, Auto reference mode, dynamics
+// search off by default). Writes full_a2.wav / no_tonematch.wav / production.wav to
+// outputDirectory so the measured differences documented in CLAUDE.md's "CoreRevert" pass
+// can be checked by ear.
+bool runValetonAudition(const fs::path& inputNam,
+                        const fs::path& playingClipWav,
+                        const fs::path& outputDirectory,
+                        std::string& error,
+                        const StatusCallback& status = {});
+
+// EQ-match follow-up to the CoreRevert pass (2026-09-01, see CLAUDE.md): production's
+// direct B512 solve (solveBlockBLeastSquares, clo_refiner.cpp) is a regularized Wiener
+// deconvolution fit against a SINGLE Tone Match reference clip's 20s tail -- at
+// frequencies weak in that one clip, the fitted H(f) is poorly conditioned and doesn't
+// generalize to other real playing content, which the per-band EQ diagnostic above found
+// produces amp-dependent (not consistent-direction) spectral drift on held-out clips.
+// This tests the fix `sweepKAndSolveSharedB`'s existing multi-clip machinery already
+// supports but has only ever been fed gain-scaled copies of ONE clip for: build two
+// candidates for the SAME NAM -- "production" (via convertNamToClo, identical to
+// runValetonComparisonExperiment's production candidate) and "multiclip" (production's
+// OWN shipped CLO, Pre/A/P-K/Post frozen exactly as shipped, but Block B re-solved
+// jointly across fitClips -- several spectrally-diverse real clips, kMultiplier=1.0 so
+// P/K never moves -- instead of the single Tone Match reference) -- then scores both with
+// the exact same scoreGp5CandidateAgainstFullA2 methodology (7-level sweep on diClipWav +
+// held-out ESR/EQ on heldOutClips) runValetonComparisonExperiment uses. fitClips and
+// heldOutClips must be disjoint from each other (and ideally from diClipWav) to keep the
+// same train/eval discipline every other search in this codebase follows. Comparative/
+// measurement only -- does not modify or replace inputNam's actual shipped conversion.
+bool runMultiClipB512Experiment(const fs::path& inputNam,
+                                const std::vector<fs::path>& fitClips,
+                                const fs::path& diClipWav,
+                                const std::vector<fs::path>& heldOutClips,
+                                std::vector<ValetonComparisonResult>& out,
+                                std::string& error,
+                                const StatusCallback& status = {});
+
+// Second EQ-match follow-up (2026-09-01, see CLAUDE.md): isolates ONE lever --
+// frequency-dependent regularization in the B512 solve (ntc::solveBlockBWeighted,
+// clo_refiner.hpp) -- from the multi-clip generalization fix above, so the two aren't
+// conflated. Builds a "production" candidate (identical to runValetonComparisonExperiment's)
+// plus one "weighted_<N>db" candidate per entry in presenceHighBoostDb: each re-solves
+// production's OWN shipped Block B against the SAME single fitClip (not the multi-clip
+// set), but with regularization reduced by that many dB in the presence/high band
+// (2000-12000Hz) -- a positive value lets the solve apply a larger corrective gain there
+// instead of falling back toward unity gain just because that band happens to be quiet in
+// the fit clip, which the per-band EQ diagnostic found is a likely cause of the recurring
+// presence-band deficit. 0.0 in presenceHighBoostDb reproduces the plain (unweighted) B512
+// solve exactly, for a same-fit-clip baseline distinct from "production"'s real
+// Tone-Match-clip fit. Scored identically to every other candidate here
+// (scoreGp5CandidateAgainstFullA2). fitClip and heldOutClips must be disjoint.
+// Comparative/measurement only -- does not modify or replace inputNam's actual shipped
+// conversion.
+bool runFrequencyWeightedB512Experiment(const fs::path& inputNam,
+                                        const fs::path& fitClip,
+                                        const std::vector<double>& presenceHighBoostDb,
+                                        const fs::path& diClipWav,
+                                        const std::vector<fs::path>& heldOutClips,
+                                        std::vector<ValetonComparisonResult>& out,
+                                        std::string& error,
+                                        const StatusCallback& status = {});
 
 } // namespace ntc

@@ -97,6 +97,30 @@ bool solveBlockBLeastSquares(const fs::path& sourceClo,
                               std::string& error,
                               const RefineStatusCallback& status = {});
 
+// EQ-match follow-up to the CoreRevert pass (2026-09-01, see CLAUDE.md): the plain
+// solveBlockBLeastSquares/solveBlockBFromPreB regularization scales its epsilon by the
+// TRAINING signal's own power spectrum -- at frequencies where the fit clip happens to be
+// quiet (commonly presence/high on a heavily-driven guitar signal), the solve is forced
+// conservative there regardless of how much correction Full A2's target actually needs,
+// which the CoreRevert pass's per-band EQ diagnostic found produces a recurring
+// presence-band deficit across nearly every candidate tested. This exposes the same
+// regularized-Wiener-deconvolution core (solveBlockBFromPreB in clo_refiner.cpp) with an
+// explicit per-frequency regularization scale, so a caller can deliberately trust specific
+// bands more (or less) than their raw energy in the fit signal alone would justify.
+// preBTail/targetTail are an already-isolated (pre-B signal, target) pair at sampleRate,
+// same convention solveBlockBLeastSquares/solveBlockBFromPreB use internally.
+// regularizationScaleDbForHz(hz) returns a dB value: positive REDUCES epsilon at that
+// frequency (the solve is allowed to apply a larger corrective gain there), negative
+// INCREASES it (more conservative); 0 reproduces solveBlockBFromPreB's plain behavior at
+// that frequency exactly. Comparative/measurement only -- not wired into convertNamToClo.
+bool solveBlockBWeighted(const std::vector<float>& preBTail,
+                          const std::vector<float>& targetTail,
+                          std::size_t bTaps,
+                          double sampleRate,
+                          const std::function<double(double)>& regularizationScaleDbForHz,
+                          std::vector<float>& outB,
+                          std::string& error);
+
 // A real-playing-content (dry, Full-A2-rendered target) pair used only to
 // gate searchPostAndSolveB()'s round acceptance -- never to fit anything
 // directly. Both fields must already be at 44.1kHz (the caller resamples
@@ -256,6 +280,16 @@ bool renderCloWithOverrideOnSignal(const fs::path& sourceClo,
                                     const std::vector<float>& inputSignal44100,
                                     std::vector<float>& outputSignal44100,
                                     std::string& error);
+
+// Same render chain as renderCloOnSignal, but stops right before Block B --
+// returns the exact pre-B signal (Pre -> A -> P/K shaper -> Post, unity gain,
+// sourceClo's own frozen P/K) a caller can feed directly into
+// solveBlockBWeighted (or any other B-solve) without needing clo_refiner.cpp's
+// private precomputeA/renderPreB helpers.
+bool renderPreBOnSignal(const fs::path& sourceClo,
+                        const std::vector<float>& inputSignal44100,
+                        std::vector<float>& outputPreB44100,
+                        std::string& error);
 
 // Writes samples as mono PCM16 44.1kHz WAV -- for exporting comparison
 // renders (e.g. runPkDynamicsAudition below) to listen to directly, not
