@@ -51,6 +51,15 @@ struct ConversionResult {
     // off). Meaningful even when the Step 2 search didn't end up winning --
     // shows whether the gate considered running it and why it did/didn't.
     double gp5MeasuredDynamicsRmsDb = -1.0;
+    // Final output-level correction (dB) applied to the winning GP-5/GP-50
+    // Block B so its 0dB-reference output RMS matches Full A2's, after
+    // whichever Tone Match candidate above was chosen -- see convertNamToClo's
+    // "final output-level match" step. Every prior selection metric (spectral
+    // ratio loss, zero-anchored dynamics-tracking error) is blind to a
+    // constant absolute-gain offset by design, so this step exists
+    // specifically to catch and correct one. 0 when not computed (no
+    // gp5Chosen, or Tone Match disabled -- no reference target to match).
+    double gp5ToneMatchFinalGainDb = 0.0;
 };
 
 struct BatchConversionResult {
@@ -449,6 +458,11 @@ struct Gp5MultiLevelVerifyResult {
     std::string error;
     double baselineMaxRelativeErrorDb = 0.0, baselineRmsRelativeErrorDb = 0.0, baselineMeanHeldOutEsr = 0.0;
     double candidateMaxRelativeErrorDb = 0.0, candidateRmsRelativeErrorDb = 0.0, candidateMeanHeldOutEsr = 0.0;
+    // Raw (pre-anchoring) output RMS-dB at 0dB input, on the TRUE gp5gp50Compact
+    // 512-tap path -- lets a caller check whether our shipped GP-5/GP-50 output is
+    // actually quieter/louder than the NAM's own true output (Full A2), independent
+    // of the shape-only relative-error numbers above.
+    double fullA2AbsoluteZeroDb = 0.0, baselineAbsoluteZeroDb = 0.0, candidateAbsoluteZeroDb = 0.0;
 };
 bool verifyGp5MultiLevelWiring(const fs::path& inputNam,
                                const fs::path& diClipWav,
@@ -502,6 +516,16 @@ struct BenchmarkResult {
     std::vector<BenchmarkLevelPoint> levels;
     double officialMaxRelativeErrorDb = 0.0, officialRmsRelativeErrorDb = 0.0;
     double oursMaxRelativeErrorDb = 0.0, oursRmsRelativeErrorDb = 0.0;
+
+    // Raw (pre-anchoring) output RMS-dB at the 0dB input level, for official vs.
+    // ours vs. Full A2 -- everything else in `levels` is deliberately zero-anchored
+    // per-candidate (see runOfficialSnaptoneBenchmark's zeroing pass), which makes
+    // dynamics/compression-curve *shape* comparable but throws away any absolute
+    // loudness offset between candidates. These three let a caller check whether
+    // our conversion's overall output level actually matches the official file's,
+    // independent of the shape comparison above.
+    double fullA2AbsoluteZeroDb = 0.0, officialAbsoluteZeroDb = 0.0, oursAbsoluteZeroDb = 0.0;
+    double oursVsOfficialAbsoluteOffsetDb = 0.0; // oursAbsoluteZeroDb - officialAbsoluteZeroDb
 
     // Held-out real playing material (never used to fit either model),
     // spectral/waveform fidelity per clip plus the mean across clips.

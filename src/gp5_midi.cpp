@@ -13,6 +13,7 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace ntc::gp5 {
@@ -59,6 +60,42 @@ bool nibbleDecodeSysEx(const std::uint8_t* data,
         decoded.push_back(static_cast<std::uint8_t>((data[i] << 4) | data[i + 1]));
     }
     return true;
+}
+
+// Same CRC-8 (poly 0x07) used by the upload path's makeTransferFrame
+// (gp5_clo_upload.cpp) -- duplicated locally rather than shared across
+// translation units, matching this file's existing style.
+std::uint8_t crc8Poly07(const std::uint8_t* data, std::size_t size) {
+    std::uint8_t crc = 0x00u;
+    for (std::size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc & 0x80u) != 0u ? static_cast<std::uint8_t>((crc << 1) ^ 0x07u)
+                                      : static_cast<std::uint8_t>(crc << 1);
+    }
+    return crc;
+}
+
+std::vector<std::uint8_t> nibbleEncodeSysEx(const std::uint8_t* body, std::size_t size) {
+    std::vector<std::uint8_t> sysex;
+    sysex.reserve(2 + size * 2);
+    sysex.push_back(0xF0);
+    for (std::size_t i = 0; i < size; ++i) {
+        sysex.push_back(static_cast<std::uint8_t>((body[i] >> 4) & 0x0Fu));
+        sysex.push_back(static_cast<std::uint8_t>(body[i] & 0x0Fu));
+    }
+    sysex.push_back(0xF7);
+    return sysex;
+}
+
+// Latin-1: each byte maps directly to the same Unicode code point, matching
+// how the device's 16-byte name records are encoded (confirmed against a
+// real SnapTone catalogue capture -- ASCII/Latin-1, null padded).
+std::wstring latin1ToWide(const std::string& s) {
+    std::wstring w;
+    w.reserve(s.size());
+    for (unsigned char c : s) w.push_back(static_cast<wchar_t>(c));
+    return w;
 }
 
 class MidiSession {
@@ -179,6 +216,28 @@ public:
         return rxCv_.wait_for(lock, timeout, [this] { return completionReceived_; });
     }
 
+    // General-purpose capture of every successfully decoded SysEx message,
+    // used by readSnapToneCatalogue below (a multi-packet read response,
+    // unlike the single-purpose ack/completion tracking above which only
+    // covers the fixed upload ACK/completion byte sequences). Off by default
+    // so the upload path's behavior/memory use is unchanged.
+    void beginCapture() {
+        std::lock_guard<std::mutex> lock(rxMutex_);
+        capturedMessages_.clear();
+        capturing_ = true;
+    }
+
+    std::vector<std::vector<std::uint8_t>> endCapture() {
+        std::lock_guard<std::mutex> lock(rxMutex_);
+        capturing_ = false;
+        return std::move(capturedMessages_);
+    }
+
+    std::size_t capturedCountSnapshot() {
+        std::lock_guard<std::mutex> lock(rxMutex_);
+        return capturedMessages_.size();
+    }
+
     // Diagnostic only: the most recent successfully nibble-decoded SysEx
     // message, regardless of whether it matched the known ACK/completion
     // messages. Lets a completion timeout report what the device actually
@@ -217,6 +276,7 @@ private:
                 {
                     std::lock_guard<std::mutex> lock(rxMutex_);
                     lastDecoded_ = decoded;
+                    if (capturing_) capturedMessages_.push_back(decoded);
                     if (decoded.size() == ack.size() && std::equal(decoded.begin(), decoded.end(), ack.begin())) {
                         ackReceived_ = true;
                         notify = true;
@@ -264,6 +324,8 @@ private:
     bool ackReceived_ = false;
     bool completionReceived_ = false;
     std::vector<std::uint8_t> lastDecoded_;
+    std::vector<std::vector<std::uint8_t>> capturedMessages_;
+    bool capturing_ = false;
     std::atomic<bool> closing_{false};
 };
 
@@ -360,6 +422,105 @@ UploadResult uploadCloToGp5(const std::filesystem::path& cloFile,
     }
 
     return { true, L"SnapTone upload completed successfully." };
+}
+
+bool readSnapToneCatalogue(std::vector<SnapToneCatalogueEntry>& entries, std::wstring& error) {
+    entries.clear();
+    error.clear();
+
+    const auto detection = detectGp5Midi();
+    if (!detection.inputFound || !detection.outputFound) {
+        error = describeDetection(detection);
+        return false;
+    }
+
+    MidiSession session;
+    if (!session.open(detection, error)) return false;
+
+    // Decoded request: [CRC][0x01][0x00][0x02][0x12][0x24] -- the existing
+    // read envelope [CRC, 0x01, 0x00, length, 0x12, selector], selector 0x24
+    // for the SnapTone/amp catalogue. CRC is computed over the 5 bytes after
+    // the placeholder, same convention as the upload path's transfer frames.
+    std::array<std::uint8_t, 6> body{ 0x00, 0x01, 0x00, 0x02, 0x12, 0x24 };
+    body[0] = crc8Poly07(body.data() + 1, body.size() - 1);
+    const auto request = nibbleEncodeSysEx(body.data(), body.size());
+
+    session.beginCapture();
+    if (!session.sendSysEx(request, error)) {
+        session.endCapture();
+        return false;
+    }
+
+    // The catalogue arrives as several packets; collect until the response
+    // stream goes idle rather than assuming a fixed packet count -- mirrors
+    // the timing this command was captured/verified against: up to 3s total,
+    // stop 400ms after the last new packet once at least one has arrived.
+    const auto start = std::chrono::steady_clock::now();
+    auto lastGrowth = start;
+    std::size_t lastCount = 0;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const auto now = std::chrono::steady_clock::now();
+        const std::size_t count = session.capturedCountSnapshot();
+        if (count > lastCount) {
+            lastCount = count;
+            lastGrowth = now;
+        }
+        if (count > 0 && now - lastGrowth > std::chrono::milliseconds(400)) break;
+        if (now - start > std::chrono::seconds(3)) break;
+    }
+    const auto messages = session.endCapture();
+
+    // Decoded response packets are [CRC][CMD][INDEX][LENGTH][PAYLOAD...].
+    // The catalogue response uses CMD=0x48; sort by INDEX and concatenate
+    // payloads to reassemble the full blob.
+    constexpr std::uint8_t catalogueCmd = 0x48;
+    std::vector<std::pair<std::uint8_t, std::vector<std::uint8_t>>> chunks;
+    for (const auto& m : messages) {
+        if (m.size() < 4 || m[1] != catalogueCmd) continue;
+        chunks.emplace_back(m[2], std::vector<std::uint8_t>(m.begin() + 4, m.end()));
+    }
+    if (chunks.empty()) {
+        error = L"No SnapTone catalogue response from the device (command 0x48). "
+                L"Make sure a GP-5/GP-50 is connected and not mid-transfer.";
+        return false;
+    }
+    std::sort(chunks.begin(), chunks.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::vector<std::uint8_t> blob;
+    for (const auto& [index, payload] : chunks) blob.insert(blob.end(), payload.begin(), payload.end());
+
+    // offset 0..1: selector/header, offset 2..81: 80-byte occupancy table,
+    // offset 82..: 80 x 16-byte null-padded name records.
+    constexpr std::size_t nameStart = 82;
+    constexpr std::size_t recordSize = 16;
+    constexpr std::size_t expectedBytes = nameStart + 80 * recordSize;
+    if (blob.size() < expectedBytes) {
+        std::wstringstream ss;
+        ss << L"SnapTone catalogue response was incomplete (" << blob.size()
+           << L" of " << expectedBytes << L" bytes). Try Rescan again.";
+        error = ss.str();
+        return false;
+    }
+
+    // Only the 30 user slots (index 50..79 => visible SnapTone 51..80) are
+    // exposed, matching the range this app's uploader already targets.
+    for (int index = 50; index < 80; ++index) {
+        const std::size_t off = nameStart + static_cast<std::size_t>(index) * recordSize;
+        std::string raw(blob.begin() + static_cast<std::ptrdiff_t>(off),
+                        blob.begin() + static_cast<std::ptrdiff_t>(off + recordSize));
+        const auto nul = raw.find('\0');
+        if (nul != std::string::npos) raw.resize(nul);
+        while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) raw.pop_back();
+
+        SnapToneCatalogueEntry entry;
+        entry.visibleSlot = index + 1;
+        entry.name = latin1ToWide(raw);
+        entries.push_back(entry);
+    }
+
+    return true;
 }
 
 } // namespace ntc::gp5

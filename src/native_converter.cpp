@@ -2164,6 +2164,8 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     bool gp5DirectSolveWon=false;
     bool gp5MultiLevelSolveWon=false;
     bool gp5DynamicsSearchWon=false;
+    std::vector<float> gp5FinalB44;
+    bool gp5FinalB44Valid=false;
     if(gp5Chosen&&refine.enabled){
         report(status,L"GP-5/GP-50: performing device-specific Tone Match...");
         const fs::path gp5PreToneMatchClo=work/L"gp5_512_pre_tonematch.clo";
@@ -2310,6 +2312,37 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     }
                 }
 
+                // Final output-level match: every candidate above was selected by
+                // evaluateModelLoss (a spectral-ratio loss) or, for the Step 2 search,
+                // a zero-anchored dynamics-tracking error -- both are blind to a
+                // constant absolute-gain offset (the zero-anchoring specifically
+                // subtracts it out by design, see BenchmarkResult's doc comment).
+                // Measured directly against real GP-5/GP-50 hardware-format output
+                // (--verify-gp5-multilevel): high/extreme-gain amps can end up
+                // shipping several dB quieter than the NAM's own true output (Full
+                // A2) even after winning every prior comparison, while clean amps
+                // were already within ~0.1dB. This step rescales the winning B (a
+                // pure linear post-shaper gain, so it cannot change the fitted
+                // nonlinear response shape at all) so the final output RMS on the
+                // Tone Match reference clip matches Full A2's RMS on that same clip.
+                gp5FinalB44=gp5DirectSolveWon?gp5DirectSolveB44:
+                    (!gp5ToneMatchIr.empty()?gp5CorrectionB44:B44Pre);
+                {
+                    Model finalM=preM;finalM.pk=gp5Chosen->pk;finalM.B=gp5FinalB44;
+                    std::vector<float> finalRendered;
+                    renderModel(finalM,analysisInput,finalRendered,true);
+                    const double renderedRmsDbVal=rmsDb(finalRendered);
+                    const double targetRmsDbVal=rmsDb(analysisTarget);
+                    if(std::isfinite(renderedRmsDbVal)&&std::isfinite(targetRmsDbVal)){
+                        const double gainDb=targetRmsDbVal-renderedRmsDbVal;
+                        const double gainLinear=std::pow(10.0,gainDb/20.0);
+                        for(auto&v:gp5FinalB44)v*=static_cast<float>(gainLinear);
+                        r.gp5ToneMatchFinalGainDb=gainDb;
+                        gp5FinalB44Valid=true;
+                        os<<L", final level match="<<gainDb<<L"dB";
+                    }
+                }
+
                 if(gp5DynamicsSearchWon){os<<L" -- using Step 2 P/K search.";r.gp5ToneMatchMethod=L"Step 2 P/K search";}
                 else if(gp5MultiLevelSolveWon){os<<L" -- using multi-level B solve.";r.gp5ToneMatchMethod=L"multi-level B solve";}
                 else if(gp5DirectSolveWon){os<<L" -- using direct B solve.";r.gp5ToneMatchMethod=L"direct B solve";}
@@ -2327,11 +2360,18 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         // Corrective IR still layers onto this Block B as before (unless the direct
         // solve won, in which case it's already baked in -- see serializeGp5Compact's
         // overrideB44 handling).
-        const bool serializeOk=gp5DirectSolveWon
-            ?serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,{},0.0,{},0.0,&gp5DirectSolveB44)
-            :serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,
-                                 correction.enabled?correctiveStats.postGainDb:-6.0,
-                                 gp5ToneMatchIr,0.0);
+        // Prefer the final level-matched B whenever it was computed (any Tone Match
+        // candidate, including "baseline wins" -- the level-match step still runs
+        // and can correct a baseline that's already quieter than Full A2). Falls
+        // back to the pre-level-match construction only when Tone Match didn't run
+        // at all (no reference clip to match against).
+        const bool serializeOk=gp5FinalB44Valid
+            ?serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,{},0.0,{},0.0,&gp5FinalB44)
+            :(gp5DirectSolveWon
+                ?serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,{},0.0,{},0.0,&gp5DirectSolveB44)
+                :serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,
+                                     correction.enabled?correctiveStats.postGainDb:-6.0,
+                                     gp5ToneMatchIr,0.0));
         if(!serializeOk){
             r.error=error;fs::remove_all(work,ec);return r;
         }
@@ -3084,6 +3124,7 @@ bool verifyGp5MultiLevelWiring(const fs::path& inputNam,
     const auto zeroIt=std::find_if(points.begin(),points.end(),[](const Point&p){return std::abs(p.levelDb)<1e-9;});
     if(zeroIt!=points.end()){
         const double fullA2Zero=zeroIt->fullA2,baselineZero=zeroIt->baseline,candidateZero=zeroIt->candidate;
+        out.fullA2AbsoluteZeroDb=fullA2Zero;out.baselineAbsoluteZeroDb=baselineZero;out.candidateAbsoluteZeroDb=candidateZero;
         double baselineSumSq=0.0,candidateSumSq=0.0;
         for(const auto&p:points){
             const double fullA2Rel=p.fullA2-fullA2Zero;
@@ -3286,6 +3327,8 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         const double fullA2Zero=zeroIt->fullA2RelativeDb,officialZero=zeroIt->officialRelativeDb,oursZero=zeroIt->oursRelativeDb;
         const double optimizedZero=zeroIt->optimizedRelativeDb;
         const double bOnlyZero=zeroIt->bOnlyRelativeDb;
+        out.fullA2AbsoluteZeroDb=fullA2Zero;out.officialAbsoluteZeroDb=officialZero;out.oursAbsoluteZeroDb=oursZero;
+        out.oursVsOfficialAbsoluteOffsetDb=oursZero-officialZero;
         double officialSumSq=0.0,oursSumSq=0.0,optimizedSumSq=0.0,bOnlySumSq=0.0;
         for(auto&p:out.levels){
             p.fullA2RelativeDb-=fullA2Zero;
@@ -3314,6 +3357,10 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         out.oursRmsRelativeErrorDb=std::sqrt(oursSumSq/static_cast<double>(out.levels.size()));
         if(search.ok) out.optimizedRmsRelativeErrorDb=std::sqrt(optimizedSumSq/static_cast<double>(out.levels.size()));
         if(bOnlyOk) out.bOnlyRmsRelativeErrorDb=std::sqrt(bOnlySumSq/static_cast<double>(out.levels.size()));
+        {std::wostringstream os;os<<L"Official benchmark: absolute output level at 0dB input -- Full A2 "<<out.fullA2AbsoluteZeroDb
+            <<L" dBFS, official "<<out.officialAbsoluteZeroDb<<L" dBFS, ours "<<out.oursAbsoluteZeroDb
+            <<L" dBFS (ours is "<<out.oursVsOfficialAbsoluteOffsetDb<<L" dB relative to official).";
+            report(status,os.str());}
     }
 
     double officialEsrSum=0.0,oursEsrSum=0.0,optimizedEsrSum=0.0,bOnlyEsrSum=0.0;std::size_t heldOutCount=0;

@@ -31,6 +31,7 @@ constexpr UINT WM_APP_UPLOAD_PROGRESS = WM_APP + 4;
 constexpr UINT WM_APP_UPLOAD_DONE = WM_APP + 5;
 constexpr UINT WM_APP_GP5_UPLOAD_PROGRESS = WM_APP + 6;
 constexpr UINT WM_APP_GP5_UPLOAD_DONE = WM_APP + 7;
+constexpr UINT WM_APP_GP5_CATALOGUE_DONE = WM_APP + 8;
 constexpr int IDC_INPUT_PATH = 101;
 constexpr int IDC_LOAD_FILE = 102;
 constexpr int IDC_LOAD_FOLDER = 103;
@@ -150,11 +151,18 @@ bool gBusy = false;
 InputMode gInputMode = InputMode::None;
 bool gUploadBusy = false;
 bool gGp5UploadBusy = false;
+bool gGp5CatalogueBusy = false;
 
 struct UploadProgressMessage {
     int current = 0;
     int total = 0;
     std::wstring status;
+};
+
+struct CatalogueResultMessage {
+    bool ok = false;
+    std::wstring error;
+    std::vector<ntc::gp5::SnapToneCatalogueEntry> entries;
 };
 
 std::wstring getText(HWND h) {
@@ -290,6 +298,47 @@ void refreshGp5Detection() {
     setText(gGp5Device, ntc::gp5::describeDetection(d));
     if (!gGp5UploadBusy)
         EnableWindow(gGp5UploadButton, d.inputFound && d.outputFound ? TRUE : FALSE);
+}
+
+// Repopulates the destination-slot combo. With `named` supplied (a
+// successful catalogue read), each entry shows what's actually stored in
+// that slot; otherwise falls back to the plain "SnapTone NN" list. Preserves
+// the current selection where possible instead of always resetting to slot 51.
+void populateGp5SlotCombo(const std::vector<ntc::gp5::SnapToneCatalogueEntry>* named = nullptr) {
+    const int previousSelection = static_cast<int>(SendMessageW(gGp5SlotCombo, CB_GETCURSEL, 0, 0));
+    SendMessageW(gGp5SlotCombo, CB_RESETCONTENT, 0, 0);
+    for (int i = 51; i <= 80; ++i) {
+        std::wstring name = L"SnapTone " + std::to_wstring(i);
+        if (named) {
+            const auto it = std::find_if(named->begin(), named->end(),
+                [i](const ntc::gp5::SnapToneCatalogueEntry& e) { return e.visibleSlot == i; });
+            if (it != named->end())
+                name += it->name.empty() ? L" — Empty" : L" — " + it->name;
+        }
+        SendMessageW(gGp5SlotCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
+    }
+    const int count = static_cast<int>(SendMessageW(gGp5SlotCombo, CB_GETCOUNT, 0, 0));
+    SendMessageW(gGp5SlotCombo, CB_SETCURSEL, previousSelection >= 0 && previousSelection < count ? previousSelection : 0, 0);
+}
+
+// Read-only SnapTone name lookup (selector 0x24), kicked off from Rescan.
+// Runs on a worker thread since the device response can take up to ~3s to
+// go idle -- see ntc::gp5::readSnapToneCatalogue's doc comment.
+void refreshGp5CatalogueAsync(HWND hwnd) {
+    if (gGp5CatalogueBusy || gGp5UploadBusy) return;
+    const auto d = ntc::gp5::detectGp5Midi();
+    if (!d.inputFound || !d.outputFound) return; // refreshGp5Detection already reported this
+
+    gGp5CatalogueBusy = true;
+    EnableWindow(gGp5RescanButton, FALSE);
+    EnableWindow(gGp5UploadButton, FALSE);
+    setText(gStatus, L"Reading SnapTone names from the device...");
+
+    std::thread([hwnd] {
+        auto* m = new CatalogueResultMessage{};
+        m->ok = ntc::gp5::readSnapToneCatalogue(m->entries, m->error);
+        PostMessageW(hwnd, WM_APP_GP5_CATALOGUE_DONE, 0, reinterpret_cast<LPARAM>(m));
+    }).detach();
 }
 
 void updateBackendUi() {
@@ -679,7 +728,7 @@ void chooseGp5Clo(HWND hwnd) {
 }
 
 void startGp5Uploader(HWND hwnd) {
-    if (gGp5UploadBusy) return;
+    if (gGp5UploadBusy || gGp5CatalogueBusy) return;
     const std::wstring clo = getText(gGp5CloEdit);
     if (clo.empty()) {
         MessageBoxW(hwnd, L"Select a .clo file first.", L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
@@ -1010,11 +1059,7 @@ void createUi(HWND hwnd) {
     gGp5SlotCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
                                   0, 0, 310, 260, hwnd, controlId(IDC_GP5_SLOT), nullptr, nullptr);
     applyFont(gGp5SlotCombo);
-    for (int i = 51; i <= 80; ++i) {
-        const std::wstring name = L"SnapTone " + std::to_wstring(i);
-        SendMessageW(gGp5SlotCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
-    }
-    SendMessageW(gGp5SlotCombo, CB_SETCURSEL, 0, 0);
+    populateGp5SlotCombo();
     gGp5Device = CreateWindowW(L"STATIC", L"SnapTone device not scanned yet.", WS_CHILD,
                                0, 0, 100, 24, hwnd, controlId(IDC_GP5_DEVICE), nullptr, nullptr);
     applyFont(gGp5Device);
@@ -1298,6 +1343,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_GP5_RESCAN:
             refreshGp5Detection();
             setText(gStatus, getText(gGp5Device));
+            refreshGp5CatalogueAsync(hwnd);
             return 0;
         case IDC_GP5_UPLOAD: startGp5Uploader(hwnd); return 0;
         default: break;
@@ -1389,6 +1435,24 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
             } else {
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONERROR);
+            }
+        }
+        return 0;
+    }
+    case WM_APP_GP5_CATALOGUE_DONE: {
+        std::unique_ptr<CatalogueResultMessage> m(reinterpret_cast<CatalogueResultMessage*>(lParam));
+        gGp5CatalogueBusy = false;
+        if (!gGp5UploadBusy) {
+            EnableWindow(gGp5RescanButton, TRUE);
+            const auto d = ntc::gp5::detectGp5Midi();
+            EnableWindow(gGp5UploadButton, d.inputFound && d.outputFound ? TRUE : FALSE);
+        }
+        if (m) {
+            if (m->ok) {
+                populateGp5SlotCombo(&m->entries);
+                setText(gStatus, L"SnapTone names loaded.");
+            } else {
+                setText(gStatus, L"Could not read SnapTone names: " + m->error);
             }
         }
         return 0;
@@ -1907,7 +1971,14 @@ bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
                 << L"," << result.optimizedRmsRelativeErrorDb << L"," << result.bOnlyRmsRelativeErrorDb << L",,,,,,,\n";
             csv << L"summary,mean_held_out_esr," << result.officialMeanHeldOutEsr << L"," << result.oursMeanHeldOutEsr
                 << L"," << result.optimizedMeanHeldOutEsr << L"," << result.bOnlyMeanHeldOutEsr << L",,,,,,,\n";
+            csv << L"summary,absolute_zero_db_level," << result.fullA2AbsoluteZeroDb << L"," << result.officialAbsoluteZeroDb
+                << L"," << result.oursAbsoluteZeroDb << L",,,,,,,,\n";
+            csv << L"summary,ours_vs_official_absolute_offset_db," << result.oursVsOfficialAbsoluteOffsetDb << L",,,,,,,,,,\n";
 
+            std::wcout << L"\nAbsolute output level at 0dB input:\n";
+            std::wcout << L"  Full A2:  " << result.fullA2AbsoluteZeroDb << L" dBFS\n";
+            std::wcout << L"  official: " << result.officialAbsoluteZeroDb << L" dBFS\n";
+            std::wcout << L"  ours:     " << result.oursAbsoluteZeroDb << L" dBFS  (" << result.oursVsOfficialAbsoluteOffsetDb << L" dB vs official)\n";
             std::wcout << L"\nDynamics (six-level sweep vs Full A2):\n";
             std::wcout << L"  official:  max=" << result.officialMaxRelativeErrorDb << L"dB rms=" << result.officialRmsRelativeErrorDb << L"dB\n";
             std::wcout << L"  ours:      max=" << result.oursMaxRelativeErrorDb << L"dB rms=" << result.oursRmsRelativeErrorDb << L"dB\n";
@@ -1970,9 +2041,16 @@ bool runHeadlessGp5MultiLevelVerifyIfRequested(int& exitCode) {
             csv << L"dynamics_max_err_db," << result.baselineMaxRelativeErrorDb << L"," << result.candidateMaxRelativeErrorDb << L"\n";
             csv << L"dynamics_rms_err_db," << result.baselineRmsRelativeErrorDb << L"," << result.candidateRmsRelativeErrorDb << L"\n";
             csv << L"mean_held_out_esr," << result.baselineMeanHeldOutEsr << L"," << result.candidateMeanHeldOutEsr << L"\n";
+            csv << L"absolute_zero_db_level," << result.baselineAbsoluteZeroDb << L"," << result.candidateAbsoluteZeroDb << L"\n";
+            csv << L"vs_full_a2_absolute_offset_db," << (result.baselineAbsoluteZeroDb - result.fullA2AbsoluteZeroDb)
+                << L"," << (result.candidateAbsoluteZeroDb - result.fullA2AbsoluteZeroDb) << L"\n";
             std::wcout << L"\nDynamics (vs Full A2): baseline max=" << result.baselineMaxRelativeErrorDb << L"dB rms=" << result.baselineRmsRelativeErrorDb
                        << L"dB | candidate max=" << result.candidateMaxRelativeErrorDb << L"dB rms=" << result.candidateRmsRelativeErrorDb << L"dB\n";
             std::wcout << L"Held-out ESR (vs Full A2): baseline=" << result.baselineMeanHeldOutEsr << L" | candidate=" << result.candidateMeanHeldOutEsr << L"\n";
+            std::wcout << L"\nAbsolute output level at 0dB input: Full A2=" << result.fullA2AbsoluteZeroDb << L"dBFS, baseline="
+                       << result.baselineAbsoluteZeroDb << L"dBFS (" << (result.baselineAbsoluteZeroDb - result.fullA2AbsoluteZeroDb)
+                       << L"dB vs Full A2), candidate=" << result.candidateAbsoluteZeroDb << L"dBFS ("
+                       << (result.candidateAbsoluteZeroDb - result.fullA2AbsoluteZeroDb) << L"dB vs Full A2)\n";
             std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
             exitCode = 0;
         } else {

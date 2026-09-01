@@ -3,5 +3,4 @@ dist/
 release/
 .vs/
 *.user
-nam_input_wav.wav
 test_assets/
