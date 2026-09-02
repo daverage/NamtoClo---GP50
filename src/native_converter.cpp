@@ -3692,7 +3692,7 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
     std::vector<float> dry;
     if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
 
-    struct CandidateSpec{const wchar_t*label;bool gp5DirectFit;bool refineEnabled;bool dynamicsAware;};
+    struct CandidateSpec{const wchar_t*label;bool gp5DirectFit;bool refineEnabled;bool dynamicsAware;ToneMatchReferenceMode refMode;};
     // gp5DirectFit stays true for every candidate here: it's convertNamToClo's
     // always-on, per-NAM dynamic pick between the direct-at-512-taps fit and
     // truncating the 2048-tap fit (whichever scores lower), not something this
@@ -3700,11 +3700,17 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
     // gp5gp50Compact output at all) to be populated. What varies between
     // candidates is only whether Tone Match runs (which is what can apply our
     // direct B512 least-squares solve, gp5DirectFit's own truncation choice
-    // aside) and whether the dynamics-aware P/K search can reopen P/K within it.
+    // aside), which reference audio it targets, and whether the dynamics-aware
+    // P/K search can reopen P/K within it. "generic" (2026-09-02, see CLAUDE.md)
+    // answers the session's original second question directly: does Auto mode's
+    // gain-bucket-matched real playing clip (what "production" has used all
+    // along) actually beat Default mode's plain synthetic stimulus tail as a
+    // Tone Match target, or is genre/character matching not adding anything?
     static const CandidateSpec specs[]={
-        {L"valeton",true,false,false},
-        {L"production",true,true,false},
-        {L"experimental",true,true,true},
+        {L"valeton",true,false,false,ToneMatchReferenceMode::Default},
+        {L"generic",true,true,false,ToneMatchReferenceMode::Default},
+        {L"production",true,true,false,ToneMatchReferenceMode::Auto},
+        {L"experimental",true,true,true,ToneMatchReferenceMode::Auto},
     };
     for(const auto& spec:specs){
         ValetonComparisonResult r;r.label=spec.label;
@@ -3712,7 +3718,7 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
 
         NativeConverterConfig converter;converter.gp5DirectFit=spec.gp5DirectFit;converter.dynamicsAwareFitting=spec.dynamicsAware;
         CloRefineConfig refine;refine.enabled=spec.refineEnabled;
-        if(spec.refineEnabled)refine.referenceMode=ToneMatchReferenceMode::Auto;
+        if(spec.refineEnabled)refine.referenceMode=spec.refMode;
 
         auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
         if(!conversion.ok||conversion.gp5gp50Compact.empty()){
@@ -3731,6 +3737,44 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
 
     fs::remove_all(work,ec);
     return true;
+}
+
+// See native_converter.hpp's doc comment.
+bool runOfficialCandidateComparison(const fs::path& inputNam,
+                                    const fs::path& officialClo,
+                                    const fs::path& diClipWav,
+                                    const std::vector<fs::path>& heldOutClips,
+                                    ValetonComparisonResult& out,
+                                    std::string& error,
+                                    const StatusCallback& status,
+                                    float inputGainLinear,
+                                    float outputGainLinear){
+    out=ValetonComparisonResult{};out.label=L"official";
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_official_compare_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    CandidateRenderFn renderFn=[officialClo,inputGainLinear,outputGainLinear](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+        std::vector<float> scaledIn=in;
+        if(inputGainLinear!=1.0f){
+            for(float& s:scaledIn)s*=inputGainLinear;
+        }
+        if(!renderCloOnSignal(officialClo,scaledIn,outv,err))return false;
+        if(outputGainLinear!=1.0f){
+            for(float& s:outv)s*=outputGainLinear;
+        }
+        return true;
+    };
+    out.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,renderFn,dry,heldOutClips,out);
+    fs::remove_all(work,ec);
+    return out.ok;
 }
 
 // See native_converter.hpp's doc comment.
@@ -3942,6 +3986,941 @@ bool runFrequencyWeightedB512Experiment(const fs::path& inputNam,
     }
 
     fs::remove_all(work,ec);
+    return true;
+}
+
+namespace {
+// See EqMatchConfig's doc comment (native_converter.hpp). Derives a smoothed, clamped,
+// band-limited magnitude correction between candidateOutput44100 and fullA2Output44100
+// (reusing ratioSpectrumF's existing STFT-averaged per-bin magnitude-ratio estimator --
+// the same one fitAB()/refineB() already use elsewhere in this file for their own
+// residual correction, so ratio[k] here means the same thing it does everywhere else in
+// this file: approximately the magnitude gain needed to turn the first signal into the
+// second), reconstructs it as a short minimum-phase FIR, and convolves it into b44 via
+// applyCorrectiveIrToB44 (which also RMS-renormalizes b44 back to its pre-correction
+// energy -- the primary gain-neutrality guarantee this stage relies on).
+bool applyEqMatchCorrection(std::vector<float>& b44,
+                            const std::vector<float>& candidateOutput44100,
+                            const std::vector<float>& fullA2Output44100,
+                            const EqMatchConfig& cfg,
+                            std::string& error){
+    const auto ratio=ratioSpectrumF(candidateOutput44100,fullA2Output44100,44100.0);
+    const std::size_t n=ratio.size();
+    if(n<2){error="EQ Match: analysis signal too short.";return false;}
+
+    std::vector<float> db(n);
+    for(std::size_t k=0;k<n;++k)db[k]=20.0f*static_cast<float>(std::log10(std::max(ratio[k],1e-6f)));
+
+    auto hzOf=[&](std::size_t k){return static_cast<double>(k)*44100.0/static_cast<double>(kFft);};
+
+    // 1/2-octave smoothing: average dB over a window centered on each bin's own
+    // frequency, spanning +-smoothingOctaves/2 octaves either side.
+    std::vector<float> smoothed(n,0.0f);
+    for(std::size_t k=0;k<n;++k){
+        const double hz=hzOf(k);
+        if(hz<=0.0){smoothed[k]=db[k];continue;}
+        const double halfSpan=std::pow(2.0,static_cast<double>(cfg.smoothingOctaves)*0.5);
+        const double loHz=hz/halfSpan,hiHz=hz*halfSpan;
+        double sum=0.0;std::size_t count=0;
+        for(std::size_t j=0;j<n;++j){
+            const double jhz=hzOf(j);
+            if(jhz>=loHz&&jhz<=hiHz){sum+=db[j];++count;}
+        }
+        smoothed[k]=count>0?static_cast<float>(sum/static_cast<double>(count)):db[k];
+    }
+
+    // Clamp, then fade smoothly to 0dB outside [lowHz,highHz] (a half-octave transition
+    // band at each edge) so the correction never touches sub-bass or top-end content.
+    std::vector<float> shaped(n,0.0f);
+    const double transition=std::pow(2.0,0.5);
+    for(std::size_t k=0;k<n;++k){
+        const double hz=hzOf(k);
+        float v=std::clamp(smoothed[k],-cfg.maxCorrectionDb,cfg.maxCorrectionDb);
+        double fade=1.0;
+        if(hz<static_cast<double>(cfg.lowHz)){
+            const double edgeLo=static_cast<double>(cfg.lowHz)/transition;
+            fade=(hz<=edgeLo)?0.0:(hz-edgeLo)/(static_cast<double>(cfg.lowHz)-edgeLo);
+        }else if(hz>static_cast<double>(cfg.highHz)){
+            const double edgeHi=static_cast<double>(cfg.highHz)*transition;
+            fade=(hz>=edgeHi)?0.0:(edgeHi-hz)/(edgeHi-static_cast<double>(cfg.highHz));
+        }
+        shaped[k]=v*static_cast<float>(std::clamp(fade,0.0,1.0));
+    }
+
+    // Zero-mean over the active (non-faded) band: this stage should answer "did the
+    // SHAPE get closer to Full A2", not "did it get louder" -- applyCorrectiveIrToB44's
+    // own RMS renormalization below is the primary gain-neutrality guarantee; this is a
+    // belt-and-braces adjustment in the dB domain.
+    double sum=0.0;std::size_t count=0;
+    for(std::size_t k=0;k<n;++k){
+        const double hz=hzOf(k);
+        if(hz>=static_cast<double>(cfg.lowHz)&&hz<=static_cast<double>(cfg.highHz)){sum+=shaped[k];++count;}
+    }
+    const float meanDb=count>0?static_cast<float>(sum/static_cast<double>(count)):0.0f;
+    for(auto&v:shaped)v=std::clamp(v-meanDb,-cfg.maxCorrectionDb,cfg.maxCorrectionDb);
+
+    std::vector<float> linearMag(n);
+    for(std::size_t k=0;k<n;++k)linearMag[k]=static_cast<float>(std::pow(10.0,static_cast<double>(shaped[k])/20.0));
+
+    constexpr std::size_t kEqMatchIrTaps=256; // matches refineB()'s own tail-correction tap count
+    const auto ir=minimumPhaseF(linearMag,kEqMatchIrTaps);
+    return applyCorrectiveIrToB44(b44,ir,0.0,error);
+}
+} // namespace
+
+// See native_converter.hpp's doc comment.
+bool runEqMatchExperiment(const fs::path& inputNam,
+                          const fs::path& fitClip,
+                          const EqMatchConfig& eqMatch,
+                          const fs::path& diClipWav,
+                          const std::vector<fs::path>& heldOutClips,
+                          std::vector<ValetonComparisonResult>& out,
+                          std::string& error,
+                          const StatusCallback& status){
+    out.clear();
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_eqmatch_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"EQ Match: converting production candidate...");
+    NativeConverterConfig converter; // gp5DirectFit=true, dynamicsAwareFitting=false (defaults)
+    CloRefineConfig refine;refine.enabled=true;refine.referenceMode=ToneMatchReferenceMode::Auto;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Production conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+    const fs::path productionClo=conversion.gp5gp50Compact;
+    const float pp=conversion.pkPp,pn=conversion.pkPn,kp=conversion.pkKp,kn=conversion.pkKn;
+
+    ValetonComparisonResult prodResult;prodResult.label=L"production";
+    prodResult.pkPp=pp;prodResult.pkPn=pn;prodResult.pkKp=kp;prodResult.pkKn=kn;
+    CandidateRenderFn prodRenderFn=[productionClo](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+        return renderCloOnSignal(productionClo,in,outv,err);
+    };
+    prodResult.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,prodRenderFn,dry,heldOutClips,prodResult);
+    out.push_back(prodResult);
+
+    report(status,L"EQ Match: rendering fit clip through production + Full A2...");
+    std::vector<float> fitDry;
+    if(!loadClipAsMono44100(fitClip,fitDry,error)){fs::remove_all(work,ec);return false;}
+    std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
+    if(!renderNamOnSignal(fullModelPath,fitDry,fullA2Input,fullA2Output,fullA2Rate,error)){fs::remove_all(work,ec);return false;}
+    const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+    std::vector<float> productionOutput;
+    if(!renderCloOnSignal(productionClo,fitDry,productionOutput,error)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> newB;
+    if(!readB44FromClo(productionClo,newB,error)){fs::remove_all(work,ec);return false;}
+    report(status,L"EQ Match: deriving smoothed correction and convolving into production's Block B...");
+    if(!applyEqMatchCorrection(newB,productionOutput,fullA2At44100,eqMatch,error)){
+        fs::remove_all(work,ec);return false;
+    }
+
+    ValetonComparisonResult eqResult;eqResult.label=L"eqmatch";
+    eqResult.pkPp=pp;eqResult.pkPn=pn;eqResult.pkKp=kp;eqResult.pkKn=kn;
+    CandidateRenderFn eqRenderFn=[productionClo,pp,pn,kp,kn,newB](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+        return renderCloWithOverrideOnSignal(productionClo,pp,pn,kp,kn,newB,in,outv,err);
+    };
+    eqResult.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,eqRenderFn,dry,heldOutClips,eqResult);
+    out.push_back(eqResult);
+
+    fs::remove_all(work,ec);
+    return true;
+}
+
+namespace {
+// Averaged per-bin magnitude spectrum via the SAME windowed-STFT machinery (Hamming,
+// L=ceil(0.125*fs), 50% overlap, Ooura RDFT) ratioSpectrumF/bandEnergyPercent use
+// elsewhere in this file -- for the harmonic diagnostic's peak-picking below.
+std::vector<float> averagedMagnitudeSpectrum(const std::vector<float>& signal,double sr){
+    std::vector<float> out(kBins,0.0f);
+    const float fs=static_cast<float>(sr);
+    const int Li=static_cast<int>(static_cast<double>(fs*0.125f)+0.5);
+    const std::size_t L=static_cast<std::size_t>(std::max(1,Li));
+    const std::size_t hop=std::max<std::size_t>(1,L-L/2);
+    const auto wv=hammingF(L);
+    if(signal.size()<L)return out;
+
+    std::vector<float> sxx(kBins,0.0f);
+    OouraRfft2048Official rdft;
+    std::size_t startPos=0;const std::size_t finalStart=signal.size()-L;
+    std::size_t frames=0;
+    for(;;){
+        const std::size_t p=std::min(startPos,finalStart);
+        std::vector<float> xframe(L);float mx=0.0f;
+        for(std::size_t i=0;i<L;++i){xframe[i]=signal[p+i];mx+=xframe[i];}
+        mx/=static_cast<float>(L);
+        std::vector<float> xf(kFft,0.0f);
+        for(std::size_t i=0;i<L;++i){const std::size_t j=i&(kFft-1);xf[j]+=(xframe[i]-mx)*wv[i];}
+        std::array<float,kBins> xr{},xi{};
+        rdft.run(xf,xr,xi);
+        for(std::size_t k=0;k<kBins;++k)sxx[k]+=xr[k]*xr[k]+xi[k]*xi[k];
+        ++frames;
+        if(p==finalStart)break;
+        startPos+=hop;
+    }
+    if(frames>0)for(std::size_t k=0;k<kBins;++k)out[k]=std::sqrt(sxx[k]/static_cast<float>(frames));
+    return out;
+}
+
+// Finds the peak magnitude within +-searchBins of the bin nearest hz, to tolerate slight
+// frequency/bin misalignment when reading a harmonic's amplitude off an averaged spectrum.
+float peakNearHz(const std::vector<float>& spectrum,double hz,double sr,int searchBins=2){
+    const double kBin=hz*static_cast<double>(kFft)/sr;
+    const long long center=static_cast<long long>(std::llround(kBin));
+    float best=0.0f;
+    for(long long k=center-searchBins;k<=center+searchBins;++k){
+        if(k<0||k>=static_cast<long long>(spectrum.size()))continue;
+        best=std::max(best,spectrum[static_cast<std::size_t>(k)]);
+    }
+    return best;
+}
+
+std::vector<float> generateSineTone(double freqHz,double amplitude,double durationS,double sr){
+    const std::size_t n=static_cast<std::size_t>(durationS*sr);
+    std::vector<float> out(n,0.0f);
+    const double fadeS=0.05; // 50ms raised-cosine fade in/out to avoid click transients
+    const std::size_t fadeN=static_cast<std::size_t>(fadeS*sr);
+    for(std::size_t i=0;i<n;++i){
+        double env=1.0;
+        if(fadeN>0&&i<fadeN)env=0.5*(1.0-std::cos(kPi*static_cast<double>(i)/static_cast<double>(fadeN)));
+        else if(fadeN>0&&i>=n-fadeN)env=0.5*(1.0-std::cos(kPi*static_cast<double>(n-1-i)/static_cast<double>(fadeN)));
+        out[i]=static_cast<float>(amplitude*env*std::sin(2.0*kPi*freqHz*static_cast<double>(i)/sr));
+    }
+    return out;
+}
+} // namespace
+
+// See native_converter.hpp's doc comment.
+bool runHarmonicDiagnostic(const fs::path& inputNam,
+                           const std::vector<double>& fundamentalsHz,
+                           HarmonicDiagnosticResult& out,
+                           std::string& error,
+                           const StatusCallback& status){
+    out=HarmonicDiagnosticResult{};
+    if(fundamentalsHz.empty()){error="runHarmonicDiagnostic: no fundamentals supplied.";return false;}
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_harmonic_diag_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Harmonic diagnostic: converting production candidate...");
+    NativeConverterConfig converter;
+    CloRefineConfig refine;refine.enabled=true;refine.referenceMode=ToneMatchReferenceMode::Auto;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Production conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+    const fs::path productionClo=conversion.gp5gp50Compact;
+
+    constexpr double kAmplitude=0.3;
+    constexpr double kDurationS=3.0;
+    constexpr double kAnalysisSkipS=1.0; // skip transient settle-in before analysis
+    constexpr int kMaxHarmonics=300; // covers every fundamental up to Nyquist (~267 harmonics at 82.41Hz) -- the fixed 40-harmonic cap this replaced silently truncated low fundamentals at ~3.3kHz, well short of the 5-15kHz range where audible brightness/harshness differences actually live
+
+    for(double f0:fundamentalsHz){
+        report(status,L"Harmonic diagnostic: fundamental "+std::to_wstring(f0)+L"Hz...");
+        const auto tone=generateSineTone(f0,kAmplitude,kDurationS,44100.0);
+
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+        if(!renderNamOnSignal(fullModelPath,tone,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+            report(status,L"Harmonic diagnostic: skipped "+std::to_wstring(f0)+L"Hz (Full A2 render failed).");
+            continue;
+        }
+        const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+
+        std::vector<float> preB;
+        if(!renderPreBOnSignal(productionClo,tone,preB,stepError)){
+            report(status,L"Harmonic diagnostic: skipped "+std::to_wstring(f0)+L"Hz (pre-B render failed).");
+            continue;
+        }
+        std::vector<float> candidateOutput;
+        if(!renderCloOnSignal(productionClo,tone,candidateOutput,stepError)){
+            report(status,L"Harmonic diagnostic: skipped "+std::to_wstring(f0)+L"Hz (candidate render failed).");
+            continue;
+        }
+
+        const std::size_t skipN=static_cast<std::size_t>(kAnalysisSkipS*44100.0);
+        auto tail=[&](const std::vector<float>& s)->std::vector<float>{
+            if(s.size()<=skipN)return s;
+            return std::vector<float>(s.begin()+static_cast<std::ptrdiff_t>(skipN),s.end());
+        };
+        const auto fullA2Spec=averagedMagnitudeSpectrum(tail(fullA2At44100),44100.0);
+        const auto preBSpec=averagedMagnitudeSpectrum(tail(preB),44100.0);
+        const auto candSpec=averagedMagnitudeSpectrum(tail(candidateOutput),44100.0);
+
+        const float fullA2Fund=peakNearHz(fullA2Spec,f0,44100.0);
+        const float preBFund=peakNearHz(preBSpec,f0,44100.0);
+        const float candFund=peakNearHz(candSpec,f0,44100.0);
+        if(fullA2Fund<=1e-12f||preBFund<=1e-12f||candFund<=1e-12f){
+            report(status,L"Harmonic diagnostic: skipped "+std::to_wstring(f0)+L"Hz (fundamental too weak to measure).");
+            continue;
+        }
+
+        for(int n=1;n<=kMaxHarmonics;++n){
+            const double hz=f0*static_cast<double>(n);
+            if(hz>=44100.0/2.0-100.0)break;
+            HarmonicDiagnosticPoint p;
+            p.fundamentalHz=f0;p.harmonicNumber=n;p.harmonicHz=hz;
+            const float fa2=peakNearHz(fullA2Spec,hz,44100.0);
+            const float pb=peakNearHz(preBSpec,hz,44100.0);
+            const float ca=peakNearHz(candSpec,hz,44100.0);
+            p.fullA2RelativeDb=20.0*std::log10(std::max(fa2,1e-12f)/fullA2Fund);
+            p.preBRelativeDb=20.0*std::log10(std::max(pb,1e-12f)/preBFund);
+            p.candidateRelativeDb=20.0*std::log10(std::max(ca,1e-12f)/candFund);
+            p.preBErrorDb=p.preBRelativeDb-p.fullA2RelativeDb;
+            p.candidateErrorDb=p.candidateRelativeDb-p.fullA2RelativeDb;
+            out.points.push_back(p);
+        }
+    }
+
+    if(out.points.empty()){error="No harmonics measured successfully.";fs::remove_all(work,ec);return false;}
+    fs::remove_all(work,ec);
+    out.ok=true;
+    return true;
+}
+
+// See native_converter.hpp's doc comment.
+bool runHarmonicProfile(const fs::path& sourceClo,
+                        const std::vector<double>& fundamentalsHz,
+                        std::vector<HarmonicProfilePoint>& out,
+                        std::string& error,
+                        const StatusCallback& status){
+    out.clear();
+    if(fundamentalsHz.empty()){error="runHarmonicProfile: no fundamentals supplied.";return false;}
+
+    constexpr double kAmplitude=0.3;
+    constexpr double kDurationS=3.0;
+    constexpr double kAnalysisSkipS=1.0;
+    constexpr int kMaxHarmonics=300; // covers every fundamental up to Nyquist (~267 harmonics at 82.41Hz) -- the fixed 40-harmonic cap this replaced silently truncated low fundamentals at ~3.3kHz, well short of the 5-15kHz range where audible brightness/harshness differences actually live
+
+    for(double f0:fundamentalsHz){
+        report(status,L"Harmonic profile: fundamental "+std::to_wstring(f0)+L"Hz...");
+        const auto tone=generateSineTone(f0,kAmplitude,kDurationS,44100.0);
+
+        std::vector<float> output;std::string stepError;
+        if(!renderCloOnSignal(sourceClo,tone,output,stepError)){
+            report(status,L"Harmonic profile: skipped "+std::to_wstring(f0)+L"Hz (render failed: "+std::wstring(stepError.begin(),stepError.end())+L").");
+            continue;
+        }
+
+        const std::size_t skipN=static_cast<std::size_t>(kAnalysisSkipS*44100.0);
+        std::vector<float> tail=output.size()>skipN
+            ?std::vector<float>(output.begin()+static_cast<std::ptrdiff_t>(skipN),output.end())
+            :output;
+        const auto spec=averagedMagnitudeSpectrum(tail,44100.0);
+        const float fund=peakNearHz(spec,f0,44100.0);
+        if(fund<=1e-12f){
+            report(status,L"Harmonic profile: skipped "+std::to_wstring(f0)+L"Hz (fundamental too weak to measure).");
+            continue;
+        }
+
+        for(int n=1;n<=kMaxHarmonics;++n){
+            const double hz=f0*static_cast<double>(n);
+            if(hz>=44100.0/2.0-100.0)break;
+            HarmonicProfilePoint p;
+            p.fundamentalHz=f0;p.harmonicNumber=n;p.harmonicHz=hz;
+            const float mag=peakNearHz(spec,hz,44100.0);
+            p.relativeDb=20.0*std::log10(std::max(mag,1e-12f)/fund);
+            out.push_back(p);
+        }
+    }
+
+    if(out.empty()){error="No harmonics measured successfully.";return false;}
+    return true;
+}
+
+// See native_converter.hpp's doc comment.
+bool runThdLevelSweep(const fs::path& inputNam,
+                      const fs::path& candidateClo,
+                      const std::vector<double>& fundamentalsHz,
+                      ThdLevelSweepResult& out,
+                      std::string& error,
+                      const StatusCallback& status){
+    out=ThdLevelSweepResult{};
+    if(fundamentalsHz.empty()){error="runThdLevelSweep: no fundamentals supplied.";return false;}
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_thd_sweep_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    constexpr double kBaseAmplitude=0.3;
+    constexpr double kDurationS=3.0;
+    constexpr double kAnalysisSkipS=1.0;
+    constexpr int kMaxHarmonics=40; // THD only needs enough harmonics to converge, not the full 300-harmonic falloff-shape range
+    static constexpr double kLevelsDb[]={0.0,-6.0,-12.0,-18.0,-24.0};
+
+    auto thdPercent=[&](const std::vector<float>& spec,double f0,double sr)->double{
+        const float fund=peakNearHz(spec,f0,sr);
+        if(fund<=1e-12f)return -1.0;
+        double sumSq=0.0;
+        for(int n=2;n<=kMaxHarmonics;++n){
+            const double hz=f0*static_cast<double>(n);
+            if(hz>=sr/2.0-100.0)break;
+            const float mag=peakNearHz(spec,hz,sr);
+            sumSq+=static_cast<double>(mag)*static_cast<double>(mag);
+        }
+        return 100.0*std::sqrt(sumSq)/static_cast<double>(fund);
+    };
+
+    for(double f0:fundamentalsHz){
+        for(double levelDb:kLevelsDb){
+            report(status,L"THD sweep: "+std::to_wstring(f0)+L"Hz @ "+std::to_wstring(levelDb)+L"dB...");
+            const double amplitude=kBaseAmplitude*std::pow(10.0,levelDb/20.0);
+            const auto tone=generateSineTone(f0,amplitude,kDurationS,44100.0);
+
+            std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+            if(!renderNamOnSignal(fullModelPath,tone,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+            const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+            std::vector<float> candOutput;
+            if(!renderCloOnSignal(candidateClo,tone,candOutput,stepError))continue;
+
+            const std::size_t skipN=static_cast<std::size_t>(kAnalysisSkipS*44100.0);
+            auto tail=[&](const std::vector<float>& s)->std::vector<float>{
+                if(s.size()<=skipN)return s;
+                return std::vector<float>(s.begin()+static_cast<std::ptrdiff_t>(skipN),s.end());
+            };
+            const auto fullA2Spec=averagedMagnitudeSpectrum(tail(fullA2At44100),44100.0);
+            const auto candSpec=averagedMagnitudeSpectrum(tail(candOutput),44100.0);
+
+            const double fullA2Thd=thdPercent(fullA2Spec,f0,44100.0);
+            const double candThd=thdPercent(candSpec,f0,44100.0);
+            if(fullA2Thd<0.0||candThd<0.0)continue;
+
+            ThdLevelPoint p;p.fundamentalHz=f0;p.levelDb=levelDb;
+            p.fullA2ThdPercent=fullA2Thd;p.candidateThdPercent=candThd;
+            p.thdErrorPercent=candThd-fullA2Thd;
+            out.points.push_back(p);
+        }
+    }
+
+    fs::remove_all(work,ec);
+    if(out.points.empty()){error="No THD points measured successfully.";return false;}
+    out.ok=true;
+    return true;
+}
+
+// See native_converter.hpp's doc comment.
+bool runEnvelopeDiagnostic(const fs::path& inputNam,
+                           const fs::path& candidateClo,
+                           const fs::path& playingClipWav,
+                           EnvelopeDiagnosticResult& out,
+                           std::string& error,
+                           const StatusCallback& status){
+    out=EnvelopeDiagnosticResult{};
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_envelope_diag_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(playingClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Envelope diagnostic: rendering Full A2...");
+    std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+    if(!renderNamOnSignal(fullModelPath,dry,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+        error="Full A2 render failed: "+stepError;fs::remove_all(work,ec);return false;
+    }
+    const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+
+    report(status,L"Envelope diagnostic: rendering candidate...");
+    std::vector<float> candOutput;
+    if(!renderCloOnSignal(candidateClo,dry,candOutput,error)){fs::remove_all(work,ec);return false;}
+    fs::remove_all(work,ec);
+
+    constexpr int kMaxLagSamples=256;
+    std::vector<float> alignedCand,alignedRef;
+    alignSignals(candOutput,fullA2At44100,kMaxLagSamples,alignedCand,alignedRef);
+    if(alignedCand.empty()||alignedRef.empty()){error="Clip too short to align.";return false;}
+
+    auto crestFactorDb=[](const std::vector<float>& s)->double{
+        double sumSq=0.0;float peak=0.0f;
+        for(float v:s){sumSq+=static_cast<double>(v)*static_cast<double>(v);peak=std::max(peak,std::fabs(v));}
+        const double rms=std::sqrt(sumSq/static_cast<double>(std::max<std::size_t>(1,s.size())));
+        if(rms<1e-12||peak<=0.0f)return 0.0;
+        return 20.0*std::log10(static_cast<double>(peak)/rms);
+    };
+    out.fullA2CrestFactorDb=crestFactorDb(alignedRef);
+    out.candidateCrestFactorDb=crestFactorDb(alignedCand);
+    out.crestFactorErrorDb=out.candidateCrestFactorDb-out.fullA2CrestFactorDb;
+
+    constexpr double kWindowS=0.020,kHopS=0.010;
+    const std::size_t win=static_cast<std::size_t>(kWindowS*44100.0);
+    const std::size_t hop=static_cast<std::size_t>(kHopS*44100.0);
+    if(alignedRef.size()<win){error="Clip too short for envelope windowing.";return false;}
+
+    double sumAbsErr=0.0,sumSqErr=0.0;std::size_t count=0;
+    for(std::size_t start=0;start+win<=alignedRef.size();start+=hop){
+        double refSumSq=0.0,candSumSq=0.0;
+        for(std::size_t i=0;i<win;++i){
+            refSumSq+=static_cast<double>(alignedRef[start+i])*static_cast<double>(alignedRef[start+i]);
+            candSumSq+=static_cast<double>(alignedCand[start+i])*static_cast<double>(alignedCand[start+i]);
+        }
+        const double refRms=std::sqrt(refSumSq/static_cast<double>(win));
+        const double candRms=std::sqrt(candSumSq/static_cast<double>(win));
+        if(refRms<1e-8)continue; // skip near-silence to avoid a noise-floor-dominated dB blowup
+        EnvelopePoint p;
+        p.timeSec=static_cast<double>(start)/44100.0;
+        p.fullA2EnvelopeDb=20.0*std::log10(refRms);
+        p.candidateEnvelopeDb=candRms>1e-8?20.0*std::log10(candRms):-160.0;
+        p.envelopeErrorDb=p.candidateEnvelopeDb-p.fullA2EnvelopeDb;
+        out.points.push_back(p);
+        sumAbsErr+=std::fabs(p.envelopeErrorDb);sumSqErr+=p.envelopeErrorDb*p.envelopeErrorDb;++count;
+    }
+    if(out.points.empty()){error="No envelope frames measured (clip may be all-silence).";return false;}
+    out.meanAbsEnvelopeErrorDb=sumAbsErr/static_cast<double>(count);
+    out.rmsEnvelopeErrorDb=std::sqrt(sumSqErr/static_cast<double>(count));
+    out.ok=true;
+    return true;
+}
+
+namespace {
+// Per-frame (not clip-averaged) 6-band energy in dB, reusing bandEnergyPercent's exact
+// STFT parameters (Hamming, L=ceil(0.125*fs), 50% overlap, Ooura RDFT) so results are
+// directly comparable to ValetonComparisonBandEnergy's band edges/convention.
+std::vector<std::pair<double,std::array<double,6>>> perFrameBandEnergyDb(const std::vector<float>& signal,double sr){
+    std::vector<std::pair<double,std::array<double,6>>> frames;
+    const float fs=static_cast<float>(sr);
+    const int Li=static_cast<int>(static_cast<double>(fs*0.125f)+0.5);
+    const std::size_t L=static_cast<std::size_t>(std::max(1,Li));
+    const std::size_t hop=std::max<std::size_t>(1,L-L/2);
+    const auto wv=hammingF(L);
+    if(signal.size()<L)return frames;
+
+    static constexpr double kBandEdgesHz[]={120.0,500.0,2000.0,5000.0,12000.0};
+    OouraRfft2048Official rdft;
+    std::size_t startPos=0;const std::size_t finalStart=signal.size()-L;
+    for(;;){
+        const std::size_t p=std::min(startPos,finalStart);
+        std::vector<float> xframe(L);float mx=0.0f;
+        for(std::size_t i=0;i<L;++i){xframe[i]=signal[p+i];mx+=xframe[i];}
+        mx/=static_cast<float>(L);
+        std::vector<float> xf(kFft,0.0f);
+        for(std::size_t i=0;i<L;++i){const std::size_t j=i&(kFft-1);xf[j]+=(xframe[i]-mx)*wv[i];}
+        std::array<float,kBins> xr{},xi{};
+        rdft.run(xf,xr,xi);
+        std::array<double,6> bandSum{};
+        for(std::size_t k=0;k<kBins;++k){
+            const double hz=static_cast<double>(k)*sr/static_cast<double>(kFft);
+            std::size_t band=5;
+            for(std::size_t b=0;b<5;++b){if(hz<kBandEdgesHz[b]){band=b;break;}}
+            bandSum[band]+=static_cast<double>(xr[k])*static_cast<double>(xr[k])+static_cast<double>(xi[k])*static_cast<double>(xi[k]);
+        }
+        std::array<double,6> bandDb{};
+        for(std::size_t b=0;b<6;++b)bandDb[b]=10.0*std::log10(std::max(bandSum[b],1e-18));
+        frames.emplace_back(static_cast<double>(p)/sr,bandDb);
+        if(p==finalStart)break;
+        startPos+=hop;
+    }
+    return frames;
+}
+} // namespace
+
+// See native_converter.hpp's doc comment.
+bool runSpectrogramDiff(const fs::path& inputNam,
+                        const fs::path& candidateClo,
+                        const fs::path& playingClipWav,
+                        SpectrogramDiffResult& out,
+                        std::string& error,
+                        const StatusCallback& status){
+    out=SpectrogramDiffResult{};
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_spectrogram_diff_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(playingClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Spectrogram diff: rendering Full A2...");
+    std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
+    if(!renderNamOnSignal(fullModelPath,dry,fullA2Input,fullA2Output,fullA2Rate,stepError)){
+        error="Full A2 render failed: "+stepError;fs::remove_all(work,ec);return false;
+    }
+    const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+
+    report(status,L"Spectrogram diff: rendering candidate...");
+    std::vector<float> candOutput;
+    if(!renderCloOnSignal(candidateClo,dry,candOutput,error)){fs::remove_all(work,ec);return false;}
+    fs::remove_all(work,ec);
+
+    constexpr int kMaxLagSamples=256;
+    std::vector<float> alignedCand,alignedRef;
+    alignSignals(candOutput,fullA2At44100,kMaxLagSamples,alignedCand,alignedRef);
+    if(alignedCand.empty()||alignedRef.empty()){error="Clip too short to align.";return false;}
+
+    const auto refFrames=perFrameBandEnergyDb(alignedRef,44100.0);
+    const auto candFrames=perFrameBandEnergyDb(alignedCand,44100.0);
+    if(refFrames.empty()||candFrames.empty()){error="Clip too short for spectrogram framing.";return false;}
+
+    static constexpr const wchar_t* kBandLabels[6]={L"subBass",L"lowMid",L"mid",L"presence",L"high",L"air"};
+    const std::size_t nFrames=std::min(refFrames.size(),candFrames.size());
+    for(std::size_t f=0;f<nFrames;++f){
+        for(std::size_t b=0;b<6;++b){
+            SpectrogramDiffPoint p;
+            p.timeSec=refFrames[f].first;
+            p.bandLabel=kBandLabels[b];
+            p.fullA2Db=refFrames[f].second[b];
+            p.candidateDb=candFrames[f].second[b];
+            p.diffDb=p.candidateDb-p.fullA2Db;
+            out.points.push_back(p);
+        }
+    }
+    out.ok=true;
+    return true;
+}
+
+namespace {
+// Folds an arbitrary true frequency into the [0, sr/2] baseband that a signal sampled at
+// sr can actually represent -- the standard triangular aliasing fold. Valid for the NET
+// effect of any cascaded decimation chain ending at sr, not just a single decimation
+// stage, since it only depends on the final sample rate.
+double aliasFold(double hz,double sr){
+    double x=std::fmod(hz,sr);if(x<0.0)x+=sr;
+    if(x>sr/2.0)x=sr-x;
+    return x;
+}
+} // namespace
+
+// See native_converter.hpp's doc comment.
+bool runAliasingDiagnostic(const std::vector<double>& toneFrequenciesHz,
+                           const std::vector<double>& levelsDb,
+                           std::vector<AliasingDiagnosticPoint>& out,
+                           std::string& error,
+                           const StatusCallback& status){
+    out.clear();
+    if(toneFrequenciesHz.empty()||levelsDb.empty()){error="runAliasingDiagnostic: no tones/levels supplied.";return false;}
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/L"ntc_aliasing_diag";
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    // Near-identity A/B (exact 44.1kHz-domain impulses -- serializeGp5Compact's
+    // trainerRate==44100.0 identity-resample shortcut guarantees this precisely), real
+    // fixed Pre/Post, symmetric Pp=Pn/Kp=Kn P/K so the shaper alone is a purely-odd-
+    // harmonic nonlinearity by construction -- isolates the oversampling/decimation chain
+    // from A/B fitting and from P/K asymmetry entirely.
+    Model m;
+    m.A.assign(1,1.0f);
+    m.B.assign(1,1.0f);
+    m.pre=Biquad{};
+    m.post=postForRate(44100.0);
+    m.pk.pp=1.0f;m.pk.pn=1.0f;m.pk.kp=50.0f;m.pk.kn=50.0f;
+
+    const fs::path testClo=work/L"aliasing_test.clo";
+    if(!serializeGp5Compact(testClo,m,44100.0,error)){fs::remove_all(work,ec);return false;}
+
+    constexpr double kDurationS=3.0;
+    constexpr double kAnalysisSkipS=1.0;
+    constexpr int kMaxHarmonic=80;
+    constexpr double kNyquist=22050.0;
+
+    for(double toneHz:toneFrequenciesHz){
+        for(double levelDb:levelsDb){
+            report(status,L"Aliasing diagnostic: "+std::to_wstring(toneHz)+L"Hz at "+std::to_wstring(levelDb)+L"dB...");
+            const double amplitude=std::pow(10.0,levelDb/20.0);
+            const auto tone=generateSineTone(toneHz,amplitude,kDurationS,44100.0);
+
+            std::vector<float> output;std::string stepError;
+            if(!renderCloOnSignal(testClo,tone,output,stepError)){
+                report(status,L"Aliasing diagnostic: skipped "+std::to_wstring(toneHz)+L"Hz/"+std::to_wstring(levelDb)+L"dB (render failed).");
+                continue;
+            }
+
+            const std::size_t skipN=static_cast<std::size_t>(kAnalysisSkipS*44100.0);
+            std::vector<float> tail=output.size()>skipN
+                ?std::vector<float>(output.begin()+static_cast<std::ptrdiff_t>(skipN),output.end())
+                :output;
+            const auto spec=averagedMagnitudeSpectrum(tail,44100.0);
+            const float fund=peakNearHz(spec,toneHz,44100.0);
+            if(fund<=1e-12f){
+                report(status,L"Aliasing diagnostic: skipped "+std::to_wstring(toneHz)+L"Hz/"+std::to_wstring(levelDb)+L"dB (fundamental too weak to measure).");
+                continue;
+            }
+
+            for(int n=2;n<=kMaxHarmonic;++n){
+                const double trueHz=toneHz*static_cast<double>(n);
+                if(trueHz<kNyquist)continue; // in-band harmonic -- not this test's target, see doc comment
+                const double aliasedHz=aliasFold(trueHz,44100.0);
+                AliasingDiagnosticPoint p;
+                p.toneHz=toneHz;p.levelDb=levelDb;p.harmonicNumber=n;
+                p.trueHarmonicHz=trueHz;p.aliasedHz=aliasedHz;
+                const float mag=peakNearHz(spec,aliasedHz,44100.0);
+                p.aliasedMagnitudeDb=20.0*std::log10(std::max(mag,1e-12f)/fund);
+                out.push_back(p);
+            }
+        }
+    }
+
+    fs::remove_all(work,ec);
+    if(out.empty()){error="No aliasing points measured successfully.";return false;}
+    return true;
+}
+
+// See native_converter.hpp's doc comment. Reuses the AP/Poly structs (native_converter.cpp
+// ~L554-555) and the exact D1/D2 coefficient literals already wired into the real render
+// chain (~L787-788/L804-805) -- duplicated here rather than shared, since this
+// deliberately drives them in total isolation from everything else in that chain.
+bool runStageAliasingDiagnostic(const std::vector<double>& toneFractionsOfInputNyquist,
+                                std::vector<StageAliasingPoint>& out,
+                                std::string& error,
+                                const StatusCallback& status){
+    out.clear();
+    if(toneFractionsOfInputNyquist.empty()){error="runStageAliasingDiagnostic: no test fractions supplied.";return false;}
+
+    constexpr double kAmplitude=0.5;
+    constexpr double kDurationS=2.0;
+    constexpr double kSkipS=0.3;
+    constexpr double kCalibrationFraction=0.02; // a clearly in-band low-frequency reference tone
+
+    auto renderThroughStage=[&](double toneHz,double inputRate,Poly& stg)->std::vector<float>{
+        const auto x=generateSineTone(toneHz,kAmplitude,kDurationS,inputRate);
+        std::vector<float> y;y.reserve(x.size()/2);
+        for(std::size_t i=0;i+1<x.size();i+=2)y.push_back(stg.down(x[i],x[i+1]));
+        return y;
+    };
+
+    auto testStage=[&](const wchar_t* name,double inputRate,double outputRate,Poly stage)->bool{
+        const double inNyquist=inputRate/2.0;
+        const double outNyquist=outputRate/2.0;
+        const std::size_t skipN=static_cast<std::size_t>(kSkipS*outputRate);
+
+        Poly calStage=stage; // fresh copy, untouched state
+        const double calHz=kCalibrationFraction*inNyquist;
+        auto calOut=renderThroughStage(calHz,inputRate,calStage);
+        std::vector<float> calTail=calOut.size()>skipN?std::vector<float>(calOut.begin()+static_cast<std::ptrdiff_t>(skipN),calOut.end()):calOut;
+        const auto calSpec=averagedMagnitudeSpectrum(calTail,outputRate);
+        const float calMag=peakNearHz(calSpec,calHz,outputRate);
+        if(calMag<=1e-12f){error="Stage aliasing test: calibration tone too weak.";return false;}
+
+        for(double frac:toneFractionsOfInputNyquist){
+            const double toneHz=frac*inNyquist;
+            report(status,L"Stage aliasing test: "+std::wstring(name)+L" @ "+std::to_wstring(toneHz)+L"Hz ("+std::to_wstring(frac)+L" x input Nyquist)...");
+            Poly testStg=stage; // fresh copy per tone
+            auto y=renderThroughStage(toneHz,inputRate,testStg);
+            std::vector<float> tail=y.size()>skipN?std::vector<float>(y.begin()+static_cast<std::ptrdiff_t>(skipN),y.end()):y;
+            const auto spec=averagedMagnitudeSpectrum(tail,outputRate);
+
+            StageAliasingPoint p;
+            p.stage=name;p.toneHz=toneHz;p.inputRateHz=inputRate;p.outputRateHz=outputRate;
+            p.inBand=toneHz<outNyquist;
+            p.aliasedHz=aliasFold(toneHz,outputRate);
+            const double measureAt=p.inBand?toneHz:p.aliasedHz;
+            const float mag=peakNearHz(spec,measureAt,outputRate);
+            p.magnitudeDb=20.0*std::log10(std::max(mag,1e-12f)/calMag);
+            out.push_back(p);
+        }
+        return true;
+    };
+
+    const bool okD1=testStage(L"D1",176400.0,88200.0,
+        Poly({0.070765949785709381f,0.51316756010055542f},{0.25785309076309204f,0.81731736660003662f}));
+    const bool okD2=testStage(L"D2",88200.0,44100.0,
+        Poly({0.054217524826526642f,0.38308733701705933f,0.74872094392776489f},{0.19679796695709229f,0.57313638925552368f,0.91429370641708374f}));
+
+    if(!okD1&&!okD2){return false;}
+    if(out.empty()){error="No stage aliasing points measured successfully.";return false;}
+    return true;
+}
+
+// See native_converter.hpp's doc comment. Same reuse-not-share convention as
+// runStageAliasingDiagnostic: duplicates the AP/Poly structs' U1/U2 coefficient literals
+// (already wired into the real chain, native_converter.cpp ~L785-786/L802-803) rather than
+// sharing them, since this deliberately drives them in total isolation.
+bool runStageImagingDiagnostic(const std::vector<double>& toneFractionsOfInputNyquist,
+                               std::vector<StageImagingPoint>& out,
+                               std::string& error,
+                               const StatusCallback& status){
+    out.clear();
+    if(toneFractionsOfInputNyquist.empty()){error="runStageImagingDiagnostic: no test fractions supplied.";return false;}
+
+    constexpr double kAmplitude=0.5;
+    constexpr double kDurationS=2.0;
+    constexpr double kSkipS=0.3;
+    constexpr double kCalibrationFraction=0.02; // a clearly in-band low-frequency reference tone
+
+    auto renderThroughStage=[&](double toneHz,double inputRate,Poly& stg)->std::vector<float>{
+        const auto x=generateSineTone(toneHz,kAmplitude,kDurationS,inputRate);
+        std::vector<float> y;y.reserve(x.size()*2);
+        for(float xi:x){
+            float e=0.0f,o=0.0f;stg.up(xi,e,o);
+            y.push_back(e);y.push_back(o);
+        }
+        return y;
+    };
+
+    auto testStage=[&](const wchar_t* name,double inputRate,double outputRate,Poly stage)->bool{
+        const double inNyquist=inputRate/2.0;
+        const std::size_t skipN=static_cast<std::size_t>(kSkipS*outputRate);
+
+        Poly calStage=stage; // fresh copy, untouched state
+        const double calHz=kCalibrationFraction*inNyquist;
+        auto calOut=renderThroughStage(calHz,inputRate,calStage);
+        std::vector<float> calTail=calOut.size()>skipN?std::vector<float>(calOut.begin()+static_cast<std::ptrdiff_t>(skipN),calOut.end()):calOut;
+        const auto calSpec=averagedMagnitudeSpectrum(calTail,outputRate);
+        const float calMag=peakNearHz(calSpec,calHz,outputRate);
+        if(calMag<=1e-12f){error="Stage imaging test: calibration tone too weak.";return false;}
+
+        for(double frac:toneFractionsOfInputNyquist){
+            const double toneHz=frac*inNyquist;
+            report(status,L"Stage imaging test: "+std::wstring(name)+L" @ "+std::to_wstring(toneHz)+L"Hz ("+std::to_wstring(frac)+L" x input Nyquist)...");
+            Poly testStg=stage; // fresh copy per tone
+            auto y=renderThroughStage(toneHz,inputRate,testStg);
+            std::vector<float> tail=y.size()>skipN?std::vector<float>(y.begin()+static_cast<std::ptrdiff_t>(skipN),y.end()):y;
+            const auto spec=averagedMagnitudeSpectrum(tail,outputRate);
+
+            StageImagingPoint p;
+            p.stage=name;p.toneHz=toneHz;p.inputRateHz=inputRate;p.outputRateHz=outputRate;
+            p.imageHz=inputRate-toneHz;
+            const float passMag=peakNearHz(spec,toneHz,outputRate);
+            const float imgMag=peakNearHz(spec,p.imageHz,outputRate);
+            p.passthroughDb=20.0*std::log10(std::max(passMag,1e-12f)/calMag);
+            p.imageMagnitudeDb=20.0*std::log10(std::max(imgMag,1e-12f)/calMag);
+            out.push_back(p);
+        }
+        return true;
+    };
+
+    const bool okU1=testStage(L"U1",44100.0,88200.0,
+        Poly({0.045728147029876709f,0.3325011134147644f,0.66320204734802246f,0.93385583162307739f},{0.16808754205703735f,0.50448572635650635f,0.80378085374832153f}));
+    const bool okU2=testStage(L"U2",88200.0,176400.0,
+        Poly({0.054230779409408569f,0.39879697561264038f,0.86291784048080444f},{0.19969958066940308f,0.62109684944152832f}));
+
+    if(!okU1&&!okU2){return false;}
+    if(out.empty()){error="No stage imaging points measured successfully.";return false;}
+    return true;
+}
+
+namespace {
+constexpr std::array<double,10> kOctaveCenters={31.5,63.0,125.0,250.0,500.0,1000.0,2000.0,4000.0,8000.0,16000.0};
+
+// Bins averagedMagnitudeSpectrum's per-bin magnitude into the 10 ISO standard octave
+// bands (each spanning centerHz/sqrt(2) to centerHz*sqrt(2)) as summed POWER, for the
+// caller to average across clips before converting to dB -- averaging in the power
+// domain (not dB domain) across multiple clips is the correct way to combine them.
+std::array<double,10> octaveBandPower(const std::vector<float>& signal,double sr){
+    std::array<double,10> power{};
+    const auto spec=averagedMagnitudeSpectrum(signal,sr);
+    for(std::size_t k=0;k<spec.size();++k){
+        const double hz=static_cast<double>(k)*sr/static_cast<double>(kFft);
+        if(hz<=0.0)continue;
+        for(std::size_t b=0;b<kOctaveCenters.size();++b){
+            const double lo=kOctaveCenters[b]/1.4142135623730951;
+            const double hi=kOctaveCenters[b]*1.4142135623730951;
+            if(hz>=lo&&hz<hi){power[b]+=static_cast<double>(spec[k])*static_cast<double>(spec[k]);break;}
+        }
+    }
+    return power;
+}
+} // namespace
+
+// See native_converter.hpp's doc comment.
+bool runFrequencyResponseComparison(const fs::path& inputNam,
+                                    const fs::path& officialClo,
+                                    const std::vector<fs::path>& clips,
+                                    FrequencyResponseResult& out,
+                                    std::string& error,
+                                    const StatusCallback& status){
+    out=FrequencyResponseResult{};
+    if(clips.empty()){error="runFrequencyResponseComparison: no clips supplied.";return false;}
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_freqresp_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+
+    report(status,L"Frequency response: converting production candidate (Tone Match on)...");
+    NativeConverterConfig converter;
+    CloRefineConfig refine;refine.enabled=true;refine.referenceMode=ToneMatchReferenceMode::Auto;
+    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+        error=conversion.error.empty()?"Production conversion did not produce a GP-5/GP-50 output.":conversion.error;
+        fs::remove_all(work,ec);return false;
+    }
+    const fs::path productionClo=conversion.gp5gp50Compact;
+
+    report(status,L"Frequency response: converting no-Tone-Match candidate...");
+    CloRefineConfig refineOff;refineOff.enabled=false;
+    auto noToneMatch=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refineOff,converter,status);
+    if(!noToneMatch.ok||noToneMatch.gp5gp50Compact.empty()){
+        error=noToneMatch.error.empty()?"No-Tone-Match conversion did not produce a GP-5/GP-50 output.":noToneMatch.error;
+        fs::remove_all(work,ec);return false;
+    }
+    const fs::path noToneMatchClo=noToneMatch.gp5gp50Compact;
+    const bool hasOfficial=!officialClo.empty();
+
+    std::array<double,10> fullA2Power{},candPower{},noTmPower{},offPower{};
+    std::size_t count=0;
+    for(const auto& clipPath:clips){
+        report(status,L"Frequency response: rendering "+clipPath.filename().wstring()+L"...");
+        std::vector<float> dry;std::string stepError;
+        if(!loadClipAsMono44100(clipPath,dry,stepError))continue;
+        std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;
+        if(!renderNamOnSignal(fullModelPath,dry,fullA2Input,fullA2Output,fullA2Rate,stepError))continue;
+        const auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
+        std::vector<float> candOutput;
+        if(!renderCloOnSignal(productionClo,dry,candOutput,stepError))continue;
+        std::vector<float> noTmOutput;
+        if(!renderCloOnSignal(noToneMatchClo,dry,noTmOutput,stepError))continue;
+
+        const auto fa2p=octaveBandPower(fullA2At44100,44100.0);
+        const auto cp=octaveBandPower(candOutput,44100.0);
+        const auto ntp=octaveBandPower(noTmOutput,44100.0);
+        for(std::size_t b=0;b<10;++b){fullA2Power[b]+=fa2p[b];candPower[b]+=cp[b];noTmPower[b]+=ntp[b];}
+
+        if(hasOfficial){
+            std::vector<float> offOutput;
+            if(renderCloOnSignal(officialClo,dry,offOutput,stepError)){
+                const auto op=octaveBandPower(offOutput,44100.0);
+                for(std::size_t b=0;b<10;++b)offPower[b]+=op[b];
+            }
+        }
+        ++count;
+    }
+    if(count==0){error="No clips rendered successfully.";fs::remove_all(work,ec);return false;}
+
+    for(std::size_t b=0;b<10;++b){
+        FrequencyResponseBand band;
+        band.centerHz=kOctaveCenters[b];
+        const double fa2=fullA2Power[b]/static_cast<double>(count);
+        const double cd=candPower[b]/static_cast<double>(count);
+        const double ntm=noTmPower[b]/static_cast<double>(count);
+        band.fullA2Db=10.0*std::log10(std::max(fa2,1e-24));
+        band.candidateDb=10.0*std::log10(std::max(cd,1e-24));
+        band.noToneMatchDb=10.0*std::log10(std::max(ntm,1e-24));
+        if(hasOfficial){
+            const double od=offPower[b]/static_cast<double>(count);
+            band.officialDb=10.0*std::log10(std::max(od,1e-24));
+            band.hasOfficial=true;
+        }
+        out.bands.push_back(band);
+    }
+
+    fs::remove_all(work,ec);
+    out.ok=true;
     return true;
 }
 

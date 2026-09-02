@@ -34,6 +34,22 @@ struct CloRefineConfig {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
+// Reverse-engineered CloPlayer Gain/Volume UI-control-to-linear conversions (2026-09-02,
+// see CLAUDE.md's "full comparison" follow-up). CloPlayer applies a Gain stage BEFORE the
+// CLO core (changes nonlinear excitation) and a Volume stage AFTER it (pure output level);
+// its default visible controls are Gain=50, Volume=50 (see clo_refiner.cpp's
+// computeToneMatchCorrectionIr, which already uses these for its own CloPlayer-emulation
+// render chain). Exposed here (moved out of clo_refiner.cpp's anonymous namespace) so
+// native_converter.cpp's official-comparison tooling can test official SnapTone captures
+// at CloPlayer's actual default operating point instead of unity gain -- every existing
+// render path in this codebase (renderCloOnSignal, solveBlockBLeastSquares, etc.)
+// deliberately uses unity gain instead, on the reasoning that it reflects "the actual
+// device signal path" for OUR OWN conversions; whether that reasoning still holds for a
+// real official capture, which may have been fit assuming CloPlayer's default operating
+// point, is exactly the open question this exposes a way to test.
+float cloPlayerGainControlToLinear(float visibleControl);
+float cloPlayerVolumeControlToLinear(float visibleControl);
+
 // Analysis-only: computes the Tone Match minimum-phase correction filter for sourceClo
 // against targetWav (stimulusWav locates the final 20-second analysis window), without
 // writing or modifying any CLO. parseModel() reads A/B tap counts from the CLO header
@@ -248,6 +264,14 @@ struct PkDynamicsResult {
     double optimizedMaxDynamicsErrorDb = 0.0, optimizedRmsDynamicsErrorDb = 0.0, optimizedSpectralEsr = 0.0;   // winner, scored on selectionLevelClips (the acceptance signal)
     double benchmarkMaxDynamicsErrorDb = 0.0, benchmarkRmsDynamicsErrorDb = 0.0, benchmarkSpectralEsr = 0.0;   // winner, scored on benchmarkLevelClips (never seen during search)
     double benchmarkInitialMaxDynamicsErrorDb = 0.0, benchmarkInitialRmsDynamicsErrorDb = 0.0, benchmarkInitialSpectralEsr = 0.0; // sourceClo as-shipped, scored on benchmarkLevelClips, for a fair benchmark-vs-benchmark comparison
+
+    // Frequency-domain shape-loss counterpart to the *SpectralEsr fields above (2026-09-02,
+    // see CLAUDE.md) -- added because raw time-domain ESR let a P/K change through (JCM800
+    // Edge of Breakup) that nominally improved dynamics tracking while roughly doubling
+    // held-out normalized spectral loss. A round is now also rejected if this regresses,
+    // alongside the existing ESR/dynamics safety floors -- see spectralShapeLoss in
+    // clo_refiner.cpp.
+    double initialSpectralShape = 0.0, optimizedSpectralShape = 0.0, benchmarkSpectralShape = 0.0, benchmarkInitialSpectralShape = 0.0;
 };
 
 PkDynamicsResult searchPkForDynamics(const fs::path& sourceClo,
@@ -290,6 +314,12 @@ bool renderPreBOnSignal(const fs::path& sourceClo,
                         const std::vector<float>& inputSignal44100,
                         std::vector<float>& outputPreB44100,
                         std::string& error);
+
+// Reads back sourceClo's own Block B (the raw 44.1kHz device-domain array, whatever tap
+// count the file declares) without rendering anything -- for a caller (e.g. the EQ Match
+// experiment in native_converter.cpp) that needs to convolve a correction IR into an
+// EXISTING shipped B rather than solve a new one from scratch.
+bool readB44FromClo(const fs::path& sourceClo, std::vector<float>& outB, std::string& error);
 
 // Writes samples as mono PCM16 44.1kHz WAV -- for exporting comparison
 // renders (e.g. runPkDynamicsAudition below) to listen to directly, not
