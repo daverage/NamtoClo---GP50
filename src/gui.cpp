@@ -1415,6 +1415,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (r->ok) {
                 SendMessageW(gGp5Progress, PBM_SETPOS, 146, 0);
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
+                refreshGp5CatalogueAsync(hwnd);
             } else {
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONERROR);
             }
