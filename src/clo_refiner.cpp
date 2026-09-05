@@ -26,7 +26,9 @@ constexpr std::size_t kPreferredFftSize = 32768;
 // visible Gain=50 and Volume=50.
 constexpr float kToneMatchGainControl = 50.0f;
 constexpr float kToneMatchVolumeControl = 50.0f;
+} // namespace
 
+// See clo_refiner.hpp's doc comment.
 float cloPlayerGainControlToLinear(float visibleControl) {
     constexpr float uiToInternalSlope  = 0.69311597f;
     constexpr float uiToInternalOffset = 25.201331f;
@@ -42,6 +44,7 @@ float cloPlayerVolumeControlToLinear(float control) {
     return std::exp(offset + control * slope);
 }
 
+namespace {
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
 std::uint32_t le32(const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24); }
 float lef(const std::uint8_t* p) { auto u=le32(p); float v{}; std::memcpy(&v,&u,4); return v; }
@@ -400,6 +403,55 @@ void solveBlockBFromPreB(const std::vector<float>& preBTail, const std::vector<f
     for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
 }
 
+} // namespace
+
+// See clo_refiner.hpp's doc comment.
+bool solveBlockBWeighted(const std::vector<float>& preBTail,
+                          const std::vector<float>& targetTail,
+                          std::size_t bTaps,
+                          double sampleRate,
+                          const std::function<double(double)>& regularizationScaleDbForHz,
+                          std::vector<float>& outB,
+                          std::string& error) {
+    if (preBTail.empty() || targetTail.empty()) { error = "solveBlockBWeighted: empty input."; return false; }
+    if (bTaps == 0) { error = "solveBlockBWeighted: bTaps is zero."; return false; }
+
+    const std::size_t tailFrames = preBTail.size();
+    const std::size_t fftSize = nextPow2(tailFrames + bTaps);
+    std::vector<std::complex<float>> P(fftSize), T(fftSize);
+    for (std::size_t i = 0; i < tailFrames; ++i) {
+        P[i] = std::complex<float>(preBTail[i], 0.0f);
+        T[i] = std::complex<float>(i < targetTail.size() ? targetTail[i] : 0.0f, 0.0f);
+    }
+    fft(P, false);
+    fft(T, false);
+
+    double powerSum = 0.0;
+    for (const auto& v : P) powerSum += static_cast<double>(std::norm(v));
+    const float meanPower = static_cast<float>(powerSum / static_cast<double>(fftSize));
+    constexpr float kRegularization = 1e-3f;
+    const float eps0 = std::max(kRegularization * meanPower, 1e-20f);
+
+    std::vector<std::complex<float>> H(fftSize);
+    for (std::size_t k = 0; k < fftSize; ++k) {
+        // Real-signal FFT is conjugate-symmetric; fold bins above Nyquist back onto
+        // [0, fftSize/2] so a bin and its mirror always get the same regularization.
+        const std::size_t kFold = std::min(k, fftSize - k);
+        const double hz = static_cast<double>(kFold) * sampleRate / static_cast<double>(fftSize);
+        const double scaleDb = regularizationScaleDbForHz ? regularizationScaleDbForHz(hz) : 0.0;
+        const float eps = std::max(eps0 * static_cast<float>(std::pow(10.0, -scaleDb / 10.0)), 1e-20f);
+        const float power = std::norm(P[k]);
+        H[k] = std::conj(P[k]) * T[k] / (power + eps);
+    }
+    fft(H, true);
+
+    outB.assign(bTaps, 0.0f);
+    for (std::size_t i = 0; i < bTaps; ++i) outB[i] = H[i].real();
+    return true;
+}
+
+namespace {
+
 // Generalizes solveBlockBFromPreB above to N simultaneous (preB, target)
 // pairs at different gain levels, weighted by wi (already normalized to sum
 // to 1 by the caller): H = (sum wi*conj(Pi)*Ti) / (sum wi*|Pi|^2 + eps).
@@ -487,6 +539,46 @@ double esrLoss(const std::vector<float>& rendered, const std::vector<float>& tar
         den += static_cast<double>(target[i]) * static_cast<double>(target[i]);
     }
     return den > 1e-30 ? num / den : 0.0;
+}
+
+// Frequency-domain, RMS-normalized log-magnitude-ratio loss (2026-09-02, see CLAUDE.md).
+// Added because esrLoss's time-domain sample-wise error let searchPkForDynamics accept a
+// P/K change (JCM800 Edge of Breakup) that nominally improved dynamics tracking while
+// roughly DOUBLING held-out normalized spectral loss -- a real regression esrLoss's own
+// acceptance gate had no way to see. This is a simpler, single-FFT (not windowed/
+// overlapped) cousin of native_converter.cpp's ratioSpectrumF/lossFromRatioF (duplicated
+// here rather than shared, same reason Model/PK already are between the two files) --
+// close enough to catch the same class of regression without pulling in that file's
+// STFT/Hamming/Ooura machinery. RMS-normalizes `rendered` to `target` first (a pure scalar
+// gain, so it isolates SHAPE from any absolute-level difference) exactly like
+// native_converter.cpp's rmsNormalizeToReference does before its own spectral-loss checks.
+double spectralShapeLoss(const std::vector<float>& rendered, const std::vector<float>& target) {
+    const std::size_t n = std::min(rendered.size(), target.size());
+    if (n < 2) return 0.0;
+
+    double renderedSumSq = 0.0, targetSumSq = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        renderedSumSq += static_cast<double>(rendered[i]) * static_cast<double>(rendered[i]);
+        targetSumSq += static_cast<double>(target[i]) * static_cast<double>(target[i]);
+    }
+    if (renderedSumSq < 1e-30 || targetSumSq < 1e-30) return 0.0;
+    const float gain = static_cast<float>(std::sqrt(targetSumSq / renderedSumSq));
+
+    const std::size_t fftSize = nextPow2(n);
+    std::vector<std::complex<float>> R(fftSize), T(fftSize);
+    for (std::size_t i = 0; i < n; ++i) { R[i] = rendered[i] * gain; T[i] = target[i]; }
+    fft(R, false); fft(T, false);
+
+    double sum = 0.0; std::size_t count = 0;
+    for (std::size_t k = 0; k < fftSize / 2; ++k) {
+        const double tm = std::abs(T[k]);
+        if (tm < 1e-4) continue; // skip bins with negligible target energy -- ratio there is meaningless noise
+        const double rm = std::abs(R[k]);
+        const double logRatio = std::log(std::max(rm, 1e-6) / tm);
+        sum += logRatio * logRatio;
+        ++count;
+    }
+    return count > 0 ? std::sqrt(sum / static_cast<double>(count)) : 0.0;
 }
 
 } // namespace
@@ -710,7 +802,7 @@ bool sweepKAndSolveSharedB(const fs::path& sourceClo,
 }
 
 namespace {
-struct LevelClipScore { double maxErrDb = 0.0, rmsErrDb = 0.0, esr = 0.0; };
+struct LevelClipScore { double maxErrDb = 0.0, rmsErrDb = 0.0, esr = 0.0, spectralShape = 0.0; };
 
 // Renders levelClips through (candidate, b) using precomputed aouts (Pre->A
 // is unaffected by Pp/Pn/Kp/Kn, so the caller computes these once and reuses
@@ -723,16 +815,18 @@ LevelClipScore scoreOnLevelClips(const Model& candidate, const std::vector<float
     LevelClipScore s;
     if (levelClips.empty()) return s;
     std::vector<double> renderedDb(levelClips.size()), targetDb(levelClips.size());
-    double esrSum = 0.0;
+    double esrSum = 0.0, shapeSum = 0.0;
     for (std::size_t i = 0; i < levelClips.size(); ++i) {
         std::vector<float> preB, rendered;
         renderPreB(candidate, aouts[i], candidate.pp, candidate.pn, candidate.kp, candidate.kn, preB);
         renderWithB(preB, b, rendered, 1.0f);
         esrSum += esrLoss(rendered, levelClips[i].target44100);
+        shapeSum += spectralShapeLoss(rendered, levelClips[i].target44100);
         renderedDb[i] = rmsDb(rendered);
         targetDb[i] = rmsDb(levelClips[i].target44100);
     }
     s.esr = esrSum / static_cast<double>(levelClips.size());
+    s.spectralShape = shapeSum / static_cast<double>(levelClips.size());
 
     std::size_t zeroIdx = 0; double bestDist = std::numeric_limits<double>::max();
     for (std::size_t i = 0; i < levelClips.size(); ++i) {
@@ -826,15 +920,18 @@ PkDynamicsResult searchPkForDynamics(const fs::path& sourceClo,
     r.initialMaxDynamicsErrorDb = bestSelectionScore.maxErrDb;
     r.initialRmsDynamicsErrorDb = bestSelectionScore.rmsErrDb;
     r.initialSpectralEsr = bestSelectionScore.esr;
+    r.initialSpectralShape = bestSelectionScore.spectralShape;
     const auto initialBenchmarkScore = scoreOnLevelClips(best, bestB, benchmarkLevelClips, benchmarkAouts);
     r.benchmarkInitialMaxDynamicsErrorDb = initialBenchmarkScore.maxErrDb;
     r.benchmarkInitialRmsDynamicsErrorDb = initialBenchmarkScore.rmsErrDb;
     r.benchmarkInitialSpectralEsr = initialBenchmarkScore.esr;
+    r.benchmarkInitialSpectralShape = initialBenchmarkScore.spectralShape;
 
     if (status) {
         std::wostringstream os;
         os << L"P/K dynamics search: baseline selection maxErr=" << bestSelectionScore.maxErrDb
-           << L" rmsErr=" << bestSelectionScore.rmsErrDb << L" esr=" << bestSelectionScore.esr;
+           << L" rmsErr=" << bestSelectionScore.rmsErrDb << L" esr=" << bestSelectionScore.esr
+           << L" spectralShape=" << bestSelectionScore.spectralShape;
         status(os.str());
     }
 
@@ -873,6 +970,22 @@ PkDynamicsResult searchPkForDynamics(const fs::path& sourceClo,
                 // more than 10% past the current best's worst level, even if
                 // the combined/RMS score looks better.
                 if (selScore.maxErrDb > bestSelectionScore.maxErrDb * 1.1) continue;
+                // Second safety floor, first attempt (2026-09-02): gating on esr not
+                // regressing >10% was tried here first and VERIFIED (byte-identical
+                // re-run) to change nothing on the JCM800 Edge of Breakup regression --
+                // the winning round already satisfied it. esrLoss is a raw time-domain
+                // sample-wise metric over the search's own 6-level selection clip; it
+                // just isn't sensitive enough to the kind of spectral-shape regression
+                // (normalized spectral loss roughly doubled on a DIFFERENT held-out clip)
+                // that actually happened. Left in as a real, if weaker, floor.
+                if (selScore.esr > bestSelectionScore.esr * 1.1) continue;
+                // Third safety floor (2026-09-02, the one that actually matters): a
+                // frequency-domain, RMS-normalized shape loss (spectralShapeLoss) on the
+                // SAME selection clip -- closer in kind to the normalized_spectral_loss
+                // metric that caught the original regression externally. A round is
+                // rejected if this regresses past the same 10% tolerance, independent of
+                // whatever the dynamics side of `combined` says.
+                if (selScore.spectralShape > bestSelectionScore.spectralShape * 1.1) continue;
                 if (combined < bestCombined) {
                     bestCombined = combined;
                     bestFieldValue = candidateValue;
@@ -902,11 +1015,13 @@ PkDynamicsResult searchPkForDynamics(const fs::path& sourceClo,
     r.optimizedMaxDynamicsErrorDb = bestSelectionScore.maxErrDb;
     r.optimizedRmsDynamicsErrorDb = bestSelectionScore.rmsErrDb;
     r.optimizedSpectralEsr = bestSelectionScore.esr;
+    r.optimizedSpectralShape = bestSelectionScore.spectralShape;
 
     const auto benchmarkScore = scoreOnLevelClips(best, bestB, benchmarkLevelClips, benchmarkAouts);
     r.benchmarkMaxDynamicsErrorDb = benchmarkScore.maxErrDb;
     r.benchmarkRmsDynamicsErrorDb = benchmarkScore.rmsErrDb;
     r.benchmarkSpectralEsr = benchmarkScore.esr;
+    r.benchmarkSpectralShape = benchmarkScore.spectralShape;
 
     r.ok = true;
     return r;
@@ -949,6 +1064,30 @@ bool renderCloWithOverrideOnSignal(const fs::path& sourceClo,
     std::vector<float> preB;
     renderPreB(m, aout, pp, pn, kp, kn, preB);
     renderWithB(preB, b, outputSignal44100, 1.0f);
+    return true;
+}
+
+bool renderPreBOnSignal(const fs::path& sourceClo,
+                        const std::vector<float>& inputSignal44100,
+                        std::vector<float>& outputPreB44100,
+                        std::string& error) {
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return false;
+
+    Model m;
+    if (!parseModel(bytes, m, error)) return false;
+
+    auto aout = precomputeA(m, inputSignal44100, inputSignal44100.size(), 1.0f);
+    renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, outputPreB44100);
+    return true;
+}
+
+bool readB44FromClo(const fs::path& sourceClo, std::vector<float>& outB, std::string& error) {
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(sourceClo, bytes, error)) return false;
+    Model m;
+    if (!parseModel(bytes, m, error)) return false;
+    outB = m.B;
     return true;
 }
 

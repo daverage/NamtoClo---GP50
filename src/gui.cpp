@@ -68,8 +68,6 @@ constexpr int IDC_GP5_UPLOAD = 136;
 constexpr int IDC_GP5_DEVICE = 137;
 constexpr int IDC_GP5_PROGRESS = 138;
 constexpr int IDC_REFINE_MODE = 139;
-constexpr int IDC_DYNAMICS_AWARE = 140;
-
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
 constexpr COLORREF kColorBorder = RGB(220, 226, 235);
@@ -131,7 +129,6 @@ HWND gRefineCheck = nullptr;
 HWND gRefineModeCombo = nullptr;
 HWND gRefineTargetEdit = nullptr;
 HWND gBrowseRefineTargetButton = nullptr;
-HWND gDynamicsAwareCheck = nullptr;
 HWND gVersion = nullptr;
 HWND gInfo = nullptr;
 HWND gSubtitle = nullptr;
@@ -259,7 +256,7 @@ void showConversionUi(HWND hwnd, bool show) {
         gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
         gConvertButton, gOpenButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
         gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineCheck,
-        gRefineModeCombo, gRefineTargetEdit, gBrowseRefineTargetButton, gDynamicsAwareCheck, gInfo
+        gRefineModeCombo, gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
     };
     for (HWND h : controls) showControl(h, show);
     for (int id : {1002,1003,1005,1006,1008,1009,1010})
@@ -383,7 +380,6 @@ void enableControls(bool enable) {
         EnableWindow(gRefineModeCombo, FALSE);
         EnableWindow(gRefineTargetEdit, FALSE);
         EnableWindow(gBrowseRefineTargetButton, FALSE);
-        EnableWindow(gDynamicsAwareCheck, FALSE);
     }
     if (!enable) {
         EnableWindow(gRecordedEdit, FALSE);
@@ -553,16 +549,6 @@ void updateTailControls() {
     const bool refineCustom = refineModeSel == 6; // "Custom WAV..." is the last item
     EnableWindow(gRefineTargetEdit, (refineEnabled && refineCustom) ? TRUE : FALSE);
     EnableWindow(gBrowseRefineTargetButton, (refineEnabled && refineCustom) ? TRUE : FALSE);
-    // Dynamics-aware fitting only does anything when Tone Match has a real
-    // reference clip to measure against (bundled Auto/Clean/Moderate/High/
-    // Bass modes, or Custom with a file already chosen) -- Default mode has
-    // no reference clip, so the gate never fires (see convertNamToClo's
-    // dynamics-aware fitting gate). Greyed out rather than hidden so the
-    // control's own tooltip/label still explains why.
-    const bool refineHasReferenceClip = refineEnabled
-        && (refineModeSel != 0)  // not Default
-        && (!refineCustom || !getText(gRefineTargetEdit).empty());
-    EnableWindow(gDynamicsAwareCheck, refineHasReferenceClip ? TRUE : FALSE);
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -622,8 +608,13 @@ void startConversion(HWND hwnd) {
     }
 
     enableControls(false);
+    // dynamicsAwareFitting stays at its default (false) -- see CLAUDE.md's "CoreRevert"
+    // pass: hardware listening + the --valeton-comparison tooling found this experimental
+    // P/K search regresses fidelity on at least one amp for no measured benefit elsewhere,
+    // so the GUI no longer exposes a control for it. searchPkForDynamics() itself and the
+    // --pk-dynamics-search/--pk-dynamics-audition headless flags remain available for
+    // research.
     ntc::NativeConverterConfig nativeConfig;
-    nativeConfig.dynamicsAwareFitting = SendMessageW(gDynamicsAwareCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (gInputMode == InputMode::SingleNam) {
         setText(gStatus, L"Starting conversion...");
         std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
@@ -793,7 +784,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
     gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionCorrective = RECT{ margin, y, clientW - margin, y + 86 }; y += 86 + gap;
-    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 134 }; y += 134 + gap;
+    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 114 }; y += 114 + gap;
     gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
     const int footerTop = std::max(clientH - footerH, static_cast<int>(gUi.buttonArea.bottom) + 16);
     gUi.footer = RECT{ 0, footerTop, clientW, std::max(clientH, footerTop + footerH) };
@@ -859,8 +850,6 @@ void layoutControls(HWND hwnd) {
     const int refineTargetEditW = (gUi.sectionRefine.right - sectionRightInset - 124 - 8) - refineTargetEditX;
     moveCtrl(gRefineTargetEdit, refineTargetEditX, gUi.sectionRefine.top + 78, refineTargetEditW, 28);
     moveCtrl(gBrowseRefineTargetButton, gUi.sectionRefine.right - sectionRightInset - 124, gUi.sectionRefine.top + 76, 124, 32);
-    moveCtrl(gDynamicsAwareCheck, contentX, gUi.sectionRefine.top + 108,
-             (gUi.sectionRefine.right - sectionRightInset) - contentX, 22);
 
     const int center = rc.right / 2;
     moveCtrl(gConvertButton, center - 222, gUi.buttonArea.top, 200, 36);
@@ -1001,13 +990,6 @@ void createUi(HWND hwnd) {
     gBrowseRefineTargetButton = CreateWindowW(L"BUTTON", L"Browse WAV...",
                                                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                0, 0, 124, 32, hwnd, controlId(IDC_BROWSE_REFINE_TARGET), nullptr, nullptr);
-
-    gDynamicsAwareCheck = CreateWindowW(L"BUTTON",
-                                        L"Dynamics-aware fitting for high/extreme-gain amps (adds up to ~2 min when it measurably helps)",
-                                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                        0, 0, 560, 24, hwnd, controlId(IDC_DYNAMICS_AWARE), nullptr, nullptr);
-    applyFont(gDynamicsAwareCheck);
-    SendMessageW(gDynamicsAwareCheck, BM_SETCHECK, BST_CHECKED, 0); // on by default, matches NativeConverterConfig::dynamicsAwareFitting
 
     createSectionLabel(hwnd, 1011, L"GP-200 CLO (.clo, 1024-tap)");
     createSectionLabel(hwnd, 1012, L"Destination SnapTone slot");
@@ -1433,6 +1415,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (r->ok) {
                 SendMessageW(gGp5Progress, PBM_SETPOS, 146, 0);
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
+                refreshGp5CatalogueAsync(hwnd);
             } else {
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONERROR);
             }
@@ -2063,6 +2046,640 @@ bool runHeadlessGp5MultiLevelVerifyIfRequested(int& exitCode) {
     LocalFree(argv);
     return handled;
 }
+
+// Shared by --valeton-comparison and --multiclip-b512: writes the per-level CSV and the
+// per-band EQ CSV for a set of ValetonComparisonResult candidates, plus a console summary.
+void writeValetonComparisonResults(const fs::path& outputDir, const std::wstring& baseName,
+                                    const std::vector<ntc::ValetonComparisonResult>& results) {
+    std::error_code ec;
+    fs::create_directories(outputDir, ec);
+    const fs::path outputCsv = outputDir / (baseName + L"_valeton_comparison.csv");
+    std::wofstream csv(outputCsv);
+    csv << L"candidate,level_db,full_a2_abs_rms_db,candidate_abs_rms_db,absolute_gain_error_db,"
+           L"relative_error_db,normalized_spectral_loss,aligned_esr,correlation\n";
+    const fs::path bandCsvPath = outputDir / (baseName + L"_valeton_comparison_eq.csv");
+    std::wofstream bandCsv(bandCsvPath);
+    bandCsv << L"candidate,source,sub_bass_lt120hz_pct,low_mid_120_500hz_pct,mid_500_2000hz_pct,"
+               L"presence_2000_5000hz_pct,high_5000_12000hz_pct,air_gt12000hz_pct\n";
+    for (const auto& r : results) {
+        std::wcout << L"\nCandidate \"" << r.label << L"\": ";
+        if (!r.ok) {
+            std::wcout << L"FAILED (" << ntc::fromUtf8(r.error) << L")\n";
+            csv << r.label << L",,,,,,,\"" << ntc::fromUtf8(r.error) << L"\"\n";
+            continue;
+        }
+        std::wcout << L"pk=(" << r.pkPp << L"," << r.pkPn << L"," << r.pkKp << L"," << r.pkKn << L")\n";
+        std::wcout << L"  mean absolute gain error=" << r.meanAbsoluteGainErrorDb << L"dB, max relative error="
+                   << r.maxRelativeErrorDb << L"dB, rms relative error=" << r.rmsRelativeErrorDb << L"dB\n";
+        std::wcout << L"  mean normalized spectral loss=" << r.meanNormalizedSpectralLoss
+                   << L", mean aligned ESR=" << r.meanAlignedEsr << L", mean correlation=" << r.meanCorrelation << L"\n";
+        std::wcout << L"  mean held-out ESR=" << r.meanHeldOutEsr << L"\n";
+        const auto& cb = r.meanBandEnergyPercent;
+        const auto& fb = r.fullA2MeanBandEnergyPercent;
+        std::wcout << L"  EQ (RMS-matched+aligned, % of energy) candidate: bass=" << cb.subBassPercent
+                   << L" low-mid=" << cb.lowMidPercent << L" mid=" << cb.midPercent
+                   << L" presence=" << cb.presencePercent << L" high=" << cb.highPercent << L"\n";
+        std::wcout << L"  EQ full_a2 (same held-out clips):        bass=" << fb.subBassPercent
+                   << L" low-mid=" << fb.lowMidPercent << L" mid=" << fb.midPercent
+                   << L" presence=" << fb.presencePercent << L" high=" << fb.highPercent << L"\n";
+        for (const auto& p : r.levels) {
+            csv << r.label << L"," << p.levelDb << L"," << p.fullA2AbsoluteRmsDb << L"," << p.candidateAbsoluteRmsDb << L","
+                << p.absoluteGainErrorDb << L"," << p.relativeErrorDb << L"," << p.normalizedSpectralLoss << L","
+                << p.alignedEsr << L"," << p.correlation << L"\n";
+        }
+        bandCsv << r.label << L",candidate," << cb.subBassPercent << L"," << cb.lowMidPercent << L","
+                << cb.midPercent << L"," << cb.presencePercent << L"," << cb.highPercent << L"," << cb.airPercent << L"\n";
+        bandCsv << r.label << L",full_a2," << fb.subBassPercent << L"," << fb.lowMidPercent << L","
+                << fb.midPercent << L"," << fb.presencePercent << L"," << fb.highPercent << L"," << fb.airPercent << L"\n";
+    }
+    std::wcout << L"\nWrote " << outputCsv.wstring() << L"\nWrote " << bandCsvPath.wstring() << L"\n";
+}
+
+// "CoreRevert" pass (2026-09-01): compares the Valeton-style baseline,
+// target-production, and current-experimental GP-5/GP-50 candidates -- see
+// ntc::runValetonComparisonExperiment's doc comment in native_converter.hpp.
+bool runHeadlessValetonComparisonIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 4 && std::wstring(argv[1]) == L"--valeton-comparison") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path diClipWav = argv[3];
+        const fs::path outputDir = argv[4];
+        std::vector<fs::path> heldOutClips;
+        for (int i = 5; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"Valeton comparison: " << inputNam.wstring() << L"\n";
+        std::vector<ntc::ValetonComparisonResult> results;
+        std::string error;
+        if (ntc::runValetonComparisonExperiment(inputNam, diClipWav, heldOutClips, results, error,
+                                                 [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            writeValetonComparisonResults(outputDir, inputNam.stem().wstring(), results);
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Scores a real official SnapTone capture with the exact same methodology
+// --valeton-comparison uses for our own candidates -- see
+// ntc::runOfficialCandidateComparison's doc comment in native_converter.hpp. Usage:
+// --official-candidate-comparison <nam> <officialClo> <diClipWav> <outputDir>
+// <heldOutClip1> [heldOutClip2...] [--cloplayer-gain]
+// Trailing --cloplayer-gain applies CloPlayer's default Gain=50/Volume=50
+// operating point (see ntc::cloPlayerGainControlToLinear/cloPlayerVolumeControlToLinear
+// in clo_refiner.hpp) to the official CLO's render instead of unity gain, to test
+// whether official SnapTone files were authored assuming that default rather than 0dB.
+bool runHeadlessOfficialCandidateComparisonIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 6 && std::wstring(argv[1]) == L"--official-candidate-comparison") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path officialClo = argv[3];
+        const fs::path diClipWav = argv[4];
+        const fs::path outputDir = argv[5];
+        std::vector<fs::path> heldOutClips;
+        bool useCloPlayerGain = false;
+        for (int i = 6; i < argc; ++i) {
+            if (std::wstring(argv[i]) == L"--cloplayer-gain") { useCloPlayerGain = true; continue; }
+            heldOutClips.emplace_back(argv[i]);
+        }
+        float inputGain = 1.0f, outputGain = 1.0f;
+        std::wstring label = inputNam.stem().wstring() + L"_official";
+        if (useCloPlayerGain) {
+            inputGain = ntc::cloPlayerGainControlToLinear(50.0f);
+            outputGain = ntc::cloPlayerVolumeControlToLinear(50.0f);
+            label += L"_cloplayergain";
+            std::wcout << L"Using CloPlayer default Gain/Volume: input=" << inputGain
+                       << L" output=" << outputGain << L"\n";
+        }
+        std::wcout << L"Official candidate comparison: " << inputNam.wstring() << L"\n";
+        ntc::ValetonComparisonResult result;
+        std::string error;
+        if (ntc::runOfficialCandidateComparison(inputNam, officialClo, diClipWav, heldOutClips, result, error,
+                                                 [](const std::wstring& s) { std::wcout << s << L"\n"; },
+                                                 inputGain, outputGain)) {
+            std::vector<ntc::ValetonComparisonResult> results = { result };
+            writeValetonComparisonResults(outputDir, label, results);
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// THD-per-level sweep -- see ntc::runThdLevelSweep's doc comment in native_converter.hpp.
+// Usage: --thd-level-sweep <nam> <candidateClo> <outputCsv>. Fundamentals are fixed
+// (82.41, 110, 164.81, 220, 329.63, 440 Hz -- guitar low-E through high-A range) rather
+// than parsed from argv.
+bool runHeadlessThdLevelSweepIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 5 && std::wstring(argv[1]) == L"--thd-level-sweep") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path candidateClo = argv[3];
+        const fs::path outputCsv = argv[4];
+        std::wcout << L"THD level sweep: " << inputNam.wstring() << L"\n";
+        const std::vector<double> fundamentals = { 82.41, 110.0, 164.81, 220.0, 329.63, 440.0 };
+        ntc::ThdLevelSweepResult result;
+        std::string error;
+        if (ntc::runThdLevelSweep(inputNam, candidateClo, fundamentals, result, error,
+                                   [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"fundamental_hz,level_db,full_a2_thd_percent,candidate_thd_percent,thd_error_percent\n";
+            for (const auto& p : result.points) {
+                csv << p.fundamentalHz << L"," << p.levelDb << L"," << p.fullA2ThdPercent << L","
+                    << p.candidateThdPercent << L"," << p.thdErrorPercent << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << result.points.size() << L" points)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Envelope/crest-factor diagnostic -- see ntc::runEnvelopeDiagnostic's doc comment in
+// native_converter.hpp. Usage: --envelope-diagnostic <nam> <candidateClo> <playingClipWav>
+// <outputCsv>.
+bool runHeadlessEnvelopeDiagnosticIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 6 && std::wstring(argv[1]) == L"--envelope-diagnostic") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path candidateClo = argv[3];
+        const fs::path playingClipWav = argv[4];
+        const fs::path outputCsv = argv[5];
+        std::wcout << L"Envelope diagnostic: " << inputNam.wstring() << L"\n";
+        ntc::EnvelopeDiagnosticResult result;
+        std::string error;
+        if (ntc::runEnvelopeDiagnostic(inputNam, candidateClo, playingClipWav, result, error,
+                                        [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wcout << L"Crest factor: Full A2=" << result.fullA2CrestFactorDb << L"dB candidate="
+                       << result.candidateCrestFactorDb << L"dB error=" << result.crestFactorErrorDb << L"dB\n";
+            std::wcout << L"Envelope error: mean_abs=" << result.meanAbsEnvelopeErrorDb << L"dB rms="
+                       << result.rmsEnvelopeErrorDb << L"dB\n";
+            std::wofstream csv(outputCsv);
+            csv << L"time_sec,full_a2_envelope_db,candidate_envelope_db,envelope_error_db\n";
+            for (const auto& p : result.points) {
+                csv << p.timeSec << L"," << p.fullA2EnvelopeDb << L"," << p.candidateEnvelopeDb << L","
+                    << p.envelopeErrorDb << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << result.points.size() << L" points)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Time-varying per-band EQ diff -- see ntc::runSpectrogramDiff's doc comment in
+// native_converter.hpp. Usage: --spectrogram-diff <nam> <candidateClo> <playingClipWav>
+// <outputCsv>.
+bool runHeadlessSpectrogramDiffIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 6 && std::wstring(argv[1]) == L"--spectrogram-diff") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path candidateClo = argv[3];
+        const fs::path playingClipWav = argv[4];
+        const fs::path outputCsv = argv[5];
+        std::wcout << L"Spectrogram diff: " << inputNam.wstring() << L"\n";
+        ntc::SpectrogramDiffResult result;
+        std::string error;
+        if (ntc::runSpectrogramDiff(inputNam, candidateClo, playingClipWav, result, error,
+                                     [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"time_sec,band,full_a2_db,candidate_db,diff_db\n";
+            for (const auto& p : result.points) {
+                csv << p.timeSec << L"," << p.bandLabel << L"," << p.fullA2Db << L"," << p.candidateDb << L","
+                    << p.diffDb << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << result.points.size() << L" points)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// EQ-match follow-up -- see ntc::runMultiClipB512Experiment's doc comment in
+// native_converter.hpp. Usage: --multiclip-b512 <nam> <diClipWav> <outputDir>
+// <fitClip1> <fitClip2> <fitClip3> <heldOutClip1> [heldOutClip2...]
+bool runHeadlessMultiClipB512IfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 8 && std::wstring(argv[1]) == L"--multiclip-b512") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path diClipWav = argv[3];
+        const fs::path outputDir = argv[4];
+        std::vector<fs::path> fitClips = { fs::path(argv[5]), fs::path(argv[6]), fs::path(argv[7]) };
+        std::vector<fs::path> heldOutClips;
+        for (int i = 8; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"Multi-clip B512: " << inputNam.wstring() << L"\n";
+        std::vector<ntc::ValetonComparisonResult> results;
+        std::string error;
+        if (ntc::runMultiClipB512Experiment(inputNam, fitClips, diClipWav, heldOutClips, results, error,
+                                             [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            writeValetonComparisonResults(outputDir, inputNam.stem().wstring() + L"_multiclip", results);
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Second EQ-match follow-up -- see ntc::runFrequencyWeightedB512Experiment's doc comment
+// in native_converter.hpp. Usage: --freq-weighted-b512 <nam> <fitClip> <diClipWav>
+// <outputDir> <heldOutClip1> [heldOutClip2...]. Boost grid is fixed (0/6/12/18 dB
+// reduction in presence/high regularization) rather than parsed from argv.
+bool runHeadlessFrequencyWeightedB512IfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 6 && std::wstring(argv[1]) == L"--freq-weighted-b512") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path fitClip = argv[3];
+        const fs::path diClipWav = argv[4];
+        const fs::path outputDir = argv[5];
+        std::vector<fs::path> heldOutClips;
+        for (int i = 6; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"Frequency-weighted B512: " << inputNam.wstring() << L"\n";
+        std::vector<ntc::ValetonComparisonResult> results;
+        std::string error;
+        const std::vector<double> boostGrid = { 0.0, 6.0, 12.0, 18.0 };
+        if (ntc::runFrequencyWeightedB512Experiment(inputNam, fitClip, boostGrid, diClipWav, heldOutClips, results, error,
+                                                     [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            writeValetonComparisonResults(outputDir, inputNam.stem().wstring() + L"_freqweighted", results);
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Third EQ-match follow-up -- see ntc::runEqMatchExperiment's doc comment in
+// native_converter.hpp. Usage: --eq-match <nam> <fitClip> <diClipWav> <outputDir>
+// <heldOutClip1> [heldOutClip2...]. Uses EqMatchConfig's defaults (+-2dB, 1/2-octave
+// smoothing, 100-8000Hz).
+bool runHeadlessEqMatchIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 6 && std::wstring(argv[1]) == L"--eq-match") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path fitClip = argv[3];
+        const fs::path diClipWav = argv[4];
+        const fs::path outputDir = argv[5];
+        std::vector<fs::path> heldOutClips;
+        for (int i = 6; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        std::wcout << L"EQ Match: " << inputNam.wstring() << L"\n";
+        std::vector<ntc::ValetonComparisonResult> results;
+        std::string error;
+        if (ntc::runEqMatchExperiment(inputNam, fitClip, ntc::EqMatchConfig{}, diClipWav, heldOutClips, results, error,
+                                       [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            writeValetonComparisonResults(outputDir, inputNam.stem().wstring() + L"_eqmatch", results);
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Harmonic-content diagnostic -- see ntc::runHarmonicDiagnostic's doc comment in
+// native_converter.hpp. Usage: --harmonic-diagnostic <nam> <outputCsv>. Fundamentals are
+// fixed (guitar low-E through the octave above A) rather than parsed from argv.
+bool runHeadlessHarmonicDiagnosticIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 4 && std::wstring(argv[1]) == L"--harmonic-diagnostic") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path outputCsv = argv[3];
+        std::wcout << L"Harmonic diagnostic: " << inputNam.wstring() << L"\n";
+        const std::vector<double> fundamentals = { 82.41, 110.0, 146.83, 220.0 }; // low E, A, D, A (octave up)
+        ntc::HarmonicDiagnosticResult result;
+        std::string error;
+        if (ntc::runHarmonicDiagnostic(inputNam, fundamentals, result, error,
+                                        [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"fundamental_hz,harmonic_number,harmonic_hz,full_a2_relative_db,preb_relative_db,"
+                   L"candidate_relative_db,preb_error_db,candidate_error_db\n";
+            for (const auto& p : result.points) {
+                csv << p.fundamentalHz << L"," << p.harmonicNumber << L"," << p.harmonicHz << L","
+                    << p.fullA2RelativeDb << L"," << p.preBRelativeDb << L"," << p.candidateRelativeDb << L","
+                    << p.preBErrorDb << L"," << p.candidateErrorDb << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << result.points.size() << L" harmonic points)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Standalone harmonic profile of one already-built CLO (e.g. a real official SnapTone
+// capture) -- see ntc::runHarmonicProfile's doc comment in native_converter.hpp. Usage:
+// --harmonic-profile <cloFile> <outputCsv>. Same fixed fundamentals as
+// --harmonic-diagnostic so the CSVs are directly mergeable.
+bool runHeadlessHarmonicProfileIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 4 && std::wstring(argv[1]) == L"--harmonic-profile") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path sourceClo = argv[2];
+        const fs::path outputCsv = argv[3];
+        std::wcout << L"Harmonic profile: " << sourceClo.wstring() << L"\n";
+        const std::vector<double> fundamentals = { 82.41, 110.0, 146.83, 220.0 };
+        std::vector<ntc::HarmonicProfilePoint> points;
+        std::string error;
+        if (ntc::runHarmonicProfile(sourceClo, fundamentals, points, error,
+                                     [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"fundamental_hz,harmonic_number,harmonic_hz,relative_db\n";
+            for (const auto& p : points) {
+                csv << p.fundamentalHz << L"," << p.harmonicNumber << L"," << p.harmonicHz << L"," << p.relativeDb << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << points.size() << L" harmonic points)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Aliasing fingerprint test (software half only) -- see ntc::runAliasingDiagnostic's doc
+// comment in native_converter.hpp. Usage: --aliasing-diagnostic <outputCsv>. Tone
+// frequencies (1-17kHz) and levels (-24/-12/-6/0 dBFS) are fixed rather than parsed from
+// argv, matching the originally-proposed test grid. Takes no NAM -- the synthetic
+// near-identity/symmetric-shaper CLO is built entirely in-process.
+bool runHeadlessAliasingDiagnosticIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 3 && std::wstring(argv[1]) == L"--aliasing-diagnostic") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path outputCsv = argv[2];
+        std::wcout << L"Aliasing diagnostic (software half)\n";
+        const std::vector<double> tones = { 1000.0, 3000.0, 5000.0, 7000.0, 9000.0, 11000.0, 13000.0, 15000.0, 17000.0 };
+        const std::vector<double> levels = { -24.0, -12.0, -6.0, 0.0 };
+        std::vector<ntc::AliasingDiagnosticPoint> points;
+        std::string error;
+        if (ntc::runAliasingDiagnostic(tones, levels, points, error,
+                                        [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"tone_hz,level_db,harmonic_number,true_harmonic_hz,aliased_hz,aliased_magnitude_db\n";
+            for (const auto& p : points) {
+                csv << p.toneHz << L"," << p.levelDb << L"," << p.harmonicNumber << L"," << p.trueHarmonicHz << L","
+                    << p.aliasedHz << L"," << p.aliasedMagnitudeDb << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << points.size() << L" points)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Isolated-stage aliasing test (D1/D2 only, no shaper/A/B) -- see
+// ntc::runStageAliasingDiagnostic's doc comment in native_converter.hpp. Usage:
+// --stage-aliasing-diagnostic <outputCsv>. Test fractions of each stage's own input
+// Nyquist are fixed rather than parsed from argv.
+bool runHeadlessStageAliasingDiagnosticIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 3 && std::wstring(argv[1]) == L"--stage-aliasing-diagnostic") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path outputCsv = argv[2];
+        std::wcout << L"Stage aliasing diagnostic (D1/D2 isolated)\n";
+        const std::vector<double> fractions = { 0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99 };
+        std::vector<ntc::StageAliasingPoint> points;
+        std::string error;
+        if (ntc::runStageAliasingDiagnostic(fractions, points, error,
+                                             [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"stage,tone_hz,input_rate_hz,output_rate_hz,in_band,aliased_hz,magnitude_db\n";
+            for (const auto& p : points) {
+                csv << p.stage << L"," << p.toneHz << L"," << p.inputRateHz << L"," << p.outputRateHz << L","
+                    << (p.inBand ? L"1" : L"0") << L"," << p.aliasedHz << L"," << p.magnitudeDb << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << points.size() << L" points)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Isolated-stage IMAGING test (U1/U2 only, no shaper/A/B) -- see
+// ntc::runStageImagingDiagnostic's doc comment in native_converter.hpp. Usage:
+// --stage-imaging-diagnostic <outputCsv>. Test fractions of each stage's own input Nyquist
+// are fixed rather than parsed from argv.
+bool runHeadlessStageImagingDiagnosticIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 3 && std::wstring(argv[1]) == L"--stage-imaging-diagnostic") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path outputCsv = argv[2];
+        std::wcout << L"Stage imaging diagnostic (U1/U2 isolated)\n";
+        const std::vector<double> fractions = { 0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99 };
+        std::vector<ntc::StageImagingPoint> points;
+        std::string error;
+        if (ntc::runStageImagingDiagnostic(fractions, points, error,
+                                            [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"stage,tone_hz,input_rate_hz,output_rate_hz,image_hz,passthrough_db,image_magnitude_db\n";
+            for (const auto& p : points) {
+                csv << p.stage << L"," << p.toneHz << L"," << p.inputRateHz << L"," << p.outputRateHz << L","
+                    << p.imageHz << L"," << p.passthroughDb << L"," << p.imageMagnitudeDb << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << points.size() << L" points)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Standard-EQ-range (10 ISO octave bands, 31.5Hz-16kHz) frequency response comparison --
+// see ntc::runFrequencyResponseComparison's doc comment in native_converter.hpp. Usage:
+// --frequency-response <nam> <officialClo|-> <outputCsv> <clip1> [clip2...]. Pass "-" for
+// officialClo to skip that column.
+bool runHeadlessFrequencyResponseIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 5 && std::wstring(argv[1]) == L"--frequency-response") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const std::wstring officialArg = argv[3];
+        const fs::path officialClo = (officialArg == L"-") ? fs::path() : fs::path(officialArg);
+        const fs::path outputCsv = argv[4];
+        std::vector<fs::path> clips;
+        for (int i = 5; i < argc; ++i) clips.emplace_back(argv[i]);
+        std::wcout << L"Frequency response: " << inputNam.wstring() << L"\n";
+        ntc::FrequencyResponseResult result;
+        std::string error;
+        if (ntc::runFrequencyResponseComparison(inputNam, officialClo, clips, result, error,
+                                                 [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wofstream csv(outputCsv);
+            csv << L"center_hz,full_a2_db,candidate_db,no_tonematch_db,official_db\n";
+            for (const auto& b : result.bands) {
+                csv << b.centerHz << L"," << b.fullA2Db << L"," << b.candidateDb << L"," << b.noToneMatchDb << L",";
+                if (b.hasOfficial) csv << b.officialDb;
+                csv << L"\n";
+            }
+            std::wcout << L"\nWrote " << outputCsv.wstring() << L" (" << result.bands.size() << L" bands)\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
+
+// Listening-test export -- see ntc::runValetonAudition's doc comment in native_converter.hpp.
+bool runHeadlessValetonAuditionIfRequested(int& exitCode) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return false;
+    bool handled = false;
+    if (argc >= 5 && std::wstring(argv[1]) == L"--valeton-audition") {
+        handled = true;
+        AllocConsole();
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        const fs::path inputNam = argv[2];
+        const fs::path playingClipWav = argv[3];
+        const fs::path outputDir = argv[4];
+        std::wcout << L"Valeton audition: " << inputNam.wstring() << L"\n";
+        std::string error;
+        if (ntc::runValetonAudition(inputNam, playingClipWav, outputDir, error,
+                                     [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
+            std::wcout << L"\nWrote full_a2.wav / no_tonematch.wav / production.wav to " << outputDir.wstring() << L"\n";
+            exitCode = 0;
+        } else {
+            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
+            exitCode = 1;
+        }
+    }
+    LocalFree(argv);
+    return handled;
+}
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -2091,6 +2708,51 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessGp5MultiLevelVerifyIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessValetonComparisonIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessOfficialCandidateComparisonIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessThdLevelSweepIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessEnvelopeDiagnosticIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessSpectrogramDiffIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessValetonAuditionIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessMultiClipB512IfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessFrequencyWeightedB512IfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessEqMatchIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessHarmonicDiagnosticIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessHarmonicProfileIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessAliasingDiagnosticIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessStageAliasingDiagnosticIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessStageImagingDiagnosticIfRequested(exitCode)) {
+        return exitCode;
+    }
+    if (int exitCode = 0; runHeadlessFrequencyResponseIfRequested(exitCode)) {
         return exitCode;
     }
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.
