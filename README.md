@@ -496,6 +496,51 @@ Copy-Item nam_input_wav.wav dist/NamToClo/
 > `cmake -S . -B build -A x64` instead, which works with whatever VS version is on the
 > runner.
 
+### macOS (Apple Silicon)
+
+A native macOS build is available as a command-line tool, `namtoclo`, built from the same
+portable conversion/protocol core as the Windows GUI (see `CLAUDE.md`'s "Cross-platform
+architecture" for how the codebase is split). It supports NAM→CLO conversion (GP-200 and
+GP-5/GP-50), CoreMIDI device discovery, SnapTone catalogue reading, and GP-5/GP-50 upload
+with the same ACK/retry protocol as Windows. A native macOS GUI is planned but not yet
+built; the CLI is the current macOS entry point.
+
+Requirements:
+
+- macOS on Apple Silicon (arm64)
+- CMake 3.24 or newer
+- Xcode Command Line Tools (Clang)
+- [Ninja](https://ninja-build.org/) (`brew install ninja`)
+
+Build with:
+
+```bash
+cmake --preset macos-arm64
+cmake --build build-macos --parallel
+```
+
+The CLI is generated at `build-macos/namtoclo`, with `nam_input_wav.wav` and
+`reference_clips/` copied next to it automatically, same convention as Windows.
+
+```bash
+./build-macos/namtoclo --help
+./build-macos/namtoclo convert amp.nam --output out/          # NAM -> GP-200 and GP-5/GP-50 CLO
+./build-macos/namtoclo midi-list                               # detect a connected GP-5/GP-50 over CoreMIDI
+./build-macos/namtoclo slots                                   # read on-device SnapTone catalogue (names)
+./build-macos/namtoclo upload out/amp_..._GP5GP50_512.clo --slot 57
+./build-macos/namtoclo clo-info out/amp_..._GP200_1024.clo     # inspect a CLO's header
+```
+
+Every subcommand accepts `--json` for machine-readable output (`{"ok":..., "operation":...}`),
+intended for scripting or a future SwiftUI front end. Hardware-free protocol tests run via
+`ctest`:
+
+```bash
+ctest --test-dir build-macos --output-on-failure
+```
+
+GP-200 upload is implemented in the portable core but not yet exposed as a CLI subcommand.
+
 ---
 
 ## Changes in this fork

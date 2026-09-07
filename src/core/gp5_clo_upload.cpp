@@ -1,11 +1,11 @@
 #include "gp5_clo_upload.hpp"
+#include "platform.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
-#include <windows.h>
 
 namespace ntc::gp5 {
 namespace {
@@ -146,13 +146,7 @@ bool makeGp5CompactClo(const std::filesystem::path& source,
 }
 
 std::string stemUtf8(const std::filesystem::path& path) {
-    const std::wstring w = path.stem().wstring();
-    if (w.empty()) return {};
-    const int count = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
-                                          nullptr, 0, nullptr, nullptr);
-    if (count <= 0) return {};
-    std::string out(static_cast<std::size_t>(count), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), out.data(), count, nullptr, nullptr);
+    std::string out = ntc::toUtf8(path.stem().wstring());
     if (out.size() > 64) out.resize(64);
     return out;
 }

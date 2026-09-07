@@ -1,5 +1,7 @@
 #pragma once
 
+#include "platform.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -54,12 +56,8 @@ struct Gp200CompareResult {
     BlockCompareStats blockB;
 };
 
-std::string toUtf8(const std::wstring& value);
-std::wstring fromUtf8(const std::string& value);
 std::string pathToUtf8(const fs::path& path);
 std::wstring quoteWindowsArg(const std::wstring& arg);
-fs::path executablePath();
-std::string win32ErrorMessage(std::uint32_t code);
 std::string hex32(std::uint32_t value);
 std::string hexBytes(const std::vector<std::uint8_t>& bytes);
 CloInfo inspectClo(const fs::path& path, std::size_t prefixBytes = 16);

@@ -1,14 +1,13 @@
 #include "gp5_midi.hpp"
 
-#include <windows.h>
-#include <mmsystem.h>
+#include "midi_transport.hpp"
+#include "platform.hpp"
 
 #include <algorithm>
 #include <array>
-#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
-#include <cwctype>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -19,9 +18,9 @@
 namespace ntc::gp5 {
 namespace {
 
-std::wstring lower(std::wstring s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) {
-        return static_cast<wchar_t>(std::towlower(c));
+std::string lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
     });
     return s;
 }
@@ -30,21 +29,12 @@ std::wstring lower(std::wstring s) {
 // single detector accepts both. Note "gp-5"/"gp5" already match "gp-50"/
 // "gp50" as substrings; the explicit checks below just make that intent
 // visible rather than relying on the coincidence.
-bool looksLikeSupportedSnapToneDevice(const std::wstring& name) {
+bool looksLikeSupportedSnapToneDevice(const std::string& name) {
     const auto n = lower(name);
-    return n.find(L"gp-5") != std::wstring::npos
-        || n.find(L"gp5") != std::wstring::npos
-        || n.find(L"gp-50") != std::wstring::npos
-        || n.find(L"gp50") != std::wstring::npos;
-}
-
-std::wstring mmError(MMRESULT code, bool input) {
-    wchar_t text[256]{};
-    const MMRESULT r = input
-        ? midiInGetErrorTextW(code, text, static_cast<UINT>(std::size(text)))
-        : midiOutGetErrorTextW(code, text, static_cast<UINT>(std::size(text)));
-    if (r == MMSYSERR_NOERROR) return text;
-    return L"MIDI error " + std::to_wstring(code);
+    return n.find("gp-5") != std::string::npos
+        || n.find("gp5") != std::string::npos
+        || n.find("gp-50") != std::string::npos
+        || n.find("gp50") != std::string::npos;
 }
 
 bool nibbleDecodeSysEx(const std::uint8_t* data,
@@ -98,101 +88,73 @@ std::wstring latin1ToWide(const std::string& s) {
     return w;
 }
 
-class MidiSession {
-public:
-    ~MidiSession() { close(); }
+// Finds the (first) MIDI input/output pair whose name looks like a GP-5 or
+// GP-50 SnapTone port. All device enumeration and the actual byte-level I/O
+// are delegated to the platform MidiTransport; this file only ever deals in
+// portable MidiDeviceDescriptor values and raw bytes.
+struct DetectedPorts {
+    bool inputFound = false;
+    bool outputFound = false;
+    MidiDeviceDescriptor input;
+    MidiDeviceDescriptor output;
+};
 
-    bool open(const MidiDetection& d, std::wstring& error) {
+DetectedPorts detectPorts(MidiTransport& transport) {
+    DetectedPorts d;
+    for (const auto& dev : transport.listInputs()) {
+        if (looksLikeSupportedSnapToneDevice(dev.name)) {
+            d.inputFound = true;
+            d.input = dev;
+            break;
+        }
+    }
+    for (const auto& dev : transport.listOutputs()) {
+        if (looksLikeSupportedSnapToneDevice(dev.name)) {
+            d.outputFound = true;
+            d.output = dev;
+            break;
+        }
+    }
+    return d;
+}
+
+class Session {
+public:
+    ~Session() { close(); }
+
+    bool open(MidiTransport& transport, const DetectedPorts& ports, std::wstring& error) {
         close();
-        closing_.store(false);
         {
             std::lock_guard<std::mutex> lock(rxMutex_);
             ackReceived_ = false;
             completionReceived_ = false;
         }
 
-        MMRESULT r = midiInOpen(&midiIn_, d.inputId,
-                                reinterpret_cast<DWORD_PTR>(&MidiSession::midiInCallback),
-                                reinterpret_cast<DWORD_PTR>(this), CALLBACK_FUNCTION);
-        if (r != MMSYSERR_NOERROR) {
-            error = L"Cannot open SnapTone MIDI input: " + mmError(r, true);
-            midiIn_ = nullptr;
+        std::string err;
+        auto onMessage = [this](const std::uint8_t* data, std::size_t size) { handleMessage(data, size); };
+        if (!transport.openInput(ports.input, onMessage, err)) {
+            error = ntc::fromUtf8("Cannot open SnapTone MIDI input: " + err);
             return false;
         }
-
-        for (auto& b : inputBuffers_) b.resize(2048);
-        for (std::size_t i = 0; i < inputHeaders_.size(); ++i) {
-            auto& h = inputHeaders_[i];
-            h = {};
-            h.lpData = reinterpret_cast<LPSTR>(inputBuffers_[i].data());
-            h.dwBufferLength = static_cast<DWORD>(inputBuffers_[i].size());
-            r = midiInPrepareHeader(midiIn_, &h, sizeof(h));
-            if (r != MMSYSERR_NOERROR) {
-                error = L"Cannot prepare SnapTone MIDI input buffer: " + mmError(r, true);
-                close();
-                return false;
-            }
-            preparedInputs_ = i + 1;
-            r = midiInAddBuffer(midiIn_, &h, sizeof(h));
-            if (r != MMSYSERR_NOERROR) {
-                error = L"Cannot queue SnapTone MIDI input buffer: " + mmError(r, true);
-                close();
-                return false;
-            }
-        }
-
-        r = midiInStart(midiIn_);
-        if (r != MMSYSERR_NOERROR) {
-            error = L"Cannot start SnapTone MIDI input: " + mmError(r, true);
-            close();
+        if (!transport.openOutput(ports.output, err)) {
+            error = ntc::fromUtf8("Cannot open SnapTone MIDI output: " + err);
+            transport.close();
             return false;
         }
-
-        r = midiOutOpen(&midiOut_, d.outputId, 0, 0, CALLBACK_NULL);
-        if (r != MMSYSERR_NOERROR) {
-            error = L"Cannot open SnapTone MIDI output: " + mmError(r, false);
-            midiOut_ = nullptr;
-            close();
-            return false;
-        }
+        transport_ = &transport;
         return true;
     }
 
     bool sendSysEx(const std::vector<std::uint8_t>& bytes, std::wstring& error) {
-        if (!midiOut_ || bytes.empty()) {
+        if (!transport_) {
             error = L"SnapTone MIDI output is not open.";
             return false;
         }
-
-        MIDIHDR hdr{};
-        hdr.lpData = reinterpret_cast<LPSTR>(const_cast<std::uint8_t*>(bytes.data()));
-        hdr.dwBufferLength = static_cast<DWORD>(bytes.size());
-
-        MMRESULT r = midiOutPrepareHeader(midiOut_, &hdr, sizeof(hdr));
-        if (r != MMSYSERR_NOERROR) {
-            error = L"Cannot prepare SnapTone MIDI SysEx: " + mmError(r, false);
+        std::string err;
+        if (!transport_->sendMessage(bytes, err)) {
+            error = ntc::fromUtf8(err);
             return false;
         }
-
-        r = midiOutLongMsg(midiOut_, &hdr, sizeof(hdr));
-        if (r != MMSYSERR_NOERROR) {
-            midiOutUnprepareHeader(midiOut_, &hdr, sizeof(hdr));
-            error = L"Cannot send SnapTone MIDI SysEx: " + mmError(r, false);
-            return false;
-        }
-
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while ((hdr.dwFlags & MHDR_DONE) == 0) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                midiOutReset(midiOut_);
-                midiOutUnprepareHeader(midiOut_, &hdr, sizeof(hdr));
-                error = L"Timed out while sending SnapTone MIDI SysEx.";
-                return false;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        midiOutUnprepareHeader(midiOut_, &hdr, sizeof(hdr));
         return true;
     }
 
@@ -258,67 +220,37 @@ public:
     }
 
 private:
-    static void CALLBACK midiInCallback(HMIDIIN, UINT msg, DWORD_PTR instance, DWORD_PTR param1, DWORD_PTR) {
-        if (msg != MIM_LONGDATA || instance == 0 || param1 == 0) return;
-        auto* self = reinterpret_cast<MidiSession*>(instance);
-        self->handleLongData(reinterpret_cast<MIDIHDR*>(param1));
-    }
+    void handleMessage(const std::uint8_t* bytes, std::size_t size) {
+        std::vector<std::uint8_t> decoded;
+        if (!nibbleDecodeSysEx(bytes, size, decoded)) return;
 
-    void handleLongData(MIDIHDR* hdr) {
-        if (!hdr) return;
-        if (hdr->dwBytesRecorded > 0) {
-            const auto* bytes = reinterpret_cast<const std::uint8_t*>(hdr->lpData);
-            std::vector<std::uint8_t> decoded;
-            if (nibbleDecodeSysEx(bytes, static_cast<std::size_t>(hdr->dwBytesRecorded), decoded)) {
-                static constexpr std::array<std::uint8_t, 7> ack { 0xB2,0x01,0x00,0x03,0x14,0x08,0x00 };
-                static constexpr std::array<std::uint8_t, 10> completion { 0xCE,0x01,0x00,0x06,0x12,0x1B,0x03,0x00,0x00,0x00 };
-                bool notify = false;
-                {
-                    std::lock_guard<std::mutex> lock(rxMutex_);
-                    lastDecoded_ = decoded;
-                    if (capturing_) capturedMessages_.push_back(decoded);
-                    if (decoded.size() == ack.size() && std::equal(decoded.begin(), decoded.end(), ack.begin())) {
-                        ackReceived_ = true;
-                        notify = true;
-                    }
-                    if (decoded.size() == completion.size() && std::equal(decoded.begin(), decoded.end(), completion.begin())) {
-                        completionReceived_ = true;
-                        notify = true;
-                    }
-                }
-                if (notify) rxCv_.notify_all();
+        static constexpr std::array<std::uint8_t, 7> ack { 0xB2,0x01,0x00,0x03,0x14,0x08,0x00 };
+        static constexpr std::array<std::uint8_t, 10> completion { 0xCE,0x01,0x00,0x06,0x12,0x1B,0x03,0x00,0x00,0x00 };
+        bool notify = false;
+        {
+            std::lock_guard<std::mutex> lock(rxMutex_);
+            lastDecoded_ = decoded;
+            if (capturing_) capturedMessages_.push_back(decoded);
+            if (decoded.size() == ack.size() && std::equal(decoded.begin(), decoded.end(), ack.begin())) {
+                ackReceived_ = true;
+                notify = true;
+            }
+            if (decoded.size() == completion.size() && std::equal(decoded.begin(), decoded.end(), completion.begin())) {
+                completionReceived_ = true;
+                notify = true;
             }
         }
-
-        if (midiIn_ && !closing_.load()) {
-            hdr->dwBytesRecorded = 0;
-            midiInAddBuffer(midiIn_, hdr, sizeof(*hdr));
-        }
+        if (notify) rxCv_.notify_all();
     }
 
     void close() {
-        closing_.store(true);
-        if (midiOut_) {
-            midiOutReset(midiOut_);
-            midiOutClose(midiOut_);
-            midiOut_ = nullptr;
-        }
-        if (midiIn_) {
-            midiInStop(midiIn_);
-            midiInReset(midiIn_);
-            for (std::size_t i = 0; i < preparedInputs_; ++i)
-                midiInUnprepareHeader(midiIn_, &inputHeaders_[i], sizeof(MIDIHDR));
-            midiInClose(midiIn_);
-            midiIn_ = nullptr;
-            preparedInputs_ = 0;
+        if (transport_) {
+            transport_->close();
+            transport_ = nullptr;
         }
     }
 
-    HMIDIIN midiIn_ = nullptr;
-    HMIDIOUT midiOut_ = nullptr;
-    std::array<std::vector<std::uint8_t>, 4> inputBuffers_;
-    std::array<MIDIHDR, 4> inputHeaders_{};
-    std::size_t preparedInputs_ = 0;
+    MidiTransport* transport_ = nullptr;
     std::mutex rxMutex_;
     std::condition_variable rxCv_;
     bool ackReceived_ = false;
@@ -326,31 +258,20 @@ private:
     std::vector<std::uint8_t> lastDecoded_;
     std::vector<std::vector<std::uint8_t>> capturedMessages_;
     bool capturing_ = false;
-    std::atomic<bool> closing_{false};
 };
 
 } // namespace
 
 MidiDetection detectGp5Midi() {
+    auto transport = createMidiTransport();
+    const auto ports = detectPorts(*transport);
     MidiDetection d;
-    for (UINT i = 0; i < midiInGetNumDevs(); ++i) {
-        MIDIINCAPSW caps{};
-        if (midiInGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR && looksLikeSupportedSnapToneDevice(caps.szPname)) {
-            d.inputFound = true;
-            d.inputId = i;
-            d.inputName = caps.szPname;
-            break;
-        }
-    }
-    for (UINT i = 0; i < midiOutGetNumDevs(); ++i) {
-        MIDIOUTCAPSW caps{};
-        if (midiOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR && looksLikeSupportedSnapToneDevice(caps.szPname)) {
-            d.outputFound = true;
-            d.outputId = i;
-            d.outputName = caps.szPname;
-            break;
-        }
-    }
+    d.inputFound = ports.inputFound;
+    d.outputFound = ports.outputFound;
+    d.inputId = static_cast<unsigned int>(ports.input.nativeId);
+    d.outputId = static_cast<unsigned int>(ports.output.nativeId);
+    d.inputName = ntc::fromUtf8(ports.input.name);
+    d.outputName = ntc::fromUtf8(ports.output.name);
     return d;
 }
 
@@ -372,12 +293,19 @@ UploadResult uploadCloToGp5(const std::filesystem::path& cloFile,
     if (!buildCloUpload(cloFile, slot, data, error))
         return { false, L"Upload failed: " + error };
 
-    const auto detection = detectGp5Midi();
-    if (!detection.inputFound || !detection.outputFound)
+    auto transport = createMidiTransport();
+    const auto ports = detectPorts(*transport);
+    if (!ports.inputFound || !ports.outputFound) {
+        MidiDetection detection;
+        detection.inputFound = ports.inputFound;
+        detection.outputFound = ports.outputFound;
+        detection.inputName = ntc::fromUtf8(ports.input.name);
+        detection.outputName = ntc::fromUtf8(ports.output.name);
         return { false, L"Upload failed: " + describeDetection(detection) };
+    }
 
-    MidiSession session;
-    if (!session.open(detection, error))
+    Session session;
+    if (!session.open(*transport, ports, error))
         return { false, L"Upload failed: " + error };
 
     const int total = static_cast<int>(data.chunks.size());
@@ -428,14 +356,20 @@ bool readSnapToneCatalogue(std::vector<SnapToneCatalogueEntry>& entries, std::ws
     entries.clear();
     error.clear();
 
-    const auto detection = detectGp5Midi();
-    if (!detection.inputFound || !detection.outputFound) {
+    auto transport = createMidiTransport();
+    const auto ports = detectPorts(*transport);
+    if (!ports.inputFound || !ports.outputFound) {
+        MidiDetection detection;
+        detection.inputFound = ports.inputFound;
+        detection.outputFound = ports.outputFound;
+        detection.inputName = ntc::fromUtf8(ports.input.name);
+        detection.outputName = ntc::fromUtf8(ports.output.name);
         error = describeDetection(detection);
         return false;
     }
 
-    MidiSession session;
-    if (!session.open(detection, error)) return false;
+    Session session;
+    if (!session.open(*transport, ports, error)) return false;
 
     // Decoded request: [CRC][0x01][0x00][0x02][0x12][0x24] -- the existing
     // read envelope [CRC, 0x01, 0x00, length, 0x12, selector], selector 0x24

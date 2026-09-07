@@ -6,6 +6,26 @@
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "macos-arm64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-macos",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "macos-arm64",
+      "configurePreset": "macos-arm64"
     }
   ]
 }

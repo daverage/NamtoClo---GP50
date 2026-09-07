@@ -1,0 +1,42 @@
+name: Build macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14 # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: brew install ninja
+      - name: Configure
+        run: cmake -S . -B build-macos -G Ninja -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build-macos --parallel
+      - name: Test
+        run: ctest --test-dir build-macos --output-on-failure
+      - name: Build macOS SwiftUI app
+        run: swift build -c release
+        working-directory: macos/NamToCloMac
+      - name: Assemble NamToClo.app
+        run: ./scripts/build_macos_app.sh
+      - name: Upload NamToClo.app
+        uses: actions/upload-artifact@v4
+        with:
+          name: NamToClo-app-macOS-arm64
+          path: build-macos-app/NamToClo.app
+      - name: Stage CLI
+        run: |
+          mkdir -p dist
+          cp build-macos/namtoclo dist/namtoclo
+          cp -R build-macos/reference_clips dist/reference_clips
+          cp build-macos/nam_input_wav.wav dist/nam_input_wav.wav
+          cp README.md LICENSE THIRD_PARTY.md dist/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: namtoclo-macOS-arm64
+          path: dist

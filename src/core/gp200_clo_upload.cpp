@@ -1,11 +1,11 @@
 #include "gp200_clo_upload.hpp"
+#include "platform.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
-#include <windows.h>
 
 namespace ntc::gp200 {
 namespace {
@@ -133,12 +133,7 @@ std::vector<std::uint8_t> makePrepare(int globalSlot) {
 }
 
 std::string stemUtf8(const std::filesystem::path& path) {
-    std::wstring w = path.stem().wstring();
-    if (w.empty()) return {};
-    const int count = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
-    if (count <= 0) return {};
-    std::string out(static_cast<std::size_t>(count), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), out.data(), count, nullptr, nullptr);
+    std::string out = ntc::toUtf8(path.stem().wstring());
     if (out.size() > 16) out.resize(16);
     return out;
 }

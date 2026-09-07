@@ -1,5 +1,10 @@
 build/
+build-macos/
+build-macos-app/
 dist/
 .vs/
 *.user
 test_assets/
+.DS_Store
+macos/NamToCloMac/.build/
+macos/NamToCloMac/.swiftpm/
