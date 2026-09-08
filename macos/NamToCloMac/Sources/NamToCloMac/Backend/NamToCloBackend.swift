@@ -28,6 +28,17 @@ protocol NamToCloBackend: AnyObject {
 
     func cloInfo(path: URL) async throws -> CloInfoResult
 
+    // Tone3000 (macOS-only backend -- see src/core/net_client.hpp; the CLI
+    // itself refuses these subcommands on a non-Apple build).
+    func tone3000Status() async throws -> Bool
+    func tone3000Login(publishableKey: String) async throws
+    func tone3000Logout() async throws
+    func tone3000Search(query: String, page: Int, sort: String) async throws -> Tone3000SearchResult
+    func tone3000Models(toneId: Int64) async throws -> [Tone3000Model]
+    /// Returns the downloaded file's path.
+    func tone3000Download(modelId: Int64, toneId: Int64, outputDirectory: URL) async throws -> URL
+    func tone3000Preview(namPath: URL, inputWav: URL, outputWav: URL?, play: Bool) async throws -> Tone3000PreviewOutcome
+
     func cancelCurrentOperation()
 }
 
@@ -288,5 +299,134 @@ final class CLIBackend: NamToCloBackend {
             payloadSize: obj["payload_size"] as? String ?? "",
             modelField: obj["model_field"] as? String ?? ""
         )
+    }
+
+    // MARK: Tone3000
+
+    func tone3000Status() async throws -> Bool {
+        let (lines, exitCode) = try await run(["tone3000", "status", "--json"])
+        guard let obj = lines.first else {
+            throw BackendError(summary: "Could not check Tone3000 status.", technicalDetails: "namtoclo tone3000 status exited with code \(exitCode).")
+        }
+        return obj["connected"] as? Bool ?? false
+    }
+
+    func tone3000Login(publishableKey: String) async throws {
+        // Blocks for up to 180s waiting on the OAuth browser callback (see
+        // src/cli/main.cpp's tone3000_client.cpp authenticateInteractive) --
+        // callers should show a "waiting for browser authorization" state
+        // and offer cancelCurrentOperation() rather than a short timeout.
+        let (lines, exitCode) = try await run(["tone3000", "login", "--publishable-key", publishableKey, "--json"])
+        guard let obj = lines.first, obj["ok"] as? Bool == true else {
+            let error = lines.first?["error"] as? String ?? "namtoclo tone3000 login exited with code \(exitCode)."
+            throw tone3000LoginError(for: error)
+        }
+    }
+
+    private func tone3000LoginError(for raw: String) -> BackendError {
+        let lower = raw.lowercased()
+        if lower.contains("publishable key") {
+            return BackendError(summary: "Enter a valid Tone3000 publishable key (t3k_pub_...).", technicalDetails: raw)
+        }
+        if lower.contains("timed out") {
+            return BackendError(summary: "Tone3000 authorization timed out. Try again.", technicalDetails: raw)
+        }
+        if lower.contains("browser") {
+            return BackendError(summary: "Could not open the system browser.", technicalDetails: raw)
+        }
+        return BackendError(summary: "Tone3000 login failed.", technicalDetails: raw)
+    }
+
+    func tone3000Logout() async throws {
+        _ = try await run(["tone3000", "logout", "--json"])
+    }
+
+    func tone3000Search(query: String, page: Int, sort: String) async throws -> Tone3000SearchResult {
+        var args = ["tone3000", "search", query, "--page", String(page), "--json"]
+        if !sort.isEmpty { args.append(contentsOf: ["--sort", sort]) }
+        let (lines, exitCode) = try await run(args)
+        guard let obj = lines.first else {
+            throw BackendError(summary: "Tone3000 search did not respond.", technicalDetails: "exit code \(exitCode)")
+        }
+        guard obj["ok"] as? Bool == true else {
+            throw tone3000ConnectionError(for: obj["error"] as? String ?? "Tone3000 search failed.")
+        }
+        let tonesRaw = obj["tones"] as? [[String: Any]] ?? []
+        let tones = tonesRaw.compactMap { t -> Tone3000Tone? in
+            guard let id = (t["id"] as? NSNumber)?.int64Value else { return nil }
+            return Tone3000Tone(
+                id: id,
+                title: t["title"] as? String ?? "",
+                creator: t["creator"] as? String ?? "",
+                gear: t["gear"] as? String ?? "",
+                license: t["license"] as? String ?? "",
+                modelsCount: t["models_count"] as? Int ?? 0,
+                downloadsCount: t["downloads_count"] as? Int ?? 0,
+                favoritesCount: t["favorites_count"] as? Int ?? 0
+            )
+        }
+        return Tone3000SearchResult(
+            tones: tones,
+            page: obj["page"] as? Int ?? page,
+            totalPages: obj["total_pages"] as? Int ?? 1,
+            totalResults: obj["total_results"] as? Int ?? tones.count
+        )
+    }
+
+    func tone3000Models(toneId: Int64) async throws -> [Tone3000Model] {
+        let (lines, exitCode) = try await run(["tone3000", "models", String(toneId), "--json"])
+        guard let obj = lines.first else {
+            throw BackendError(summary: "Tone3000 model list did not respond.", technicalDetails: "exit code \(exitCode)")
+        }
+        guard obj["ok"] as? Bool == true else {
+            throw tone3000ConnectionError(for: obj["error"] as? String ?? "Tone3000 model list failed.")
+        }
+        let modelsRaw = obj["models"] as? [[String: Any]] ?? []
+        return modelsRaw.compactMap { m -> Tone3000Model? in
+            guard let id = (m["id"] as? NSNumber)?.int64Value,
+                  let toneId = (m["tone_id"] as? NSNumber)?.int64Value else { return nil }
+            return Tone3000Model(
+                id: id,
+                toneId: toneId,
+                name: m["name"] as? String ?? "",
+                size: m["size"] as? String ?? "",
+                architectureVersion: m["architecture_version"] as? String ?? ""
+            )
+        }
+    }
+
+    func tone3000Download(modelId: Int64, toneId: Int64, outputDirectory: URL) async throws -> URL {
+        let (lines, exitCode) = try await run([
+            "tone3000", "download", String(modelId), "--tone", String(toneId),
+            "--output", outputDirectory.path, "--json",
+        ])
+        guard let obj = lines.first else {
+            throw BackendError(summary: "Tone3000 download did not respond.", technicalDetails: "exit code \(exitCode)")
+        }
+        guard obj["ok"] as? Bool == true, let output = obj["output"] as? String else {
+            throw tone3000ConnectionError(for: obj["error"] as? String ?? "Tone3000 download failed.")
+        }
+        return URL(fileURLWithPath: output)
+    }
+
+    private func tone3000ConnectionError(for raw: String) -> BackendError {
+        if raw.localizedCaseInsensitiveContains("not connected") || raw.localizedCaseInsensitiveContains("publishable key") {
+            return BackendError(summary: "Not connected to Tone3000. Log in first.", technicalDetails: raw)
+        }
+        return BackendError(summary: "Tone3000 request failed.", technicalDetails: raw)
+    }
+
+    func tone3000Preview(namPath: URL, inputWav: URL, outputWav: URL?, play: Bool) async throws -> Tone3000PreviewOutcome {
+        var args = ["tone3000", "preview", namPath.path, "--input", inputWav.path, "--json"]
+        if let outputWav { args.append(contentsOf: ["--output", outputWav.path]) }
+        if !play { args.append("--no-play") }
+        let (lines, exitCode) = try await run(args)
+        guard let completeLine = lines.last(where: { ($0["event"] as? String) == "complete" }) else {
+            throw BackendError(summary: "Preview did not complete.", technicalDetails: "namtoclo tone3000 preview exited (code \(exitCode)) without a completion event.")
+        }
+        guard completeLine["ok"] as? Bool == true, let output = completeLine["output"] as? String else {
+            throw BackendError(summary: "Preview render failed.", technicalDetails: completeLine["error"] as? String ?? "")
+        }
+        return Tone3000PreviewOutcome(outputPath: output, played: completeLine["played"] as? Bool ?? false)
     }
 }

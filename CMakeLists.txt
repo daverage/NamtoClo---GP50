@@ -209,10 +209,36 @@ elseif(APPLE)
     target_sources(namtoclo_core PRIVATE
         src/platform/macos/platform_mac.cpp
         src/platform/macos/midi_transport_coremidi.cpp
+        src/platform/macos/net_client_mac.mm
+        # Tone3000 client + offline preview renderer: portable C++20, but
+        # tone3000_client.cpp calls into net_client.hpp, which currently has
+        # only this macOS implementation (see net_client.hpp and the
+        # tone3000 integration plan), so these stay APPLE-only rather than
+        # in the unconditional namtoclo_core source list above -- adding
+        # them there would leave tone3000_client.cpp's net:: calls
+        # unresolved at Windows link time even though nothing on Windows
+        # calls into them (OBJECT library .obj files are linked wholesale).
+        src/core/net_client.hpp
+        src/core/tone3000_client.cpp
+        src/core/tone3000_client.hpp
+        src/core/tone3000_preview.cpp
+        src/core/tone3000_preview.hpp
     )
     find_library(NTC_COREMIDI_FRAMEWORK CoreMIDI REQUIRED)
     find_library(NTC_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
-    target_link_libraries(namtoclo_core PUBLIC "${NTC_COREMIDI_FRAMEWORK}" "${NTC_COREFOUNDATION_FRAMEWORK}")
+    find_library(NTC_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    find_library(NTC_APPKIT_FRAMEWORK AppKit REQUIRED)
+    find_library(NTC_SECURITY_FRAMEWORK Security REQUIRED)
+    target_link_libraries(namtoclo_core PUBLIC
+        "${NTC_COREMIDI_FRAMEWORK}" "${NTC_COREFOUNDATION_FRAMEWORK}"
+        "${NTC_FOUNDATION_FRAMEWORK}" "${NTC_APPKIT_FRAMEWORK}" "${NTC_SECURITY_FRAMEWORK}"
+    )
+    # net_client_mac.mm is Objective-C++ (uses ARC-managed Foundation/
+    # AppKit/Security types) -- enable ARC for it specifically rather than
+    # for the whole target, which is otherwise plain C++20.
+    set_source_files_properties(src/platform/macos/net_client_mac.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc"
+    )
 endif()
 
 if(MSVC)
@@ -286,6 +312,9 @@ enable_testing()
 add_executable(ntc_gp5_protocol_test tests/gp5_protocol_test.cpp)
 ntc_link_core(ntc_gp5_protocol_test)
 target_compile_features(ntc_gp5_protocol_test PRIVATE cxx_std_20)
+if(MSVC)
+    set_property(TARGET ntc_gp5_protocol_test PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 add_test(NAME gp5_protocol_test COMMAND ntc_gp5_protocol_test)
 
 # --------------------------------------------------------------------------

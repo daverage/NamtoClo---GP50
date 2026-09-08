@@ -1,7 +1,7 @@
 import SwiftUI
 
 private enum AppTab: Hashable {
-    case convert, gp5, gp200, debug
+    case convert, tone3000, gp5, gp200, debug
 }
 
 struct ContentView: View {
@@ -12,6 +12,9 @@ struct ContentView: View {
             ConvertView()
                 .tabItem { Label("Convert", systemImage: "waveform") }
                 .tag(AppTab.convert)
+            Tone3000View()
+                .tabItem { Label("Tone3000", systemImage: "magnifyingglass") }
+                .tag(AppTab.tone3000)
             Gp5UploadView()
                 .tabItem { Label("GP-5 / GP-50", systemImage: "cable.connector") }
                 .tag(AppTab.gp5)
@@ -25,6 +28,9 @@ struct ContentView: View {
         .padding()
         .onReceive(NotificationCenter.default.publisher(for: .switchToUploadTab)) { _ in
             selectedTab = .gp5
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .switchToConvertTab)) { _ in
+            selectedTab = .convert
         }
     }
 }

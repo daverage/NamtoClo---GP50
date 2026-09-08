@@ -36,4 +36,10 @@ fs::path executablePath();
 // available for diagnostics.
 std::string platformErrorMessage(std::uint32_t code);
 
+// Plays an audio file through the OS's own default player and blocks until
+// playback finishes. macOS-only for now (shells out to afplay -- see the
+// tone3000 integration plan); used by `namtoclo tone3000 preview`, which is
+// itself gated APPLE-only in CMakeLists.txt. Not implemented on Windows.
+bool playAudioFileBlocking(const fs::path& wav, std::string& error);
+
 } // namespace ntc

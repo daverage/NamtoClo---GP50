@@ -85,3 +85,36 @@ enum BackendProgress {
     case message(String)
     case blockProgress(current: Int, total: Int, message: String)
 }
+
+// MARK: - Tone3000 (macOS-only `namtoclo tone3000 ...` subcommands)
+
+struct Tone3000Tone: Identifiable, Hashable {
+    let id: Int64
+    let title: String
+    let creator: String
+    let gear: String
+    let license: String
+    let modelsCount: Int
+    let downloadsCount: Int
+    let favoritesCount: Int
+}
+
+struct Tone3000SearchResult {
+    let tones: [Tone3000Tone]
+    let page: Int
+    let totalPages: Int
+    let totalResults: Int
+}
+
+struct Tone3000Model: Identifiable, Hashable {
+    let id: Int64
+    let toneId: Int64
+    let name: String
+    let size: String
+    let architectureVersion: String
+}
+
+struct Tone3000PreviewOutcome {
+    let outputPath: String
+    let played: Bool
+}
