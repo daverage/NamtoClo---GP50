@@ -15,6 +15,13 @@ final class AppState: ObservableObject {
     @Published var isConverting = false
     @Published var convertProgressMessage = ""
     @Published var convertError: BackendError?
+    /// When the current (or most recent) conversion started -- Tone Match
+    /// conversions genuinely take 30-60+ seconds (full 2048-tap fit, a
+    /// separate 512-tap direct fit, then a 6-level Tone Match gain sweep),
+    /// with only a one-line status message to show for it. Surfacing elapsed
+    /// time in the UI (see ConvertView) avoids that being mistaken for a
+    /// hang, which is what prompted adding this.
+    @Published var conversionStartedAt: Date?
 
     @AppStorage("toneMatchEnabled") var toneMatchEnabled = false
     @AppStorage("toneMatchReference") var toneMatchReferenceRaw = ToneMatchReference.auto.rawValue
@@ -78,6 +85,7 @@ final class AppState: ObservableObject {
         isConverting = true
         convertError = nil
         convertProgressMessage = "Starting..."
+        conversionStartedAt = Date()
         defer { isConverting = false }
         do {
             let result = try await backend.convert(
@@ -90,16 +98,20 @@ final class AppState: ObservableObject {
                 gp5DirectFit: gp5DirectFit,
                 onProgress: { [weak self] message in
                     self?.convertProgressMessage = message
+                    self?.appendDiagnostic("[convert] " + message)
                 }
             )
             lastConvertResult = result
+            appendDiagnostic("[convert] complete: ok=\(result.ok) gp200=\(result.gp200Path) gp5=\(result.gp5Path)")
             if let candidate = result.bestUploadCandidate {
                 uploadSourceURL = URL(fileURLWithPath: candidate)
             }
         } catch let error as BackendError {
             convertError = error
+            appendDiagnostic("[convert] failed: \(error.summary) -- \(error.technicalDetails)")
         } catch {
             convertError = BackendError(summary: "Conversion failed unexpectedly.", technicalDetails: error.localizedDescription)
+            appendDiagnostic("[convert] failed unexpectedly: \(error.localizedDescription)")
         }
     }
 
@@ -143,14 +155,18 @@ final class AppState: ObservableObject {
                 debugMidi: debugMidiEnabled,
                 onProgress: { [weak self] current, total, message in
                     self?.uploadProgress = (current, total, message)
+                    self?.appendDiagnostic("[upload] [\(current)/\(total)] " + message)
                 }
             )
             lastUploadOutcome = outcome
+            appendDiagnostic("[upload] complete: ok=\(outcome.ok) slot=\(outcome.slot) message=\(outcome.message)")
             await refreshSlots()
         } catch let error as BackendError {
             uploadError = error
+            appendDiagnostic("[upload] failed: \(error.summary) -- \(error.technicalDetails)")
         } catch {
             uploadError = BackendError(summary: "Upload failed unexpectedly.", technicalDetails: error.localizedDescription)
+            appendDiagnostic("[upload] failed unexpectedly: \(error.localizedDescription)")
         }
     }
 }

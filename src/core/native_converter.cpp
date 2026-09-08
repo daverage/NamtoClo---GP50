@@ -360,6 +360,14 @@ std::vector<float> alignLeft(const std::vector<float>& x,std::size_t n){std::vec
 
 } // namespace
 
+// External-linkage wrapper around the anonymous-namespace resampleR8Brain24()
+// above, so corrective_ir.cpp (a separate translation unit) can auto-convert
+// a Corrective IR WAV to the 44.1kHz the CLO correction path requires instead
+// of duplicating r8brain setup code or rejecting the file outright.
+std::vector<float> resampleForCorrectiveIr(const std::vector<float>& in, double inRate, double outRate) {
+    return resampleR8Brain24(in, inRate, outRate);
+}
+
 // Exact reconstruction of 0x558c30: 100 ms extrema over the first 5 s,
 // P fixed by branch extrema, K seeded from the small-signal slope up to
 // 0.5*P, then the seed is searched with the official multipliers

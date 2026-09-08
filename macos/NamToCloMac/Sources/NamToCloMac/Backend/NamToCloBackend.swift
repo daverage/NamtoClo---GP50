@@ -94,16 +94,27 @@ final class CLIBackend: NamToCloBackend {
 
     private func run(_ arguments: [String], onLine: @escaping (ProcessRunner.JSONLine) -> Void = { _ in }) async throws -> (lines: [ProcessRunner.JSONLine], exitCode: Int32) {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            let message = "The namtoclo engine could not be found. Expected executable at \(executableURL.path)."
+            onDiagnostic?(message)
             throw BackendError(
                 summary: "The namtoclo engine could not be found.",
-                technicalDetails: "Expected executable at \(executableURL.path). Reinstall the app or rebuild it with scripts/build_macos_app.sh."
+                technicalDetails: message + " Reinstall the app or rebuild it with scripts/build_macos_app.sh."
             )
         }
+        // Log the exact invocation and its result -- namtoclo's real
+        // diagnostics go through stdout as NDJSON progress events (routed to
+        // the Debug tab separately by callers via onLine), not stderr, so
+        // stderr alone is usually empty even on a normal run. Without this,
+        // the Debug tab had nothing useful to show for most sessions.
+        onDiagnostic?("$ \(executableURL.path) \(arguments.joined(separator: " "))")
         do {
-            return try await runner.run(executable: executableURL, arguments: arguments, onLine: onLine) { [weak self] text in
+            let result = try await runner.run(executable: executableURL, arguments: arguments, onLine: onLine) { [weak self] text in
                 self?.onDiagnostic?(text)
             }
+            onDiagnostic?("(exit code \(result.exitCode))")
+            return result
         } catch {
+            onDiagnostic?("Process failed to run: \(error.localizedDescription)")
             throw BackendError(summary: "Failed to run the namtoclo engine.", technicalDetails: error.localizedDescription)
         }
     }
@@ -173,18 +184,21 @@ final class CLIBackend: NamToCloBackend {
         if let correctiveIr { args.append(contentsOf: ["--corrective-ir", correctiveIr.path]) }
         if !gp5DirectFit { args.append("--no-gp5-direct-fit") }
 
-        var completeLine: ProcessRunner.JSONLine?
-        let (_, exitCode) = try await run(args) { line in
-            switch line["event"] as? String {
-            case "progress":
+        // Read the "complete" event back out of `lines` (run()'s own
+        // synchronously-populated return value) rather than tracking it via
+        // a variable mutated inside the onLine callback. onLine is
+        // dispatched to the main queue asynchronously for live progress
+        // UI -- that dispatch is not guaranteed to have run yet by the time
+        // `run()` itself returns, so a captured "did we see complete yet"
+        // variable can still read as unset here even though the line was
+        // genuinely received. `lines` has no such race: it is fully built
+        // before run() resumes.
+        let (lines, exitCode) = try await run(args) { line in
+            if line["event"] as? String == "progress" {
                 onProgress(line["message"] as? String ?? "Working...")
-            case "complete":
-                completeLine = line
-            default:
-                break
             }
         }
-        guard let completeLine else {
+        guard let completeLine = lines.last(where: { ($0["event"] as? String) == "complete" }) else {
             throw BackendError(summary: "Conversion did not complete.", technicalDetails: "namtoclo convert exited (code \(exitCode)) without a completion event.")
         }
         let ok = completeLine["ok"] as? Bool ?? false
@@ -220,18 +234,15 @@ final class CLIBackend: NamToCloBackend {
         var args = ["upload", cloFile.path, "--slot", String(slot), "--json"]
         if debugMidi { args.append("--debug-midi") }
 
-        var completeLine: ProcessRunner.JSONLine?
-        let (_, exitCode) = try await run(args) { line in
-            switch line["event"] as? String {
-            case "progress":
+        // See convert()'s comment above: read "complete" back out of the
+        // synchronously-returned `lines`, not a variable set from inside
+        // the (asynchronously-dispatched) onLine callback.
+        let (lines, exitCode) = try await run(args) { line in
+            if line["event"] as? String == "progress" {
                 onProgress(line["current"] as? Int ?? 0, line["total"] as? Int ?? 0, line["message"] as? String ?? "")
-            case "complete":
-                completeLine = line
-            default:
-                break
             }
         }
-        guard let completeLine else {
+        guard let completeLine = lines.last(where: { ($0["event"] as? String) == "complete" }) else {
             throw BackendError(summary: "Upload did not complete.", technicalDetails: "namtoclo upload exited (code \(exitCode)) without a completion event.")
         }
         let ok = completeLine["ok"] as? Bool ?? false

@@ -47,31 +47,14 @@ final class ProcessRunner {
 
                 var collected: [JSONLine] = []
                 var stdoutBuffer = Data()
-                var exitCode: Int32 = -1
 
-                // `Process.terminationHandler` and a pipe's readability
-                // notifications are driven by independent mechanisms
-                // (waitpid vs. kqueue) and are NOT guaranteed to fire in any
-                // particular order. Resolving as soon as terminationHandler
-                // fires -- as this used to do -- can race ahead of the pipe
-                // actually delivering its last buffered chunk (e.g. the
-                // final NDJSON "complete" line, flushed right before the
-                // child exits), making a successful run look like it "did
-                // not complete" even though the CLI produced correct output.
-                // A DispatchGroup that only resolves once BOTH pipes have
-                // hit EOF AND the process has terminated closes that race.
-                let group = DispatchGroup()
-                group.enter() // stdout EOF
-                group.enter() // stderr EOF
-                group.enter() // process termination
-
-                stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-                    let data = handle.availableData
-                    guard !data.isEmpty else {
-                        handle.readabilityHandler = nil
-                        group.leave()
-                        return
-                    }
+                // Only ever called while scheduled on `self.queue`, from
+                // either the readabilityHandler hop below or the guaranteed
+                // final drain in terminationHandler -- both routes funnel
+                // through here so stdoutBuffer/collected are never touched
+                // from two places at once.
+                func consumeStdout(_ data: Data) {
+                    guard !data.isEmpty else { return }
                     stdoutBuffer.append(data)
                     while let newlineRange = stdoutBuffer.firstRange(of: Data([0x0A])) {
                         let lineData = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<newlineRange.lowerBound)
@@ -83,11 +66,19 @@ final class ProcessRunner {
                         DispatchQueue.main.async { onLine(obj) }
                     }
                 }
+
+                stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else {
+                        handle.readabilityHandler = nil
+                        return
+                    }
+                    self.queue.async { consumeStdout(data) }
+                }
                 stderrPipe.fileHandleForReading.readabilityHandler = { handle in
                     let data = handle.availableData
                     guard !data.isEmpty else {
                         handle.readabilityHandler = nil
-                        group.leave()
                         return
                     }
                     if let text = String(data: data, encoding: .utf8) {
@@ -96,12 +87,35 @@ final class ProcessRunner {
                 }
 
                 process.terminationHandler = { proc in
-                    exitCode = proc.terminationStatus
-                    group.leave()
-                }
+                    let exitCode = proc.terminationStatus
+                    self.queue.async {
+                        // Guaranteed final drain. `readabilityHandler`'s
+                        // async EOF notification can lag or, for a
+                        // fast-closing process whose last write and pipe
+                        // close happen essentially simultaneously, be missed
+                        // entirely for that final chunk -- a known
+                        // Process/Pipe/readabilityHandler quirk. This
+                        // silently dropped namtoclo's final "complete" NDJSON
+                        // event on some runs even though the process had
+                        // exited cleanly (exit code 0) and had genuinely
+                        // written and flushed that line. Once
+                        // terminationHandler fires the process has
+                        // definitely exited, so both pipes' write ends are
+                        // guaranteed closed and this synchronous read can
+                        // never block -- it just returns whatever is left,
+                        // which a plain wait-for-EOF approach could lose.
+                        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                        let restStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                        consumeStdout(restStdout)
 
-                group.notify(queue: self.queue) {
-                    continuation.resume(returning: (collected, exitCode))
+                        stderrPipe.fileHandleForReading.readabilityHandler = nil
+                        let restStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                        if !restStderr.isEmpty, let text = String(data: restStderr, encoding: .utf8) {
+                            DispatchQueue.main.async { onStderr(text) }
+                        }
+
+                        continuation.resume(returning: (collected, exitCode))
+                    }
                 }
 
                 self.process = process

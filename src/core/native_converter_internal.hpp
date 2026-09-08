@@ -54,6 +54,12 @@ struct Model {
 PK fitPk(const std::vector<float>& in, const std::vector<float>& out, double sr);
 Biquad postForRate(double fs);
 
+// Shared r8brain resampler (see native_converter.cpp's resampleR8Brain24 for
+// the exact reconstruction notes) exposed for corrective_ir.cpp's benefit:
+// auto-converting a Corrective IR WAV supplied at any sample rate to the
+// 44.1kHz the CLO correction path requires, instead of rejecting it.
+std::vector<float> resampleForCorrectiveIr(const std::vector<float>& in, double inRate, double outRate);
+
 // How many trainer-rate-domain B taps are needed so that, after the official
 // resampleFirOfficial() SRC down to the 44.1 kHz storage domain, all 512
 // GP-5/GP-50 device taps end up populated with real content instead of

@@ -201,7 +201,20 @@ struct ConvertView: View {
                 if appState.isConverting {
                     ProgressView().controlSize(.small)
                     Text(appState.convertProgressMessage).font(.caption).foregroundStyle(.secondary)
+                    if let startedAt = appState.conversionStartedAt {
+                        TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                            let elapsed = Int(context.date.timeIntervalSince(startedAt))
+                            Text("(\(elapsed)s)")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                 }
+            }
+            if appState.isConverting {
+                Text("Tone Match conversions do a full fit plus a multi-level gain sweep and can take a minute or more -- this is normal, not a hang.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -214,6 +227,18 @@ struct ConvertView: View {
                 }
                 if !result.gp5Path.isEmpty {
                     fileRow(label: "GP-5/GP-50 CLO", path: result.gp5Path)
+                } else {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("No dedicated GP-5/GP-50 file was produced")
+                                .font(.callout)
+                            Text("This happens when \"GP-5/GP-50 direct Block-B fit\" is off. Uploading will fall back to truncating the GP-200 file to 512 taps, which may sound worse. Turn Direct Fit back on and reconvert for the best result.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 HStack {
                     Button("Upload to GP-5/GP-50") {

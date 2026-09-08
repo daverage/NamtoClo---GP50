@@ -1,5 +1,6 @@
 #include "corrective_ir.hpp"
 #include "common.hpp"
+#include "native_converter_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -135,10 +136,10 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
         error = "Corrective IR WAV must be mono or stereo.";
         return false;
     }
-    if (wav.sampleRate != kExpectedSampleRate) {
-        error = "Corrective IR must be 44.1 kHz.";
-        return false;
-    }
+    // Sample rate is no longer rejected here -- decodeCorrectiveIr() below
+    // resamples to kExpectedSampleRate (44.1kHz) automatically when needed,
+    // using the same r8brain resampler the rest of the conversion pipeline
+    // uses. Only structural validity is checked at this stage.
     if (wav.data.empty() || (wav.data.size() % wav.blockAlign) != 0u) {
         error = "Corrective IR WAV contains no complete audio frames.";
         return false;
@@ -235,6 +236,19 @@ bool decodeCorrectiveIr(const fs::path& path, std::vector<double>& mono, std::st
             sum += sample;
         }
         mono[frame] = sum / static_cast<double>(wav.channels);
+    }
+
+    if (wav.sampleRate != kExpectedSampleRate) {
+        // Auto-convert to the 44.1kHz the CLO correction path requires,
+        // rather than rejecting an otherwise-valid Corrective IR just
+        // because it was exported at 48kHz/96kHz/etc. Round-tripping
+        // through float here (resampleForCorrectiveIr's native precision)
+        // is negligible for a short correction IR.
+        std::vector<float> monoFloat(mono.size());
+        for (std::size_t i = 0; i < mono.size(); ++i) monoFloat[i] = static_cast<float>(mono[i]);
+        monoFloat = resampleForCorrectiveIr(monoFloat, static_cast<double>(wav.sampleRate),
+                                             static_cast<double>(kExpectedSampleRate));
+        mono.assign(monoFloat.begin(), monoFloat.end());
     }
     return true;
 }
