@@ -20,6 +20,7 @@
 //   slots [--json]
 //   upload <file.clo> --slot N [--debug-midi] [--json]
 //   clo-info <file.clo> [--json]
+//   tone3000 status [--json]                                  (macOS only)
 //   tone3000 login [--publishable-key t3k_pub_...] [--json]   (macOS only)
 //   tone3000 logout [--json]                                  (macOS only)
 //   tone3000 search <query> [--page N] [--sort ...] [--json]  (macOS only)
@@ -65,6 +66,7 @@ void printUsage() {
         "  namtoclo upload <file.clo> --slot N [--debug-midi] [--json]\n"
         "  namtoclo clo-info <file.clo> [--json]\n"
 #if defined(__APPLE__)
+        "  namtoclo tone3000 status [--json]\n"
         "  namtoclo tone3000 login [--publishable-key t3k_pub_...] [--json]\n"
         "  namtoclo tone3000 logout [--json]\n"
         "  namtoclo tone3000 search <query> [--page N] [--sort best-match|...] [--json]\n"
@@ -468,6 +470,27 @@ bool connectTone3000Client(const Args& a, ntc::tone3000::Client& client, std::st
     return true;
 }
 
+// Cheap "am I logged in?" check for a GUI to call on tab appear without
+// running a real search. Reuses connectTone3000Client (a lightweight OAuth
+// refresh call, not a search/list) -- `ok` is always true here (the check
+// itself ran); `connected` carries the real answer, `error` is diagnostic
+// text only, not necessarily something a GUI should show as an alarm (e.g.
+// "Not connected. Run 'namtoclo tone3000 login' first." is the expected
+// answer before the first login, not a failure).
+int cmdTone3000Status(const Args& a) {
+    ntc::tone3000::Client client;
+    std::string error;
+    const bool connected = connectTone3000Client(a, client, error);
+    if (a.json) {
+        JsonObj o;
+        o.boolean("ok", true).boolean("connected", connected).str("error", connected ? "" : error);
+        std::cout << o.build() << "\n";
+    } else {
+        std::cout << (connected ? "Connected to Tone3000." : ("Not connected: " + error)) << "\n";
+    }
+    return 0;
+}
+
 int cmdTone3000Login(const Args& a) {
     std::string key, error;
     if (!loadOrUseGivenPublishableKey(a, key, error)) {
@@ -640,6 +663,7 @@ int cmdTone3000Preview(const Args& a) {
 }
 
 int cmdTone3000(const std::string& sub, const Args& a) {
+    if (sub == "status") return cmdTone3000Status(a);
     if (sub == "login") return cmdTone3000Login(a);
     if (sub == "logout") return cmdTone3000Logout(a);
     if (sub == "search") return cmdTone3000Search(a);

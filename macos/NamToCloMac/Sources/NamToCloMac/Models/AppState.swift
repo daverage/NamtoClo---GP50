@@ -48,6 +48,39 @@ final class AppState: ObservableObject {
     @Published var lastUploadOutcome: UploadOutcome?
     @AppStorage("debugMidiEnabled") var debugMidiEnabled = false
 
+    // Tone3000 (macOS-only -- see net_client.hpp / tone3000_client.cpp).
+    // `tone3000Connected == nil` means "not checked yet this launch"; the
+    // publishable key/refresh token themselves live in the macOS Keychain
+    // (namtoclo tone3000 login/status), not here -- this is UI state only.
+    @Published var tone3000Connected: Bool?
+    @Published var tone3000IsBusy = false // covers status/login/logout
+    @Published var tone3000Error: BackendError?
+    @Published var tone3000PublishableKeyInput = ""
+
+    @Published var tone3000Query = ""
+    @Published var tone3000Tones: [Tone3000Tone] = []
+    @Published var tone3000Page = 1
+    @Published var tone3000TotalPages = 1
+    @Published var tone3000IsSearching = false
+
+    @Published var tone3000SelectedTone: Tone3000Tone?
+    @Published var tone3000Models: [Tone3000Model] = []
+    @Published var tone3000IsLoadingModels = false
+
+    @AppStorage("tone3000DownloadDirectory") var tone3000DownloadDirectoryPath = ""
+    @Published var tone3000IsDownloading = false
+    @Published var tone3000DownloadedNamURL: URL?
+
+    @Published var tone3000PreviewInputWav: URL?
+    @Published var tone3000IsPreviewing = false
+    @Published var tone3000LastPreviewOutcome: Tone3000PreviewOutcome?
+
+    var tone3000DownloadDirectory: URL {
+        tone3000DownloadDirectoryPath.isEmpty
+            ? FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first ?? FileManager.default.homeDirectoryForCurrentUser
+            : URL(fileURLWithPath: tone3000DownloadDirectoryPath)
+    }
+
     // Debug
     @Published var diagnosticLog: [String] = []
 
@@ -167,6 +200,123 @@ final class AppState: ObservableObject {
         } catch {
             uploadError = BackendError(summary: "Upload failed unexpectedly.", technicalDetails: error.localizedDescription)
             appendDiagnostic("[upload] failed unexpectedly: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: Tone3000
+
+    /// Cheap connection check -- call on tab appear, not on every keystroke.
+    func checkTone3000Status() async {
+        tone3000IsBusy = true
+        defer { tone3000IsBusy = false }
+        do {
+            tone3000Connected = try await backend.tone3000Status()
+        } catch {
+            // A failed status check just means "assume not connected", not a
+            // user-facing error -- login will surface the real reason.
+            tone3000Connected = false
+            appendDiagnostic("[tone3000] status check failed: \(error.localizedDescription)")
+        }
+    }
+
+    func tone3000Login() async {
+        guard !tone3000PublishableKeyInput.isEmpty else { return }
+        tone3000IsBusy = true
+        tone3000Error = nil
+        defer { tone3000IsBusy = false }
+        do {
+            try await backend.tone3000Login(publishableKey: tone3000PublishableKeyInput)
+            tone3000Connected = true
+            tone3000PublishableKeyInput = ""
+            appendDiagnostic("[tone3000] login: connected")
+        } catch let error as BackendError {
+            tone3000Error = error
+            appendDiagnostic("[tone3000] login failed: \(error.summary) -- \(error.technicalDetails)")
+        } catch {
+            tone3000Error = BackendError(summary: "Tone3000 login failed unexpectedly.", technicalDetails: error.localizedDescription)
+        }
+    }
+
+    func tone3000Logout() async {
+        tone3000IsBusy = true
+        defer { tone3000IsBusy = false }
+        do {
+            try await backend.tone3000Logout()
+        } catch {
+            appendDiagnostic("[tone3000] logout failed: \(error.localizedDescription)")
+        }
+        tone3000Connected = false
+        tone3000Tones = []
+        tone3000Models = []
+        tone3000SelectedTone = nil
+    }
+
+    func tone3000RunSearch(page: Int = 1) async {
+        guard !tone3000Query.isEmpty else { return }
+        tone3000IsSearching = true
+        tone3000Error = nil
+        tone3000SelectedTone = nil
+        tone3000Models = []
+        defer { tone3000IsSearching = false }
+        do {
+            let result = try await backend.tone3000Search(query: tone3000Query, page: page, sort: "")
+            tone3000Tones = result.tones
+            tone3000Page = result.page
+            tone3000TotalPages = result.totalPages
+        } catch let error as BackendError {
+            tone3000Error = error
+            tone3000Tones = []
+        } catch {
+            tone3000Error = BackendError(summary: "Tone3000 search failed unexpectedly.", technicalDetails: error.localizedDescription)
+            tone3000Tones = []
+        }
+    }
+
+    func tone3000SelectTone(_ tone: Tone3000Tone) async {
+        tone3000SelectedTone = tone
+        tone3000IsLoadingModels = true
+        tone3000Error = nil
+        defer { tone3000IsLoadingModels = false }
+        do {
+            tone3000Models = try await backend.tone3000Models(toneId: tone.id)
+        } catch let error as BackendError {
+            tone3000Error = error
+            tone3000Models = []
+        } catch {
+            tone3000Error = BackendError(summary: "Tone3000 model list failed unexpectedly.", technicalDetails: error.localizedDescription)
+            tone3000Models = []
+        }
+    }
+
+    func tone3000DownloadModel(_ model: Tone3000Model) async {
+        tone3000IsDownloading = true
+        tone3000Error = nil
+        defer { tone3000IsDownloading = false }
+        do {
+            let url = try await backend.tone3000Download(modelId: model.id, toneId: model.toneId, outputDirectory: tone3000DownloadDirectory)
+            tone3000DownloadedNamURL = url
+            appendDiagnostic("[tone3000] downloaded: \(url.path)")
+        } catch let error as BackendError {
+            tone3000Error = error
+        } catch {
+            tone3000Error = BackendError(summary: "Tone3000 download failed unexpectedly.", technicalDetails: error.localizedDescription)
+        }
+    }
+
+    func tone3000RunPreview(play: Bool) async {
+        guard let namURL = tone3000DownloadedNamURL, let inputWav = tone3000PreviewInputWav else { return }
+        tone3000IsPreviewing = true
+        tone3000Error = nil
+        defer { tone3000IsPreviewing = false }
+        do {
+            let outcome = try await backend.tone3000Preview(namPath: namURL, inputWav: inputWav, outputWav: nil, play: play)
+            tone3000LastPreviewOutcome = outcome
+            appendDiagnostic("[tone3000] preview rendered: \(outcome.outputPath) played=\(outcome.played)")
+        } catch let error as BackendError {
+            tone3000Error = error
+            appendDiagnostic("[tone3000] preview failed: \(error.summary) -- \(error.technicalDetails)")
+        } catch {
+            tone3000Error = BackendError(summary: "Preview failed unexpectedly.", technicalDetails: error.localizedDescription)
         }
     }
 }

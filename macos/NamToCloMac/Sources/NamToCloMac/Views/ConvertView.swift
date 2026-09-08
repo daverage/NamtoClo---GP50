@@ -264,4 +264,5 @@ struct ConvertView: View {
 
 extension Notification.Name {
     static let switchToUploadTab = Notification.Name("switchToUploadTab")
+    static let switchToConvertTab = Notification.Name("switchToConvertTab")
 }
