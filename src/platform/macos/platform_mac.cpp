@@ -1,6 +1,8 @@
 #include "platform.hpp"
 
 #include <mach-o/dyld.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
@@ -58,6 +60,23 @@ fs::path executablePath() {
 
 std::string platformErrorMessage(const std::uint32_t code) {
     return std::strerror(static_cast<int>(code));
+}
+
+// "System player" preview playback (see tone3000_preview.hpp / the tone3000
+// integration plan): shells out to afplay (ships with every macOS install,
+// no new dependency) and blocks until it exits, rather than building a
+// CoreAudio real-time engine.
+bool playAudioFileBlocking(const fs::path& wav, std::string& error) {
+    const pid_t pid = fork();
+    if (pid < 0) { error = std::string("fork() failed: ") + std::strerror(errno); return false; }
+    if (pid == 0) {
+        execlp("afplay", "afplay", wav.c_str(), static_cast<char*>(nullptr));
+        _exit(127); // execlp only returns on failure
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) { error = std::string("waitpid() failed: ") + std::strerror(errno); return false; }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { error = "afplay could not play the rendered preview WAV"; return false; }
+    return true;
 }
 
 } // namespace ntc

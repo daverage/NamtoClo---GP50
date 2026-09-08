@@ -20,6 +20,14 @@
 //   slots [--json]
 //   upload <file.clo> --slot N [--debug-midi] [--json]
 //   clo-info <file.clo> [--json]
+//   tone3000 login [--publishable-key t3k_pub_...] [--json]   (macOS only)
+//   tone3000 logout [--json]                                  (macOS only)
+//   tone3000 search <query> [--page N] [--sort ...] [--json]  (macOS only)
+//   tone3000 models <tone-id> [--json]                        (macOS only)
+//   tone3000 download <model-id> --tone <tone-id>
+//                      --output <dir> [--json]                (macOS only)
+//   tone3000 preview <nam-file> --input <wav>
+//                     [--output <wav>] [--no-play] [--json]   (macOS only)
 
 #include "native_converter.hpp"
 #include "gp5_clo_upload.hpp"
@@ -27,7 +35,13 @@
 #include "midi_transport.hpp"
 #include "common.hpp"
 #include "platform.hpp"
+#if defined(__APPLE__)
+#include "net_client.hpp"
+#include "tone3000_client.hpp"
+#include "tone3000_preview.hpp"
+#endif
 
+#include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <sstream>
@@ -49,7 +63,16 @@ void printUsage() {
         "  namtoclo midi-list [--json]\n"
         "  namtoclo slots [--json]\n"
         "  namtoclo upload <file.clo> --slot N [--debug-midi] [--json]\n"
-        "  namtoclo clo-info <file.clo> [--json]\n";
+        "  namtoclo clo-info <file.clo> [--json]\n"
+#if defined(__APPLE__)
+        "  namtoclo tone3000 login [--publishable-key t3k_pub_...] [--json]\n"
+        "  namtoclo tone3000 logout [--json]\n"
+        "  namtoclo tone3000 search <query> [--page N] [--sort best-match|...] [--json]\n"
+        "  namtoclo tone3000 models <tone-id> [--json]\n"
+        "  namtoclo tone3000 download <model-id> --tone <tone-id> --output <dir> [--json]\n"
+        "  namtoclo tone3000 preview <nam-file> --input <wav> [--output <wav>] [--no-play] [--json]\n"
+#endif
+        ;
 }
 
 struct Args {
@@ -64,6 +87,13 @@ struct Args {
     std::string correctiveIr;
     std::string device; // accepted; see midi-list for why device selection is limited today
     int slot = -1;
+    // tone3000 (macOS only -- see net_client.hpp)
+    std::string publishableKey;
+    std::string input;
+    std::int64_t toneId = -1;
+    int page = 1;
+    std::string sort;
+    bool noPlay = false;
 };
 
 Args parseArgs(int argc, char** argv, int startAt) {
@@ -87,6 +117,12 @@ Args parseArgs(int argc, char** argv, int startAt) {
         else if (arg == "--corrective-ir") a.correctiveIr = next("--corrective-ir");
         else if (arg == "--slot") a.slot = std::stoi(next("--slot"));
         else if (arg == "--device") a.device = next("--device");
+        else if (arg == "--publishable-key") a.publishableKey = next("--publishable-key");
+        else if (arg == "--input") a.input = next("--input");
+        else if (arg == "--tone") a.toneId = std::stoll(next("--tone"));
+        else if (arg == "--page") a.page = std::stoi(next("--page"));
+        else if (arg == "--sort") a.sort = next("--sort");
+        else if (arg == "--no-play") a.noPlay = true;
         else a.positional.push_back(arg);
     }
     return a;
@@ -128,6 +164,10 @@ public:
         return *this;
     }
     JsonObj& num(const std::string& k, std::uint64_t v) {
+        field(k, std::to_string(v));
+        return *this;
+    }
+    JsonObj& num(const std::string& k, std::int64_t v) {
         field(k, std::to_string(v));
         return *this;
     }
@@ -393,6 +433,225 @@ int cmdCloInfo(const Args& a) {
     return info.exists ? 0 : 1;
 }
 
+#if defined(__APPLE__)
+
+constexpr const char* kT3kPublishableKeySecret = "tone3000.publishableKey";
+constexpr const char* kT3kRefreshTokenSecret = "tone3000.refreshToken";
+
+void printJsonError(const std::string& operation, const std::string& error) {
+    JsonObj o;
+    o.boolean("ok", false).str("operation", operation).str("error", error);
+    std::cout << o.build() << "\n";
+}
+
+bool loadOrUseGivenPublishableKey(const Args& a, std::string& key, std::string& error) {
+    if (!a.publishableKey.empty()) { key = a.publishableKey; return true; }
+    if (ntc::net::loadSecret(kT3kPublishableKeySecret, key) && !key.empty()) return true;
+    error = "No Tone3000 publishable key saved. Pass --publishable-key t3k_pub_... once.";
+    return false;
+}
+
+// Loads the saved publishable key (or the one just supplied) and the saved
+// refresh token, then restores the session. On success the (possibly
+// rotated) refresh token is written back to the Keychain.
+bool connectTone3000Client(const Args& a, ntc::tone3000::Client& client, std::string& error) {
+    std::string key;
+    if (!loadOrUseGivenPublishableKey(a, key, error)) return false;
+    client.setPublishableKey(key);
+    std::string refreshToken;
+    if (!ntc::net::loadSecret(kT3kRefreshTokenSecret, refreshToken) || refreshToken.empty()) {
+        error = "Not connected to Tone3000. Run 'namtoclo tone3000 login' first.";
+        return false;
+    }
+    if (!client.restoreSession(refreshToken, error)) return false;
+    ntc::net::saveSecret(kT3kRefreshTokenSecret, client.refreshToken());
+    return true;
+}
+
+int cmdTone3000Login(const Args& a) {
+    std::string key, error;
+    if (!loadOrUseGivenPublishableKey(a, key, error)) {
+        if (a.json) printJsonError("tone3000-login", error); else std::cerr << error << "\n";
+        return 2;
+    }
+    ntc::net::saveSecret(kT3kPublishableKeySecret, key);
+    ntc::tone3000::Client client(key);
+    if (!client.authenticateInteractive(error)) {
+        if (a.json) printJsonError("tone3000-login", error);
+        else std::cerr << "Tone3000 login failed: " << error << "\n";
+        return 1;
+    }
+    ntc::net::saveSecret(kT3kRefreshTokenSecret, client.refreshToken());
+    if (a.json) { JsonObj o; o.boolean("ok", true).str("operation", "tone3000-login"); std::cout << o.build() << "\n"; }
+    else std::cout << "Connected to Tone3000.\n";
+    return 0;
+}
+
+int cmdTone3000Logout(const Args& a) {
+    ntc::net::deleteSecret(kT3kRefreshTokenSecret);
+    if (a.json) { JsonObj o; o.boolean("ok", true).str("operation", "tone3000-logout"); std::cout << o.build() << "\n"; }
+    else std::cout << "Disconnected from Tone3000.\n";
+    return 0;
+}
+
+int cmdTone3000Search(const Args& a) {
+    if (a.positional.empty()) { std::cerr << "tone3000 search: missing <query>\n"; return 2; }
+    ntc::tone3000::Client client;
+    std::string error;
+    if (!connectTone3000Client(a, client, error)) {
+        if (a.json) printJsonError("tone3000-search", error); else std::cerr << error << "\n";
+        return 1;
+    }
+    std::vector<ntc::tone3000::Tone> tones;
+    int totalPages = 1, totalResults = 0;
+    if (!client.searchNamTones(a.positional.front(), a.page, a.sort, tones, totalPages, totalResults, error)) {
+        if (a.json) printJsonError("tone3000-search", error);
+        else std::cerr << "Tone3000 search failed: " << error << "\n";
+        return 1;
+    }
+    if (a.json) {
+        std::string arr = "[";
+        for (std::size_t i = 0; i < tones.size(); ++i) {
+            if (i) arr += ",";
+            const auto& t = tones[i];
+            JsonObj o;
+            o.num("id", t.id).str("title", t.title).str("creator", t.creator).str("gear", t.gear)
+             .str("license", t.license).num("models_count", t.modelsCount)
+             .num("downloads_count", t.downloadsCount).num("favorites_count", t.favoritesCount);
+            arr += o.build();
+        }
+        arr += "]";
+        JsonObj o;
+        o.boolean("ok", true).num("page", a.page).num("total_pages", totalPages)
+         .num("total_results", totalResults).raw("tones", arr);
+        std::cout << "{\"operation\":\"tone3000-search\"," << o.build().substr(1, o.build().size() - 2) << "}\n";
+    } else {
+        for (const auto& t : tones) std::cout << t.id << "  " << t.title << "  (" << t.creator << ")  " << t.gear << "\n";
+        std::cout << "Page " << a.page << "/" << totalPages << ", " << totalResults << " total\n";
+    }
+    return 0;
+}
+
+int cmdTone3000Models(const Args& a) {
+    if (a.positional.empty()) { std::cerr << "tone3000 models: missing <tone-id>\n"; return 2; }
+    ntc::tone3000::Client client;
+    std::string error;
+    if (!connectTone3000Client(a, client, error)) {
+        if (a.json) printJsonError("tone3000-models", error); else std::cerr << error << "\n";
+        return 1;
+    }
+    const std::int64_t toneId = std::stoll(a.positional.front());
+    std::vector<ntc::tone3000::Model> models;
+    if (!client.listModels(toneId, models, error)) {
+        if (a.json) printJsonError("tone3000-models", error);
+        else std::cerr << "Tone3000 model list failed: " << error << "\n";
+        return 1;
+    }
+    if (a.json) {
+        std::string arr = "[";
+        for (std::size_t i = 0; i < models.size(); ++i) {
+            if (i) arr += ",";
+            const auto& m = models[i];
+            JsonObj o;
+            o.num("id", m.id).num("tone_id", m.toneId).str("name", m.name).str("size", m.size)
+             .str("architecture_version", m.architectureVersion).str("model_url", m.modelUrl);
+            arr += o.build();
+        }
+        arr += "]";
+        JsonObj o;
+        o.boolean("ok", true).raw("models", arr);
+        std::cout << "{\"operation\":\"tone3000-models\"," << o.build().substr(1, o.build().size() - 2) << "}\n";
+    } else {
+        for (const auto& m : models) std::cout << m.id << "  " << m.name << "  " << m.size << "\n";
+    }
+    return 0;
+}
+
+int cmdTone3000Download(const Args& a) {
+    if (a.positional.empty()) { std::cerr << "tone3000 download: missing <model-id>\n"; return 2; }
+    if (a.toneId < 0) { std::cerr << "tone3000 download: --tone <tone-id> is required\n"; return 2; }
+    if (a.output.empty()) { std::cerr << "tone3000 download: --output <dir> is required\n"; return 2; }
+    ntc::tone3000::Client client;
+    std::string error;
+    if (!connectTone3000Client(a, client, error)) {
+        if (a.json) printJsonError("tone3000-download", error); else std::cerr << error << "\n";
+        return 1;
+    }
+    const std::int64_t modelId = std::stoll(a.positional.front());
+    std::vector<ntc::tone3000::Model> models;
+    if (!client.listModels(a.toneId, models, error)) {
+        if (a.json) printJsonError("tone3000-download", error);
+        else std::cerr << "Tone3000 model list failed: " << error << "\n";
+        return 1;
+    }
+    const auto it = std::find_if(models.begin(), models.end(), [&](const auto& m) { return m.id == modelId; });
+    if (it == models.end()) {
+        error = "Model " + std::to_string(modelId) + " not found under tone " + std::to_string(a.toneId);
+        if (a.json) printJsonError("tone3000-download", error); else std::cerr << error << "\n";
+        return 1;
+    }
+    const fs::path destination = fs::path(a.output) / ((it->name.empty() ? std::to_string(it->id) : it->name) + ".nam");
+    if (!client.downloadModel(*it, destination, error)) {
+        if (a.json) printJsonError("tone3000-download", error);
+        else std::cerr << "Tone3000 download failed: " << error << "\n";
+        return 1;
+    }
+    if (a.json) {
+        JsonObj o;
+        o.boolean("ok", true).str("operation", "tone3000-download").str("output", destination.string());
+        std::cout << o.build() << "\n";
+    } else {
+        std::cout << "Downloaded: " << destination.string() << "\n";
+    }
+    return 0;
+}
+
+int cmdTone3000Preview(const Args& a) {
+    if (a.positional.empty()) { std::cerr << "tone3000 preview: missing <nam-file>\n"; return 2; }
+    if (a.input.empty()) { std::cerr << "tone3000 preview: --input <wav> is required\n"; return 2; }
+    const fs::path namPath = a.positional.front();
+    const fs::path outputWav = a.output.empty()
+        ? fs::temp_directory_path() / "namtoclo_tone3000_preview.wav" : fs::path(a.output);
+    std::string error;
+    if (a.json) emitEventFields("start", "\"operation\":\"tone3000-preview\"");
+    if (!ntc::renderNamPreview(namPath, a.input, outputWav, error)) {
+        if (a.json) {
+            JsonObj o;
+            o.boolean("ok", false).str("error", error);
+            emitEventFields("complete", o.build().substr(1, o.build().size() - 2));
+        } else {
+            std::cerr << "Preview render failed: " << error << "\n";
+        }
+        return 1;
+    }
+    bool played = false;
+    if (!a.noPlay) {
+        played = ntc::playAudioFileBlocking(outputWav, error);
+        if (!played && !a.json) std::cerr << "Could not play preview: " << error << "\n";
+    }
+    if (a.json) {
+        JsonObj o;
+        o.boolean("ok", true).str("output", outputWav.string()).boolean("played", played);
+        emitEventFields("complete", o.build().substr(1, o.build().size() - 2));
+    } else {
+        std::cout << "Rendered: " << outputWav.string() << "\n";
+    }
+    return 0;
+}
+
+int cmdTone3000(const std::string& sub, const Args& a) {
+    if (sub == "login") return cmdTone3000Login(a);
+    if (sub == "logout") return cmdTone3000Logout(a);
+    if (sub == "search") return cmdTone3000Search(a);
+    if (sub == "models") return cmdTone3000Models(a);
+    if (sub == "download") return cmdTone3000Download(a);
+    if (sub == "preview") return cmdTone3000Preview(a);
+    std::cerr << "Unknown tone3000 subcommand: " << sub << "\n";
+    return 2;
+}
+
+#endif // defined(__APPLE__)
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -401,6 +660,22 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string command = argv[1];
+
+    if (command == "tone3000") {
+#if defined(__APPLE__)
+        if (argc < 3) {
+            std::cerr << "tone3000: missing subcommand (login|logout|search|models|download|preview)\n";
+            return 2;
+        }
+        const std::string sub = argv[2];
+        const Args a = parseArgs(argc, argv, 3);
+        return cmdTone3000(sub, a);
+#else
+        std::cerr << "tone3000: not available on this build (macOS only)\n";
+        return 2;
+#endif
+    }
+
     const Args a = parseArgs(argc, argv, 2);
 
     if (command == "convert") return cmdConvert(a);
