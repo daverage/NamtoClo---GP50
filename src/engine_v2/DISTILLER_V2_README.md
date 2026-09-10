@@ -1,37 +1,106 @@
 # EngineV2 clean-sheet CLO distiller
 
-This is the first experimental distillation pass built around the cached teacher
-dataset. It intentionally does **not** use an approximate CLO from the production
-converter as its seed.
+This directory contains the experimental teacher/student NAM -> GP50 distillation work.
+The governing research intent is recorded in `ENGINE_V2_RESEARCH_NORTH_STAR.md`.
 
-## What it fits
-
-The GP5/GP50 structure is fixed to:
+The GP5/GP50 runtime structure is fixed to:
 
 ```text
 PRE(identity) -> A128 -> 4x asymmetric P/K -> POST(fixed) -> B512
 ```
 
-`B512` is not treated as 512 outer optimisation variables. For every proposed
-`A + P/K` candidate, the script renders the pre-B signal and solves one shared
-regularised least-squares B across all fit clips.
+The GP50 blocks are hardware constraints, not assumed conceptual amp stages. In particular,
+A and P/K are allowed to cooperate: A may deliberately shape which frequencies drive the
+nonlinear stage, while B completes the post-nonlinearity linear response and output level.
 
-A is represented by smooth log-frequency magnitude controls and converted to a
-minimum-phase A128 FIR.
+## Canonical North Star experiment
 
-Outer moves are accepted only when the disjoint `selection` material improves.
-`benchmark` material is scored only after the search.
+Use `train_namtoclo_north_star.py` for the original first-prototype hypothesis described in
+the North Star document.
 
-## Install
+For each NAM it fits exactly the compact evidence set:
 
-```bash
-python3 -m pip install numpy scipy soundfile numba
+```text
+SYSTEM IDENTIFICATION (FIT)
+  04_log_sweep_-36dBFS.wav
+  07_multisine_level_ladder.wav
+  09_1kHz_level_ladder.wav
+  10_frequency_level_matrix.wav
+  11_two_tone_IMD_matrix.wav
+  13_tone_burst_transients.wav
+
+REAL GUITAR
+  6 deterministic real-DI FIT performances
+  4 disjoint real-DI SELECTION performances
+  3 held-out real-DI BENCHMARK performances
 ```
 
-## Start with a smoke test
+The historical role tag on a synthetic probe does not control the canonical experiment: all
+six identification probes participate in FIT. Real selection and benchmark material never
+moves into FIT.
+
+The North Star optimiser uses:
+
+- joint/cooperative A + P/K coordinate search;
+- one shared analytic B512 solve for every candidate;
+- target-energy-normalized B solving so loud probes do not dominate quiet probes;
+- mean aligned ESR (direct teacher/student waveform error) for FIT candidate moves;
+- disjoint real-DI mean aligned ESR as the round-selection gate;
+- no level-response penalty;
+- no distortion-excess penalty;
+- no independently derived P/K target;
+- no named-amp special cases.
+
+Matched real-guitar level sweeps and nonlinear-residual measurements are still reported, but
+they are diagnostics only and are calculated after the fitted coefficients are frozen.
+
+Final loudness correction, when enabled, uses only real FIT material and scales B512 after
+P/K. It never increases pre-P/K drive as a volume fix.
+
+### First North Star run
+
+From `src/engine_v2`:
 
 ```bash
-python3 src/engine_v2/train_namtoclo_distiller.py \
+python3 train_namtoclo_north_star.py \
+  --teacher-root ~/NamtoCloTeacherDataset \
+  --output ~/NamtoCloNorthStar_JCM800_G5 \
+  --model-regex "^JCM800 2203 D\.I\. - G5 B5 M5 T5 P5 V5 - STD$" \
+  --a-controls 24 \
+  --rounds 3 \
+  --pk-passes 3 \
+  --level-groups 3 \
+  --threads 1
+```
+
+Run the North Star self-tests first after pulling new changes:
+
+```bash
+python3 test_north_star.py
+python3 test_distiller_v2.py
+```
+
+Each NAM output directory contains:
+
+- `report.json` with the exact material/task manifest and optimisation philosophy;
+- `distilled.clo`;
+- real-DI fit/selection/benchmark NAM-vs-CLO preview WAVs.
+
+The output root contains `summary.json`.
+
+## Earlier experimental trainer
+
+`train_namtoclo_distiller.py` is retained for comparison with the earlier clean-sheet
+experiments. It supports matched-level and distortion-excess objective terms that were useful
+research probes but are **not** part of the canonical North Star experiment.
+
+Do not use those terms as the default EngineV2 philosophy merely because they can improve one
+named NAM's development metrics.
+
+Example legacy smoke run:
+
+```bash
+python3 train_namtoclo_distiller.py \
   --teacher-root ~/NamtoCloTeacherDataset \
   --output ~/NamtoCloDistillerSmoke \
   --model-regex "JC" \
@@ -42,46 +111,34 @@ python3 src/engine_v2/train_namtoclo_distiller.py \
   --rounds 1
 ```
 
-## Five-NAM proof
+## Install
 
 ```bash
-python3 src/engine_v2/train_namtoclo_distiller.py \
-  --teacher-root ~/NamtoCloTeacherDataset \
-  --output ~/NamtoCloDistillerProof \
-  --proof5 \
-  --fit-seconds 60 \
-  --selection-seconds 30 \
-  --benchmark-seconds 30 \
-  --a-controls 24 \
-  --rounds 3
+python3 -m pip install numpy scipy soundfile numba
 ```
 
-## Outputs
+## Validation
 
-Each NAM gets:
-
-- `report.json`
-- `distilled.clo`
-- `preview_fit_input.wav`, `preview_fit_nam.wav`, `preview_fit_clo.wav` (and selection/benchmark equivalents when available)
-
-The output root also gets `summary.json`.
-
-Validate a generated file with the existing EngineV2 CLI:
+Validate a generated file with the existing EngineV2 CLI, adjusting the binary path for your
+build directory:
 
 ```bash
-./build/namtoclo clo-info ~/NamtoCloDistillerProof/.../distilled.clo
+../../build-macos/namtoclo clo-info ~/NamtoCloNorthStar_JCM800_G5/.../distilled.clo
 ```
 
-## Important status
+The decisive research comparison remains:
 
-This is a research candidate generator, not yet the production converter.
+```text
+NAM teacher
+vs
+existing/old NamToClo GP50 result
+vs
+North Star EngineV2 GP50 result
+```
 
-Before replacing production conversion we still need to:
+on the same held-out real guitar and then on real GP50 hardware. Software metrics are
+engineering evidence; hardware listening remains an acceptance gate.
 
-1. compare its benchmark metrics against EngineV2's current direct-fit baseline;
-2. listen to representative clean / crunch / high-gain / fuzz candidates;
-3. upload selected candidates to real GP50 hardware;
-4. verify the Python render against the C++ device-model renderer on identical
-   coefficients and inputs.
-
-Only then should the new algorithm move into `src/core`.
+This is research code, not yet the production converter. Only after the North Star method
+beats the existing converter broadly across clean, crunch, high-gain and held-out NAMs should
+it move into `src/core`.
