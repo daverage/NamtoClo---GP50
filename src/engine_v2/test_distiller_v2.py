@@ -19,11 +19,16 @@ def main():
     assert abs(fast.signed_level_db-exact.signed_level_db)<1e-8,(fast.signed_level_db,exact.signed_level_db)
 
     # Final level calibration is a single linear scale on B, derived from
-    # selection material. A target exactly twice as loud should produce +6.02 dB.
-    scaled,gain_db,before,after=_calibrate_output_gain([(x,2.0*y,None)],a,pk,b)
+    # selection material. A target exactly twice as loud should request and
+    # apply +6.02 dB; because its peaks are also exactly twice as high, peak
+    # safety must not limit that correction.
+    scaled,gain_db,before,after,info=_calibrate_output_gain([(x,2.0*y,None)],a,pk,b)
     assert abs(gain_db-6.020599913)<1e-5,gain_db
     assert abs(scaled[0]-.5)<1e-6,scaled[0]
     assert abs(after.signed_level_db)<1e-5,after.signed_level_db
+    assert abs(info['requested_rms_gain_db']-6.020599913)<1e-5,info
+    assert not info['limited_by_peak_safety'],info
+    assert info['peak_safe_cap_db']>=gain_db,info
 
     # FFT lag search must preserve the old aligned-ESR behaviour.
     rng=np.random.default_rng(260910);t=rng.standard_normal(4096);p=np.concatenate((np.zeros(17),t[:-17]));assert _aligned_esr(p,t)<1e-12
