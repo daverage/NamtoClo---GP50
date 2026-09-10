@@ -131,6 +131,62 @@ Each NAM output directory contains:
 
 The output root contains `summary.json`.
 
+## Three-way held-out evaluator
+
+`evaluate_north_star_vs_original.py` is evaluation-only. It never changes fit coefficients.
+It compares the authoritative cached NAMCore teacher target against both an ordinary NamToClo
+compact GP5/GP50 CLO and a frozen North Star v2 CLO.
+
+To avoid the earlier model-to-model benchmark mismatch, it first intersects the real benchmark
+corpus by dataset + source identity + start + duration and chooses the exact same underlying
+held-out performances for every selected NAM. Different NAMs therefore see identical DI
+performances during the comparison.
+
+The evaluator renders each compact CLO from the coefficients actually stored in that file,
+including PRE, A128, P/K, POST and B512. This avoids assuming that the ordinary converter and
+North Star wrote identical fixed filter coefficients.
+
+For each system it reports:
+
+- absolute aligned ESR and signed output-level error;
+- gain-matched ESR;
+- dense teacher-relative spectral error from 20 Hz to 20 kHz using 144 logarithmic bands;
+- broad summaries from 20-35 Hz sub headroom through bass, body, mids, presence, fizz, air and
+  18-20 kHz Nyquist headroom;
+- teacher-energy confidence flags so near-silent frequency regions are not over-interpreted;
+- low-level/tail ESR and full-spectrum tail error using input frames 20-50 dB below normal
+  playing level while excluding numerical silence;
+- nonlinear residual difference as a diagnostic only;
+- CSV/JSON output plus optional PNG plots when matplotlib is installed;
+- a four-way listening preview for the first held-out clip: input, NAM teacher, original CLO,
+  North Star v2 CLO.
+
+Put the three ordinary NamToClo GP5/GP50 CLO files in one directory, then run the self-test:
+
+```bash
+python3 test_three_way_evaluator.py
+```
+
+Example JC / JCM G3 / JCM G10 comparison:
+
+```bash
+python3 evaluate_north_star_vs_original.py \
+  --teacher-root ~/NamtoCloTeacherDataset \
+  --original-root ~/NamtoCloOriginal_TestTriad \
+  --north-star-root ~/NamtoCloNorthStarV2_TestTriad \
+  --output ~/NamtoCloThreeWayEval \
+  --model-regex "^(Roland JC 120B Jazz Chorus: Bright Off, SM57|JCM800 2203 D\.I\. - G(3|10) B5 M5 T5 P5 V5 - STD)$" \
+  --benchmark-count 3
+```
+
+The ordinary converter directory is discovered by model ID from filenames ending in
+`_NATIVE_GP5GP50_512.clo`. North Star v2 files are discovered from the normal per-model
+`distilled.clo` output directories.
+
+The model directory contains `per_clip.csv`, `bands.csv`, `spectrum.csv`, tail equivalents,
+preview WAVs, `summary.json`, and spectral plots when matplotlib is available. The output root
+contains the overall `summary.json`.
+
 ## Earlier experimental trainer
 
 `train_namtoclo_distiller.py` is retained for comparison with the earlier clean-sheet
@@ -158,6 +214,12 @@ python3 train_namtoclo_distiller.py \
 
 ```bash
 python3 -m pip install numpy scipy soundfile numba
+```
+
+Install matplotlib as well if you want the evaluator PNG plots:
+
+```bash
+python3 -m pip install matplotlib
 ```
 
 ## Validation
