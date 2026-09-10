@@ -87,20 +87,29 @@ def _calibrate_output_gain(audio,a,pk,b,max_abs_db=12.0,peak_margin_db=0.25):
     """Apply one final linear output-gain correction to B, safely.
 
     RMS level supplies the desired correction, but real-guitar selection-set
-    peak and 99.9th-percentile envelopes cap it so calibration cannot turn a
-    dynamics mismatch into extra clipping. Benchmark audio is never used.
+    peak and 99.9th-percentile envelopes cap positive gain so calibration
+    cannot turn a dynamics mismatch into extra clipping. Peak safety is a cap,
+    never a request to attenuate an already-too-quiet model. Benchmark audio
+    is never used.
     """
     if not audio:return b.copy(),0.0,None,None,{}
     source=list(audio);cal_audio=_real_audio(source)
     before=score(cal_audio,a,pk,b)
     requested_db=float(np.clip(-before.signed_level_db,-max_abs_db,max_abs_db))
     peak_cap_db,peak_details=_peak_safe_gain_cap(cal_audio,a,pk,b,peak_margin_db)
-    gain_db=float(np.clip(min(requested_db,peak_cap_db),-max_abs_db,max_abs_db))
+    if requested_db>0.0:
+        # A negative peak cap means at least one transient is already above
+        # the NAM envelope. In that case the safest correction is no boost,
+        # not reversing the requested positive correction into attenuation.
+        gain_db=float(np.clip(min(requested_db,max(0.0,peak_cap_db)),0.0,max_abs_db))
+    else:
+        # Attenuation only reduces peaks, so no peak-safety cap is required.
+        gain_db=requested_db
     scaled=b*(10.0**(gain_db/20.0));after=score(cal_audio,a,pk,scaled)
     real_count=sum(1 for z in source if not bool(getattr(z[2],'synthetic',False)))
     info={
         'requested_rms_gain_db':requested_db,'peak_safe_cap_db':peak_cap_db,'peak_margin_db':peak_margin_db,
-        'applied_gain_db':gain_db,'limited_by_peak_safety':bool(gain_db < requested_db-1e-9),'clips':peak_details,
+        'applied_gain_db':gain_db,'limited_by_peak_safety':bool(requested_db>0.0 and gain_db < requested_db-1e-9),'clips':peak_details,
         'clips_total':len(source),'clips_used':len(cal_audio),'real_clips_available':real_count,
         'excluded_synthetic_clips':len(source)-len(cal_audio),'calibration_material':'real-guitar' if real_count else 'all-selection',
     }
