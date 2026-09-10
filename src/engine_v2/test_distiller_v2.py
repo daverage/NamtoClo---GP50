@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 from distiller_v2_dsp import controls_to_a,post_coeffs,render_full,write_clo,crc16_modbus
 from distiller_v2_fit import Candidate,Metrics,_selection_score,_aligned_esr,score
+from train_namtoclo_distiller import _calibrate_output_gain
 
 def main():
     a=controls_to_a(np.zeros(24));assert len(a)==128 and abs(a[0]-1)<1e-4 and np.max(np.abs(a[1:]))<1e-4
@@ -16,6 +17,13 @@ def main():
     assert exact.esr<1e-15,exact.esr
     assert fast.esr<1e-12,fast.esr
     assert abs(fast.signed_level_db-exact.signed_level_db)<1e-8,(fast.signed_level_db,exact.signed_level_db)
+
+    # Final level calibration is a single linear scale on B, derived from
+    # selection material. A target exactly twice as loud should produce +6.02 dB.
+    scaled,gain_db,before,after=_calibrate_output_gain([(x,2.0*y,None)],a,pk,b)
+    assert abs(gain_db-6.020599913)<1e-5,gain_db
+    assert abs(scaled[0]-.5)<1e-6,scaled[0]
+    assert abs(after.signed_level_db)<1e-5,after.signed_level_db
 
     # FFT lag search must preserve the old aligned-ESR behaviour.
     rng=np.random.default_rng(260910);t=rng.standard_normal(4096);p=np.concatenate((np.zeros(17),t[:-17]));assert _aligned_esr(p,t)<1e-12
