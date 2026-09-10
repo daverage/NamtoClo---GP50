@@ -1,16 +1,18 @@
 # EngineV2 research north star
 
-This document exists to prevent the clean-sheet NAM -> GP50 research from drifting into incremental patching of the existing converter, overfitting individual NAMs, or turning exploratory ideas into architecture without evidence.
+This document exists to prevent the clean-sheet NAM -> GP50 research from drifting into incremental patching of the existing converter, overfitting individual NAMs, or turning exploratory diagnostics into the conversion philosophy.
 
-It describes the original purpose of EngineV2, why the research corpora and teacher dataset were created, what "teacher/student" means in this project, what counts as progress, and what should trigger a reset.
+It records the **original EngineV2 idea**: why the corpus exists, why we created cached NAM teacher renders, what the teacher/student model means, how the GP50 student was intended to be fitted, and what evidence is required before we can say the new engine is actually better.
+
+---
 
 ## The original goal
 
 The goal is **not** to recreate Valeton's undocumented NAM-to-CLO conversion algorithm more accurately.
 
-The goal is **not** to reproduce the original NamToClo software internally and then optimise a few constants around it.
+The goal is **not** to reproduce the original NamToClo fitting method and then improve a few constants.
 
-The goal is **not** to make a small set of hand-picked NAMs score well.
+The goal is **not** to make a handful of named NAMs score well.
 
 The goal is:
 
@@ -18,19 +20,21 @@ The goal is:
 
 The source NAM is the behavioural authority.
 
-The GP50 CLO structure is a constrained student architecture.
+The GP50 CLO structure is the constrained student architecture.
 
-EngineV2 exists to discover the best general method for projecting one into the other.
+The existing NamToClo converter is the baseline to beat, not the design template.
 
-## The original experimental hypothesis
+---
 
-The central hypothesis behind EngineV2 was deliberately simple:
+## The central hypothesis
 
-> If we expose the NAM teacher and the GP50 student to a small but highly informative set of controlled probes and real guitar performances, can we fit the complete GP50 architecture closely enough to beat the existing NamToClo converter on unseen guitar playing and real hardware?
+The original experiment was deliberately simple:
 
-The first prototype was never intended to require hours of random guitar or hundreds of arbitrary probes.
+> If we expose the NAM teacher and the complete GP50 student to a small but highly informative combination of controlled system-identification probes and varied real guitar DI, can we fit the GP50 architecture closely enough to beat the existing NamToClo converter on unseen guitar playing and real hardware?
 
-The intended starting point was a **compact identification corpus** containing enough complementary information to expose the important behaviours:
+The intended experiment was **not** based on hours of random guitar and it was **not** based on one special conversion stimulus.
+
+It was based on deliberately chosen information:
 
 ```text
 controlled system-identification probes
@@ -42,205 +46,201 @@ disjoint real DI selection corpus
 held-out real DI benchmark corpus
 ```
 
-If that compact information set cannot produce a better general conversion, simply adding much more data is unlikely to fix a flawed fitting philosophy.
+If that compact information set cannot produce a generally better conversion, adding hundreds more probes or hours of redundant material is unlikely to rescue a flawed fitting philosophy.
 
-## What "clean-sheet" means here
+---
 
-We know the GP50 runtime structure we must ultimately serialize:
+# Canonical first-prototype experiment
+
+This section is the reference version of the experiment we originally set out to build.
+
+## Real guitar corpus
+
+The active guitar corpus should be deliberately small but varied. Roughly **12 dry DI performances of 8-15 seconds each** is enough for the first serious experiment.
+
+Recordings should be:
+
+- instrument/DI only;
+- mono;
+- no amp, cab, EQ, compression or noise gate;
+- preferably 44.1 kHz / 24-bit for the canonical GP50 corpus;
+- ordinary playing peaks around roughly -12 to -6 dBFS;
+- not individually normalised afterwards.
+
+The playing material should expose different behaviours rather than simply provide more minutes of guitar:
+
+| Clip | Playing | Why |
+| --- | --- | --- |
+| G01 | Sparse single notes, soft picking | clean / low-level response |
+| G02 | Similar notes, hard picking | pick dynamics |
+| G03 | Sustained notes across low/mid/high strings | compression, decay, harmonics |
+| G04 | Open chords, gentle -> hard | complex harmonic content |
+| G05 | Power chords | typical distorted workload |
+| G06 | Tight low-string palm mutes | transient / high-gain behaviour |
+| G07 | Fast alternate-picked single notes | attack / recovery |
+| G08 | Legato / hammer-ons / pull-offs | low-transient behaviour |
+| G09 | Arpeggiated clean-ish chords | note separation |
+| G10 | Mixed riff: chords, singles, mutes | realistic generalisation |
+| G11 | Same riff gradually softer / harder | dynamic transition |
+| G12 | Real guitar-volume rollback performance | real-world cleanup behaviour |
+
+Where possible, use more than one pickup family. A useful pattern is:
 
 ```text
-PRE -> A128 -> oversampled asymmetric P/K nonlinearity -> POST -> B512
+FIT       main guitar / pickup
+SELECTION different pickup/source
+BENCHMARK third pickup/source, fully held out
 ```
 
-That structure is a **hardware constraint**, not a prescribed fitting algorithm.
+For example: humbucker, traditional single coil and P90/Narrowfield-like sources.
 
-EngineV2 is free to determine A, P/K and B in any evidence-based way that produces a better behavioural approximation of the NAM.
+The point is not that these exact pickup types are mandatory. The point is that the method should not only succeed on the source it learned from.
 
-We should therefore avoid reasoning such as:
-
-> "The old converter estimated P/K this way, so EngineV2 should improve that estimate."
-
-The better question is:
-
-> "Given the GP50's available degrees of freedom, what fitting strategy most faithfully reproduces the NAM across relevant inputs?"
-
-The existing production converter is a baseline to beat, not a design template.
-
-## Why we created the audio research corpus
-
-A single stimulus cannot tell us whether a converter is genuinely good.
-
-A converter can fit one waveform extremely closely while still failing on:
-
-- different playing levels;
-- different pickups or guitars;
-- clean-up when the guitar volume is reduced;
-- transient attack;
-- compression;
-- harmonic balance;
-- low-end retention;
-- high-frequency fizz;
-- different styles of playing;
-- high-gain versus clean models.
-
-The research corpus was therefore deliberately built from several kinds of source material.
-
-The **source pool may be large**, because it gives us pickup, player, guitar and performance diversity, but the active fitting set for the first prototype should remain deliberately small and varied. We want informative examples, not hours of redundant playing.
-
-### Real guitar DI material
-
-Real DI performances are part of the experiment from the beginning, not only a final listening test.
-
-The original first-prototype plan was roughly **12 dry DI performances of 8-15 seconds each**, with ordinary playing levels and no post-recording normalisation. The performances should expose different behaviours rather than merely provide more minutes of guitar.
-
-Useful playing types include:
-
-- soft and hard-picked single notes;
-- sustained notes across the instrument;
-- open chords from gentle to hard;
-- power chords;
-- tight low-string palm mutes;
-- fast alternate picking;
-- legato;
-- arpeggios;
-- realistic mixed riffs;
-- the same riff played progressively softer/harder;
-- a genuine guitar-volume-pot rollback performance.
-
-Where possible, use different pickup families across the splits, for example humbucker, traditional single coil and P90/Narrowfield-like sources.
-
-The purpose is to test whether a method learned on one source type generalises to another.
-
-### Real guitar split
-
-The original plan deliberately allowed real DI to influence fitting while keeping other real playing independent.
-
-A representative first prototype is:
+### Suggested split
 
 ```text
 FIT
-  ~6 real DI clips
-  e.g. soft notes, sustained notes, chords, power chords,
-       palm mutes, mixed riff
+  G01 soft single notes
+  G03 sustained notes
+  G04 chords
+  G05 power chords
+  G06 palm mutes
+  G10 mixed riff
 
 SELECTION
-  ~4 different real DI clips
-  e.g. hard-picked notes, fast picking, legato, dynamic riff
-  preferably a different pickup/source
+  G02 hard-picked notes
+  G07 fast picking
+  G08 legato
+  G11 dynamic riff
+  preferably another pickup/source
 
 BENCHMARK
-  2-4 completely held-out real DI clips
-  e.g. arpeggios, actual guitar-volume rollback, unrelated riffs
+  G09 arpeggios
+  G12 real guitar-volume rollback
+  + one or two unrelated riffs
   preferably another guitar/pickup
 ```
 
-Fit guitar is allowed to influence coefficients.
+Fit material may influence coefficients.
 
-Selection guitar is allowed to choose between genuinely general candidate strategies.
+Selection material may decide whether a general candidate is better.
 
-Benchmark guitar must not influence the experiment being evaluated.
+Benchmark material must not influence the experiment being evaluated.
 
-### Controlled guitar samples
+---
 
-Controlled notes, pickups, velocities and instruments provide repeatable examples that expose differences which may be hidden in one performance.
+## Synthetic identification corpus
 
-They complement, rather than replace, played DI.
+Synthetic probes exist because deliberately artificial signals can reveal system behaviour much more clearly than guitar alone.
 
-### Synthetic system-identification probes
+They are **not fake guitar**. They are mathematical identification signals.
 
-Synthetic probes were created because different signals reveal different parts of the teacher/student mismatch much more cleanly than guitar alone.
+Selected synthetic probes are allowed to participate directly in fitting. Their role is to give the student information that guitar alone may expose only ambiguously.
 
-They are deliberately artificial. They are not fake guitar and should not be judged as musical performances.
+The first prototype only needs a compact subset:
 
-Importantly, **selected synthetic probes may participate directly in fitting**. Their purpose is not limited to post-hoc diagnostics.
+```text
+quiet log sweep
+multisine level ladder
+1 kHz level ladder
+frequency x level matrix
+two-tone IMD
+transient bursts
+```
 
-The original prototype specifically identified the following as the useful starting set:
+Polarity probes, deterministic broadband noise and the other generated probes remain useful supporting material.
 
-- quiet log sweep;
-- multisine level ladder;
-- 1 kHz level ladder;
-- frequency x level matrix;
-- two-tone intermodulation tests;
-- transient bursts;
-- optionally polarity probes and deterministic broadband noise.
+### Quiet log sweep
 
-They provide complementary information:
+A quiet sweep around -36 dBFS gives an approximation of small-signal behaviour.
 
-#### Quiet linear-response probes
+It helps reveal the combined low-drive response of:
 
-A low-level sweep, especially around -36 dBFS, approximates the NAM's small-signal response and helps expose the combined linear behaviour of the student.
+```text
+NAM teacher
+versus
+A -> P/K small-signal slope -> POST -> B
+```
 
-This is useful for fitting and initialisation, but does not imply that A and B should be interpreted as simple EQ blocks.
+This can help fitting and initialisation. It does **not** mean A and B should simply be treated as pre-EQ and post-EQ.
 
-#### Multisine level ladder
+### Multisine level ladder
 
-The same 23-tone waveform repeated at multiple input levels is particularly valuable because the excitation is identical while drive changes.
+The same 23-tone waveform is repeated at multiple levels, e.g.:
 
-It exposes changes in:
+```text
+-36
+-30
+-24
+-18
+-12
+ -9
+ -6
+ -3 dBFS peak
+```
+
+Because the waveform is otherwise identical, this directly exposes how drive changes:
 
 - gain;
 - spectrum;
 - harmonic/intermodulation content;
 - compression;
-- saturation onset and cleanup.
+- saturation onset;
+- cleanup.
 
-The smooth multisine drive ramp additionally tests whether the response changes continuously as drive rises and falls.
+The smooth -36 -> -3 -> -36 dBFS drive ramp is especially useful for seeing whether saturation onset and cleanup behave continuously.
 
-#### 1 kHz level ladder
+### 1 kHz level ladder
 
-A single-frequency ladder provides a simple view of:
+The 1 kHz ladder provides a simple controlled view of:
 
 - fundamental compression;
-- harmonic growth;
-- asymmetry;
-- output RMS and peak behaviour.
+- H2/H3/H4/etc. growth;
+- positive/negative asymmetry;
+- RMS and peak behaviour.
 
-It is useful information for understanding P/K, but it must not turn the project into "derive P/K first and then reconstruct the old converter". It is one view of the complete student fitting problem.
+This is useful information about the nonlinear problem.
 
-#### Frequency x level matrix
+It is **not** a mandate to identify P/K independently and then rebuild the old conversion method around it. It is one source of information for fitting and understanding the complete GP50 student.
 
-Testing several frequencies at several drive levels tells us whether nonlinear behaviour depends strongly on frequency.
+### Frequency x level matrix
 
-This matters because A occurs **before** P/K. A can therefore act as frequency-dependent drive shaping so the fixed GP50 nonlinearity sees a more useful signal, with B subsequently correcting the post-nonlinearity spectrum.
+Testing several frequencies at several drive levels asks an important question:
 
-#### Two-tone intermodulation
+> Does the NAM distort different frequencies differently?
 
-Two-tone tests expose nonlinear interaction products that single sine harmonics cannot.
+This is central to the new philosophy because A sits **before** P/K.
 
-They serve two purposes:
+If the NAM saturates 2.5 kHz more strongly than 100 Hz at the same digital level, a valid GP50 approximation may deliberately shape those frequencies differently in A before they hit the fixed nonlinear stage, then compensate the final spectrum in B.
 
-1. provide useful fitting information about nonlinear interaction;
-2. reveal behaviours the GP50 student may fundamentally be unable to reproduce.
+That is why A must be allowed to cooperate with P/K rather than being treated as merely a tone-EQ block.
 
-#### Broadband and transient probes
+### Two-tone IMD
 
-Deterministic broadband noise excites a large portion of the spectrum simultaneously and can be useful when solving/fitting the linear response.
+Two-tone tests expose nonlinear interaction products that single-frequency harmonic tests cannot.
 
-Transient bursts and pick-like probes expose attack, recovery and short-term behaviour that steady-state tones can miss.
+They can both:
 
-### Synthetic probes are fitting evidence, not perceptual authority
+1. provide fitting information about nonlinear interaction;
+2. expose behaviour that the GP50 student may fundamentally be unable to reproduce.
 
-The correct principle is **not** "synthetic probes are diagnostics only".
+### Transients
 
-The correct principle is:
+Frequency-specific transient bursts and pick-like broadband transients expose attack, recovery and short-term behaviour that steady-state tones miss.
 
-> Synthetic probes can be deliberately chosen fitting material because they provide strong system-identification information, but success on synthetic probes does not override failure on independent real guitar or hardware playback.
+Two conversions can have similar steady-state spectra and still feel completely different under the pick.
 
-A model that fits probes beautifully but sounds wrong on held-out guitar has not succeeded.
+### Polarity probes
 
-### Independent held-out human material
+Matched positive/negative pulses help expose asymmetry relevant to the GP50's positive and negative P/K branches.
 
-The corpus deliberately includes real playing that is not used to tune the algorithm.
+Again, they are information for the complete student rather than a reason to decompose the NAM into an assumed old-style parameter model.
 
-This exists to answer the most important research question:
+---
 
-> Does the method generalise to playing it has never seen?
+## Matched digital level variants of real guitar
 
-If performance improves only on fit or selection material, we have not improved the converter.
-
-## Why we create level variants of the same real DI
-
-One especially useful part of the original design is to take the **exact same recorded performance** and create deterministic relative input-level variants, for example:
+One useful trick from the original design is to take the **same recorded DI** and create deterministic digital drive variants, for example:
 
 ```text
 riff_-24
@@ -250,203 +250,274 @@ riff_-6
 riff_0
 ```
 
-Each scaled input must then be rendered independently through the NAM teacher.
+Every scaled input must be rendered independently through the NAM teacher.
 
-This gives matched input/output examples where performance variation has been removed from the comparison.
+Never create a lower-level NAM target by scaling an already-rendered NAM output. That would remove the nonlinear behaviour we are trying to learn.
 
-They expose:
+Matched variants are useful because they remove performance variation and expose:
 
 - compression;
 - cleanup;
 - distortion onset;
 - level-dependent tone change.
 
-The NAM target must never be created by simply scaling an already-rendered NAM output, because that would erase the nonlinear behaviour we are trying to learn.
+A real G12 guitar-volume rollback remains a separate benchmark because the physical guitar volume control also changes the source behaviour of the pickup. Digital level scaling and real volume rollback answer related but different questions.
 
-A real guitar-volume-pot rollback recording remains valuable as a separate held-out test because the guitar's source impedance and spectral behaviour can change as the physical volume control is reduced. Digital level scaling and real volume rollback answer related but different questions.
+---
 
-## Why we created the NAM corpus
+# Why we created the NAM corpus
 
-The NAM corpus exists to stop us from designing EngineV2 around one favourite amp or one type of distortion.
+The NAM corpus exists to stop EngineV2 being designed around one amp, one gain level or one kind of nonlinearity.
 
-It deliberately includes controlled families and progressions such as:
+It deliberately includes:
 
-- near-linear solid-state clean amps;
+- near-linear solid-state clean models;
 - tube clean -> edge-of-breakup -> crunch progressions;
 - classic crunch gain progressions;
-- modern high-gain amps;
-- pedals and strongly nonlinear models;
-- calibrated and uncalibrated captures;
-- development, selection and sealed model groups.
+- modern high-gain models;
+- pedals and strongly nonlinear captures;
+- calibrated and uncalibrated NAMs;
+- development, selection and sealed groups.
 
-The purpose of same-amp gain progressions is especially important.
+Same-amp progressions are especially valuable. If a method works at G3 but fails at G7/G10 on the same JCM800 family, that reveals a problem with the fitting method rather than just an amp-name difference.
 
-If one algorithm works on JCM800 G3 but fails on G7/G10, or works on one clean setting but fails as the same amp becomes nonlinear, that tells us something about the fitting method rather than merely about the amplifier identity.
+Sealed NAMs exist for the final generalisation test once the fitting philosophy has been frozen.
 
-The sealed models exist so that, after we believe the algorithm is finished, we can test whether it generalises to NAMs that did not influence its design.
+---
 
-## Why we created the teacher dataset
+# Why we created the teacher dataset
 
-The teacher dataset is the central idea behind EngineV2.
+The cached teacher dataset is the central EngineV2 infrastructure.
 
-For each chosen source input, the authoritative NAM renderer produces the corresponding NAM output:
+For every chosen source input, the authoritative NAM renderer creates the corresponding output:
 
 ```text
 input audio -> NAMCore renderer -> NAM target audio
 ```
 
-That pair is a teacher example.
+That input/target pair is a teacher example.
 
-The GP50 renderer can then process the same input:
+The GP50 student processes the **same input**:
 
 ```text
-same input audio -> candidate GP50 model -> CLO output
+same input audio -> candidate GP50 DSP -> student prediction
 ```
 
-The research problem becomes a direct behavioural comparison:
+The research problem is therefore:
 
 ```text
 Teacher: input -> NAM -> target
 Student: input -> GP50 structure -> prediction
 ```
 
-We are therefore not trying to reverse-engineer the hidden internal parameters of the NAM.
+We are not trying to infer the hidden internal parameters of the NAM.
 
-We are asking the GP50 student to reproduce the NAM's observable input/output behaviour as closely as its much smaller fixed architecture allows.
+We are trying to reproduce its **observable behaviour** using the much smaller GP50 architecture.
 
-This is model distillation in the behavioural sense.
+That is the meaning of teacher/student distillation in this project.
 
-## Why the teacher dataset is cached
+## Why the teacher outputs are cached
 
-NAM rendering is expensive compared with evaluating the small GP50 student model.
+NAM rendering is relatively expensive; the small GP50 model can be evaluated many times cheaply.
 
-Caching authoritative teacher renders gives us several advantages:
+Caching authoritative teacher outputs gives us:
 
-- every experiment sees exactly the same NAM output;
-- fit/selection/benchmark comparisons are reproducible;
-- optimisation can run quickly without repeatedly invoking NAM inference;
-- renderer version, model identity and source provenance are recorded;
-- we can compare competing fitting philosophies fairly;
-- the benchmark target cannot accidentally change between experiments.
+- repeatable experiments;
+- identical NAM targets across competing fitting strategies;
+- fast optimisation without rerunning NAM inference constantly;
+- recorded renderer/model/source provenance;
+- clean fit/selection/benchmark separation;
+- fair comparison of different EngineV2 philosophies.
 
-The cache is infrastructure for experimentation. It is not itself the conversion algorithm.
+The teacher cache is research infrastructure. It is not itself the conversion algorithm.
 
-## Fit, selection and benchmark are deliberately different
+---
 
-The split is intended to stop us fooling ourselves.
+# The GP50 student must be fitted as a whole
 
-### Fit
+The runtime structure is:
 
-Fit material is allowed to influence the coefficients.
+```text
+PRE -> A128 -> oversampled asymmetric P/K -> POST -> B512
+```
 
-Fit may include both deliberately selected system-identification probes and selected real DI material.
+This structure is a **hardware constraint**, not a conceptual map of an amplifier.
 
-### Selection
+We must not assume:
 
-Selection material may choose between general strategies or candidate rounds, but it must not be repeatedly mined until one particular model looks good.
+```text
+A = amp EQ
+P/K = all distortion
+B = cab/output EQ
+```
 
-Selection should include different real performances and preferably different pickup/source characteristics from fit.
+A128 appears before the nonlinear stage, so it can shape both tone **and what frequencies drive P/K**.
 
-### Benchmark
+P/K is the nonlinear family available on the GP50.
 
-Benchmark material is evaluation only.
+B512 occurs after the nonlinear stage, so it can correct the final linear response created by the cooperative A/P-K solution.
 
-It must not influence coefficients, objective weights, gain rules or algorithm choices during the same experiment.
-
-Once we start changing the algorithm because of a benchmark result, that benchmark has effectively become selection material and must no longer be described as held out.
-
-### Sealed NAMs
-
-Sealed NAMs are the final generalisation check after the fitting philosophy is frozen.
-
-They should remain untouched until we are ready to make a genuine quality claim.
-
-## The student architecture should be used as a whole
-
-A major principle of the clean-sheet approach is that the GP50 blocks need not correspond one-to-one with conceptual parts of an amplifier.
-
-For example, A128 does not have to mean simply "pre-EQ".
-
-Because A occurs before the nonlinear stage, it can also act as **frequency-dependent drive shaping**.
-
-A may deliberately boost or cut particular frequency regions before P/K so the fixed GP50 waveshaper produces a closer approximation of frequency-dependent NAM distortion. B512 can then correct the resulting post-nonlinearity spectrum.
-
-Therefore a valid clean-sheet solution may use the blocks cooperatively:
+A valid clean-sheet solution may therefore be:
 
 ```text
 A128
-  shapes both spectrum and what reaches the nonlinear stage
-
+  frequency-dependent pre-nonlinearity drive shaping
+        |
+        v
 P/K
-  supplies the fixed nonlinear family available on the GP50
-
+  fixed GP50 nonlinear mechanism
+        |
+        v
 POST
-  fixed hardware behaviour
-
+  fixed hardware response
+        |
+        v
 B512
-  corrects final linear response and output level
+  post-nonlinearity correction and output level
 ```
 
-The objective is not to assign an intuitive amp role to every parameter.
+The blocks do not need intuitive amplifier meanings.
 
-The objective is to find the best overall projection into the available hardware structure.
+The only important question is whether their **combined behaviour** is the closest available approximation of the NAM.
 
-## Analytic B is part of the original hypothesis
+---
 
-The first prototype deliberately avoided treating every B512 tap as an independent outer-search parameter.
+# Joint A + P/K search with analytic B
 
-For each proposed upstream student configuration, the intended approach is:
+This was the core first-prototype fitting hypothesis.
+
+B512 is large but linear, so it should not normally be treated as 512 independent outer optimiser variables.
+
+Instead, for each proposed upstream configuration:
 
 ```text
 candidate A + P/K
-      -> render GP50 pre-B response on fitting material
-      -> solve one shared B512 analytically against NAM teacher targets
-      -> evaluate complete candidate
+        |
+        v
+render GP50 pre-B responses across fitting material
+        |
+        v
+solve ONE shared B512 analytically against NAM teacher outputs
+        |
+        v
+evaluate complete A + P/K + POST + B candidate
 ```
 
-This is variable projection: expensive nonlinear/search variables remain outside, while the large linear B block is solved directly.
+This is variable projection: search the difficult nonlinear/upstream variables and solve the large linear block directly.
 
-It is one of the central clean-sheet ideas and should remain the default unless evidence shows that the analytical solve itself is limiting quality.
+The important part is that **A and P/K are allowed to cooperate**. We should not independently estimate a supposedly "correct P/K" and then freeze it unless experiments demonstrate that doing so is genuinely superior across the corpus.
 
-## Output volume is post-nonlinearity
+The first question is not:
 
-This is a hard project principle.
+> What P/K parameters does this NAM have?
 
-If a candidate is too quiet, increasing signal **before** P/K is not a legitimate volume correction because it also changes distortion.
+The first question is:
 
-Final loudness correction belongs after the nonlinear section, currently through the final B/output stage.
+> What A/P-K/B combination makes the constrained GP50 student behave most like this NAM teacher across informative inputs?
+
+---
+
+# What should drive the optimiser
+
+The original philosophy is to give the optimiser **better evidence**, not to keep adding amp-specific penalty terms.
+
+The fitting set should contain enough complementary inputs that direct teacher-vs-student prediction error exposes important mistakes naturally.
+
+Useful derived measurements such as:
+
+- level-response curves;
+- harmonic growth;
+- nonlinear residual;
+- IMD;
+- transient metrics;
+- spectral differences;
+
+are valuable for understanding failures and may eventually justify principled general objective terms.
+
+But they must not become an ever-growing list of penalties added because one named NAM failed one listening test.
+
+The preferred sequence is:
 
 ```text
-WRONG for volume correction:
-input -> more drive -> P/K -> more distortion
-
-RIGHT:
-input -> same A/P/K behaviour -> post-P/K linear output gain
+better / more informative input evidence
+        before
+more hand-created objective rules
 ```
 
-Pre-nonlinearity gain is allowed only when it is intentionally part of the fitted nonlinear behaviour, never as a substitute for output volume.
+---
 
-## What we learned from NAM Mixer
+# Fit, selection, benchmark and sealed really mean different things
+
+## Fit
+
+Fit material is allowed to influence coefficients.
+
+It can include deliberately selected synthetic identification probes and selected real guitar DI.
+
+## Selection
+
+Selection material may choose between candidate rounds or genuinely general fitting strategies.
+
+It should contain different real performances and ideally different pickup/source characteristics from fit.
+
+It must not be mined repeatedly until a particular NAM behaves.
+
+## Benchmark
+
+Benchmark is evaluation only.
+
+It must not influence coefficients, weights, gain rules or algorithm choices during the experiment being evaluated.
+
+Once a benchmark result causes us to alter the algorithm, that material has effectively become development/selection evidence and must no longer be described as held out for the next claim.
+
+## Sealed NAMs
+
+Sealed NAMs are the final model-level generalisation check after the fitting philosophy is frozen.
+
+Do not use them while designing the algorithm.
+
+---
+
+# Output volume is post-nonlinearity
+
+This is a hard project rule.
+
+If a candidate is too quiet, increasing the signal **before** P/K is not an output-volume correction; it changes the nonlinear behaviour.
+
+```text
+WRONG as a volume fix:
+input -> more pre-drive -> P/K -> more distortion
+
+RIGHT:
+input -> same fitted A/P-K behaviour -> post-P/K output gain
+```
+
+Final loudness correction belongs after the nonlinear section, currently through B/output.
+
+Pre-nonlinearity gain is allowed only when it is intentionally part of the fitted teacher/student behaviour.
+
+---
+
+# NAM Mixer's role in this research
 
 NAM Mixer is **not part of EngineV2**.
 
-EngineV2 must not require NAM Mixer, its manifests, its modes, or its generated NAMs.
+EngineV2 must not require NAM Mixer, its manifests, its modes or its generated NAMs.
 
-NAM Mixer was useful as a research reference because building and retraining NAMs forced us to think explicitly about concepts that are easy to blur together:
+We looked at NAM Mixer because work on constructing and retraining NAMs exposed useful concepts:
 
+- teacher/target construction;
 - input calibration;
-- training targets;
-- teacher construction;
 - drive behaviour;
-- tone correction;
-- post-processing;
-- receptive field limitations;
-- validation at different input levels;
-- the distinction between changing input drive and changing output gain.
+- tone/feel separation;
+- post-processing versus pre-drive;
+- multi-level validation;
+- receptive-field limitations;
+- how a NAM is trained from known input/output data.
 
-Those ideas helped inspire the teacher/student research design.
+Those ideas helped us think differently about NamToClo.
 
-They do **not** imply that NamToClo should become part of NAM Mixer or that NAM Mixer should become part of NamToClo.
+They are research inspiration only.
 
 The intended product remains:
 
@@ -456,217 +527,221 @@ arbitrary .nam
     -> GP50/GP5 .clo
 ```
 
-If knowledge gained from NAM training research improves the algorithm, that knowledge should be implemented independently inside NamToClo.
+Anything learned from NAM training research must be implemented independently inside NamToClo.
 
-## What the current experiments have taught us
+---
 
-The experiments to date have produced useful evidence, even where the candidate algorithm failed.
+# What the current experiments have taught us
 
-### Direct GP50 fitting is worthwhile
+The experiments so far are useful evidence, including the failures.
 
-The GP50 B512 domain should be treated directly rather than assuming a longer GP200 solution can simply be truncated or rescaled.
+## Clean conversion does not prove the new philosophy
 
-### Clean conversion is not enough
+The JC-120 showed that our GP50 renderer, serializer and broad linear fitting path can produce a very close result.
 
-Very low ESR on a clean amp does not validate the nonlinear fitting method.
+That validated infrastructure.
 
-The JC-120 result proved that the serializer, renderer and broad linear fitting path can work extremely well.
+It did not validate crunch/high-gain fitting.
 
-It did not prove crunch or high-gain conversion.
+## Matched level behaviour matters
 
-### Guitar level response matters
+The same guitar performance independently rendered through the NAM at multiple input levels is highly informative.
 
-The same guitar performance rendered through the NAM at multiple input levels is valuable because it exposes compression and clean-up behaviour directly.
+But matching the output-level curve by itself is not sufficient. We demonstrated that a GP50 candidate can match compression better while becoming audibly more distorted.
 
-However, matching the output-level curve alone is not sufficient.
+## Better fit/selection metrics can still be wrong
 
-A candidate can reproduce the compression curve by saturating too strongly and still sound wrong.
+The JCM800 experiments showed that derived metrics can look excellent on fit/selection material while held-out behaviour and hardware listening remain wrong.
 
-### Synthetic distortion metrics are diagnostics, not truth
+That is exactly why the original design included independent real guitar and held-out model families.
 
-The JCM800 experiments showed that metrics can improve on fit/selection material while held-out behaviour and listening remain worse.
+## Static P/K identification is a diagnostic, not the engine philosophy
 
-This does not mean synthetic **inputs** should be removed from fitting. It means derived metrics must not be promoted into ad-hoc objective penalties merely because one particular result fails.
+The 1 kHz transfer analyser is useful for understanding the GP50 nonlinear family and validating measurement tools.
 
-### Static P/K decomposition is a diagnostic, not the philosophy
+It should not turn EngineV2 into a search for the NAM's supposed equivalent P/K values.
 
-The 1 kHz transfer experiment is useful for understanding the GP50 nonlinear family and for validating measurement tools.
+The GP50 round-trip control demonstrated that the analyser can recognise known GP50-style behaviour. That makes it a useful diagnostic instrument, not the required conversion path.
 
-It should not turn EngineV2 into "estimate the old-style P/K more accurately".
+---
 
-The clean-sheet goal remains whole-system behavioural approximation.
+# What counts as a real improvement
 
-## The preferred research direction
+EngineV2 is better only if it improves **generally**.
 
-The preferred direction is the original **compact system-identification / variable-projection student fitter**.
+The acceptance evidence should cover:
 
-The fitting corpus should combine a deliberately small set of complementary controlled probes with a deliberately small set of varied real DI performances.
+### Clean
 
-Conceptually:
+- waveform/tone fidelity;
+- correct output level;
+- real hardware listening.
 
-```text
-                    authoritative NAM teacher
-                             |
-        +--------------------+--------------------+
-        |                    |                    |
- controlled probes       real DI fit        matched level variants
-        |                    |                    |
-        +--------------------+--------------------+
-                             |
-                             v
-                 candidate GP50 student
-              A128 -> P/K -> POST -> B512
-                             |
-                             v
-                     direct comparison
-```
+### Crunch
 
-The important difference from the recent G5 tuning loop is that we should not invent a growing list of amp-specific penalties.
+- full-level fidelity;
+- input-level response;
+- guitar-volume cleanup;
+- attack/compression;
+- no excess perceived distortion.
 
-Instead, the identification/fitting set should contain enough complementary information that ordinary teacher-vs-student prediction error rewards the correct behaviour across operating conditions.
+### High gain
 
-Where mathematically useful, B512 should continue to be solved analytically for each proposed upstream candidate rather than treated as hundreds of independent outer-search parameters.
+- low-end retention;
+- top-end/fizz control;
+- harmonic balance;
+- attack/compression;
+- correct saturation behaviour.
 
-A and P/K may need to be searched jointly because pre-nonlinearity spectral shaping changes the behaviour of the nonlinear block.
+### Generalisation
 
-Real guitar is part of fitting and selection, while **independent held-out real guitar remains the perceptual/generalisation benchmark**.
+- unseen performances;
+- different pickups/guitars;
+- different amp families;
+- same-amp gain progressions;
+- held-out benchmark material;
+- ultimately sealed NAMs.
 
-## What counts as a real improvement
+### Hardware
 
-A new EngineV2 method is better only if it improves **generally**, not just numerically on one example.
+Software metrics are engineering tools.
 
-Evidence should include all of the following:
+Real GP50 listening is an acceptance gate.
 
-1. **Clean fidelity**
-   - waveform/tone similarity;
-   - correct level;
-   - hardware listening.
+### Existing converter baseline
 
-2. **Crunch behaviour**
-   - full-level tone;
-   - clean-up when input is reduced;
-   - compression/attack;
-   - no extra perceived distortion.
-
-3. **High-gain behaviour**
-   - low-end retention;
-   - upper-mid/top-end balance;
-   - fizz control;
-   - harmonic balance;
-   - correct saturation and compression.
-
-4. **Generalisation**
-   - different source performances;
-   - different pickups/guitars;
-   - different amp families;
-   - same-amp gain progressions;
-   - held-out benchmark material;
-   - ultimately sealed NAMs.
-
-5. **Real GP50 playback**
-   - software metrics are necessary engineering tools;
-   - hardware listening remains an acceptance gate.
-
-6. **Comparison against the existing converter**
-   - the production NamToClo result is the baseline;
-   - EngineV2 needs to produce a material quality improvement, not merely a different result.
-
-The ultimate first-prototype comparison is:
+The decisive comparison is:
 
 ```text
-source NAM teacher
+NAM teacher
 vs
 existing/old NamToClo GP50 result
 vs
 new EngineV2 GP50 result
 ```
 
-on the same held-out inputs and on the real GP50.
+using the same held-out inputs and actual GP50 playback.
 
-## Anti-drift rules
+A result is not a success merely because it differs from the old converter or wins one internal metric.
 
-When deciding whether to change EngineV2, use these rules.
+---
 
-### Good reasons to change the algorithm
+# Anti-drift rules
+
+## Good reasons to change the fitting strategy
 
 - the same failure appears across multiple NAM families;
-- a controlled system-identification experiment reveals a structural weakness;
+- a controlled identification experiment exposes a structural weakness;
 - fit, selection and independent benchmark evidence agree;
-- the change corresponds to a real degree of freedom in the GP50 architecture;
+- the change uses a real degree of freedom in the GP50 architecture;
 - hardware listening confirms the improvement;
-- the principle would make sense before seeing the name of the failing amp.
+- the principle would make sense without knowing the failing amp's name.
 
-### Warning signs that we are drifting
+## Warning signs that we are drifting
 
-Stop and reassess if we find ourselves doing any of these:
+Stop and reassess if we find ourselves:
 
 - repeatedly rerunning one NAM while changing weights;
-- adding a metric because one specific amp sounds wrong;
-- calling selection success a win when benchmark behaviour gets worse;
-- moving volume into pre-P/K drive;
-- tuning against benchmark material and continuing to call it held out;
-- assuming lower ESR automatically means better playing behaviour;
-- treating clean-amp success as proof of distorted-amp success;
-- reconstructing the original converter merely because its parameter interpretation is familiar;
-- treating NAM Mixer as a required stage or dependency;
-- optimising synthetic probes at the expense of real guitar playback;
-- excluding useful synthetic fitting probes merely because recent metric-based experiments overfit;
-- inventing special cases for named amps, captures or creators.
+- adding a new metric because one specific amp sounds wrong;
+- independently deriving P/K because that resembles the old converter's mental model;
+- calling excellent selection performance a win when benchmark performance is poor;
+- using pre-P/K drive as a volume correction;
+- changing the algorithm because of benchmark data and still calling that benchmark held out;
+- assuming lower ESR means better playing behaviour;
+- treating clean success as proof of distorted success;
+- reconstructing the original converter because its block interpretation is familiar;
+- making NAM Mixer a dependency or product stage;
+- optimising synthetic probes at the expense of held-out real guitar;
+- removing useful synthetic fitting probes because one derived metric overfit;
+- inventing named-amp, capture or creator special cases.
 
-A useful test is:
+A useful anonymous-model test is:
 
-> Would we make this same algorithmic change if the failing NAM had an anonymous filename and we did not know what amp it represented?
+> Would we make the same algorithmic change if the failing NAM had an anonymous filename and we did not know which amp it represented?
 
-If the answer is no, the change is probably overfitting.
+If not, the change is probably overfitting.
 
-## Experimental hierarchy
+---
 
-When investigating a failure, prefer this order:
+# Experimental hierarchy
+
+When something fails, prefer this order:
 
 ```text
-1. Verify renderer / serializer / DSP parity
-2. Reproduce failure on more than one relevant model
-3. Use controlled probes to identify the behaviour that differs
-4. Determine whether the fitting corpus/objective gives the complete student enough information
-5. Determine whether the GP50 architecture can express the required behaviour
-6. Change the general fitting strategy if justified
-7. Validate on independent real guitar material
-8. Listen on actual GP50 hardware
-9. Only then expand to additional NAM families
+1. Verify NAM renderer / GP50 renderer / serializer parity
+2. Reproduce the failure on more than one relevant NAM
+3. Use controlled probes to understand what behaviour differs
+4. Ask whether the fitting corpus gives the whole GP50 student enough information
+5. Ask whether A and P/K are being allowed to cooperate appropriately
+6. Ask whether the GP50 architecture can express the required behaviour
+7. Change the general fitting strategy only when justified
+8. Validate on independent real guitar
+9. Listen on real GP50 hardware
+10. Repeat across other NAM families
+11. Only after the philosophy is frozen, use sealed NAMs
 ```
 
-Do not begin by adding a penalty to make one result look better.
+Do not start by adding a penalty to make one result look better.
 
-## Current status of EngineV2
+---
 
-EngineV2 remains research code.
+# Current reusable EngineV2 infrastructure
 
-Useful components already exist and should be retained unless evidence disproves them:
+These pieces support the original experiment and should be retained unless evidence disproves them:
 
-- reproducible research audio source pool;
-- curated NAM corpus with development/selection/sealed intent;
-- cached authoritative teacher renders;
-- direct 44.1 kHz GP50 DSP model;
+- reproducible real/synthetic audio corpus;
+- deliberately varied NAM corpus;
+- development / selection / benchmark / sealed intent;
+- cached authoritative NAMCore teacher renders;
+- exact 44.1 kHz GP50 student DSP model;
 - exact compact GP50 CLO serializer;
 - analytical B512 solving;
 - fast candidate rendering;
-- fit / selection / benchmark separation;
 - matched real-DI level variants;
-- level-response diagnostics;
-- nonlinear/distortion diagnostics;
-- hardware listening workflow;
-- research-only transfer analyser.
+- system-identification probes;
+- level/harmonic/distortion diagnostics;
+- real-guitar previews;
+- hardware listening workflow.
 
-The recent level-response and distortion-aware P/K objective experiments should be regarded as **research branches of thought**, not as proof that those penalties belong in the final fitting philosophy.
+Recent level-response penalties, distortion-excess penalties and isolated P/K fitting experiments are **research findings**, not automatically part of the final engine.
 
-The next major work should return to the original central experiment:
+---
 
-> Can a compact combination of controlled system-identification probes and varied real DI teacher examples drive a whole-system A/P/K + analytic-B GP50 student fitter that generalises better than the existing NamToClo conversion method?
+# The next central experiment
 
-## Final north-star question
+Return to the original hypothesis:
+
+> Can a compact mixture of synthetic identification probes and varied real DI teacher examples drive a jointly optimised A/P-K + analytically solved B GP50 student that generalises better than the existing NamToClo conversion method?
+
+The first implementation should use the deliberately informative prototype set:
+
+```text
+SYSTEM IDENTIFICATION
+  quiet log sweep
+  multisine level ladder
+  1 kHz level ladder
+  frequency x level matrix
+  two-tone IMD
+  transient bursts
+
+REAL GUITAR
+  ~6 fit clips
+  ~4 selection clips
+  2-4 held-out benchmark clips
+```
+
+The optimiser should primarily learn from the teacher/student input-output evidence across that set.
+
+Then evaluate against independent guitar and hardware.
+
+If this architecture cannot beat the current converter with that information, stop and understand why before adding more data or more penalties.
+
+---
+
+# Final north-star question
 
 Before every substantial EngineV2 change, ask:
 
-> Does this help us build a generally better standalone NAM -> GP50 distillation engine from the original compact teacher/student experiment, or are we patching the current result so that one example looks more convincing?
+> **Does this help the complete constrained GP50 student learn the behaviour of arbitrary NAM teachers more faithfully and generally than the existing NamToClo engine, or are we patching the current experiment so that one example looks more convincing?**
 
-If it is the latter, stop and redesign the experiment.
+If it is the latter, stop and return to this document.
