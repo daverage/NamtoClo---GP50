@@ -1,5 +1,5 @@
 from __future__ import annotations
-import math
+import math,time
 from dataclasses import dataclass
 import numpy as np
 from distiller_v2_dsp import controls_to_a,render_preb,render_full,solve_shared_b
@@ -49,18 +49,21 @@ def fit_b(audio,a,pk):return solve_shared_b([render_preb(x,a,pk) for x,_,_ in au
 def evaluate(fit,sel,ctrl,pk):
     a=controls_to_a(ctrl);b=fit_b(fit,a,pk);return Candidate(ctrl.copy(),pk.copy(),b,score(fit,a,pk,b),score(sel or fit,a,pk,b))
 
-def distill(fit,sel,controls=24,rounds=3,status=print):
-    ctrl=np.zeros(controls);pk=np.array([.1,.1,1.,1.]);best=evaluate(fit,sel,ctrl,pk);status(f'seed fit={best.fit.composite:.6g} sel={best.selection.composite:.6g}')
+def _yield_cpu(pause_ms:float):
+    if pause_ms>0:time.sleep(pause_ms/1000.0)
+
+def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0):
+    ctrl=np.zeros(controls);pk=np.array([.1,.1,1.,1.]);best=evaluate(fit,sel,ctrl,pk);_yield_cpu(pause_ms);status(f'seed fit={best.fit.composite:.6g} sel={best.selection.composite:.6g}')
     for r,(astep,pstep) in enumerate(zip((3.,1.5,.75,.35),(.45,.28,.16,.08)),1):
         if r>rounds:break
         before=best;work=best
         for i in range(controls):
             for d in (astep,-astep):
-                c=work.controls_db.copy();c[i]=np.clip(c[i]+d,-18,18);q=evaluate(fit,sel,c,work.pk)
+                c=work.controls_db.copy();c[i]=np.clip(c[i]+d,-18,18);q=evaluate(fit,sel,c,work.pk);_yield_cpu(pause_ms)
                 if q.fit.composite<work.fit.composite:work=q
         for i in range(4):
             for s in (1.,-1.):
-                p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.);q=evaluate(fit,sel,work.controls_db,p)
+                p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.);q=evaluate(fit,sel,work.controls_db,p);_yield_cpu(pause_ms)
                 if q.fit.composite<work.fit.composite:work=q
         if work.selection.composite<before.selection.composite:best=work;status(f'round {r} ACCEPT sel {before.selection.composite:.6g}->{best.selection.composite:.6g}')
         else:status(f'round {r} REJECT sel {before.selection.composite:.6g}->{work.selection.composite:.6g}')
