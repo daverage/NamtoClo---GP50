@@ -40,12 +40,14 @@ def _tone_ladder_audio():
     x = np.zeros(n)
     y = np.zeros(n)
     levels = (-36, -30, -24, -18, -12, -9, -6, -3)
+    rng = np.random.default_rng(260910)
     for i, level in enumerate(levels):
         start = int(round((0.50 + i * 1.25) * sr))
         end = int(round((0.50 + i * 1.25 + 1.05) * sr))
         amp = 10.0 ** (level / 20.0)
-        x[start:end] = amp
-        y[start:end] = 0.37 * amp
+        signal = rng.standard_normal(end - start) * amp
+        x[start:end] = signal
+        y[start:end] = 0.37 * signal
     return x, y
 
 
@@ -109,7 +111,9 @@ def main():
     assert abs(quiet_esr - 0.125) < 1e-8, quiet_esr
 
     # The balanced analytic B solve should recover a common linear gain across
-    # the same -36 ... -3 dB ladder despite the 33 dB energy spread.
+    # the same -36 ... -3 dB ladder despite the 33 dB energy spread. Broadband
+    # deterministic content is used here so the 512-tap solve is actually
+    # identifiable across frequency rather than testing only DC.
     nfft = 1 << (len(x) + 512 - 1).bit_length()
     ws = SimpleNamespace(
         targets=[target],
