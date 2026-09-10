@@ -23,27 +23,24 @@ def run_model(ps,out,args):
     fp=budget(ps,'fit',args.fit_seconds,.35,args.seed);sp=budget(ps,'selection',args.selection_seconds,.2,args.seed^0x51ec);bp=budget(ps,'benchmark',args.benchmark_seconds,0,args.seed^0xb3ac)
     fit=load_audio(fp);sel=load_audio(sp);bench=load_audio(bp);print(f'material fit={sum(p.duration_s for p in fp):.1f}s selection={sum(p.duration_s for p in sp):.1f}s benchmark={sum(p.duration_s for p in bp):.1f}s')
     t=time.monotonic();best=distill(fit,sel,args.a_controls,args.rounds);a=controls_to_a(best.controls_db);bm=score(bench,a,best.pk,best.b) if bench else None
-    # The EngineV2 compact serializer stores trainer-domain B multiplied by 4.
-    # Score that serialized coefficient domain separately so research reports
-    # never confuse the fitted internal model with the actual bytes in the CLO.
-    b_storage=best.b*4.0
+    # This distiller solves B directly in the final 44.1-kHz device domain.
+    # The serialized coefficient block is therefore identical to the fitted B.
+    b_storage=best.b.copy()
     serialized_metrics={
         'fit':score(fit,a,best.pk,b_storage) if fit else None,
         'selection':score(sel,a,best.pk,b_storage) if sel else None,
         'benchmark':score(bench,a,best.pk,b_storage) if bench else None,
     }
-    d=out/safe(ps[0].model_key+'__'+name);clo=d/'distilled.clo';write_clo(clo,a,best.pk,best.b)
+    d=out/safe(ps[0].model_key+'__'+name);clo=d/'distilled.clo';write_clo(clo,a,best.pk,b_storage)
     previews={}
     for role,aud in [('fit',fit),('selection',sel),('benchmark',bench)]:
         if not aud:continue
-        x,y,p=aud[0];pred_internal=render_full(x,a,best.pk,best.b);pred_storage=render_full(x,a,best.pk,b_storage)
-        for tag,z in [('input',x),('nam',y),('clo_internal',pred_internal),('clo_storage',pred_storage)]:sf.write(d/f'preview_{role}_{tag}.wav',np.asarray(z,np.float32),SR,subtype='FLOAT')
+        x,y,p=aud[0];pred=render_full(x,a,best.pk,b_storage)
+        for tag,z in [('input',x),('nam',y),('clo',pred)]:sf.write(d/f'preview_{role}_{tag}.wav',np.asarray(z,np.float32),SR,subtype='FLOAT')
         previews[role]=p.task_id
-    report={'method':'clean-sheet-varpro-v1','model_name':name,'model_key':ps[0].model_key,'tone_id':ps[0].tone_id,'model_id':ps[0].model_id,'A128':a,'pk':best.pk,'B512_internal':best.b,'B512_storage':b_storage,'fit_metrics':best.fit,'selection_metrics':best.selection,'benchmark_metrics':bm,'serialized_domain_metrics':serialized_metrics,'storage_b_scale':4.0,'elapsed_seconds':time.monotonic()-t,'clo_path':str(clo),'preview_tasks':previews}
+    report={'method':'clean-sheet-varpro-v1-device-domain','model_name':name,'model_key':ps[0].model_key,'tone_id':ps[0].tone_id,'model_id':ps[0].model_id,'A128':a,'pk':best.pk,'B512_device':b_storage,'fit_metrics':best.fit,'selection_metrics':best.selection,'benchmark_metrics':bm,'serialized_domain_metrics':serialized_metrics,'storage_b_scale':1.0,'elapsed_seconds':time.monotonic()-t,'clo_path':str(clo),'preview_tasks':previews}
     dump(d/'report.json',report)
-    if bm:print(f'benchmark internal: composite={bm.composite:.4f} ESR={bm.esr:.4f} level={bm.signed_level_db:+.2f} dB')
-    sm=serialized_metrics['benchmark']
-    if sm:print(f'benchmark serialized: composite={sm.composite:.4f} ESR={sm.esr:.4f} level={sm.signed_level_db:+.2f} dB')
+    if bm:print(f'benchmark: composite={bm.composite:.4f} ESR={bm.esr:.4f} level={bm.signed_level_db:+.2f} dB')
     print('CLO:',clo);return report
 
 def main():
