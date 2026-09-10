@@ -13,12 +13,10 @@ The GP50 blocks are hardware constraints, not assumed conceptual amp stages. In 
 A and P/K are allowed to cooperate: A may deliberately shape which frequencies drive the
 nonlinear stage, while B completes the post-nonlinearity linear response and output level.
 
-## Canonical North Star experiment
+## Canonical North Star source material
 
-Use `train_namtoclo_north_star.py` for the original first-prototype hypothesis described in
-the North Star document.
-
-For each NAM it fits exactly the compact evidence set:
+Both North Star v1 and v2 use the same source-material definition from the North Star
+document:
 
 ```text
 SYSTEM IDENTIFICATION (FIT)
@@ -37,29 +35,24 @@ REAL GUITAR
 
 The historical role tag on a synthetic probe does not control the canonical experiment: all
 six identification probes participate in FIT. Real selection and benchmark material never
-moves into FIT.
+moves into FIT. Canonical real slots exclude bass datasets and obvious release/noise/silence
+sample artifacts; the broader teacher corpus remains unchanged.
 
-The North Star optimiser uses:
+Matched real-guitar level sweeps and nonlinear-residual measurements are reported only as
+diagnostics after the fitted coefficients are frozen. Final loudness correction, when
+enabled, uses only real FIT material and scales B512 after P/K.
 
-- joint/cooperative A + P/K coordinate search;
-- one shared analytic B512 solve for every candidate;
-- target-energy-normalized B solving so loud probes do not dominate quiet probes;
-- mean aligned ESR (direct teacher/student waveform error) for FIT candidate moves;
-- disjoint real-DI mean aligned ESR as the round-selection gate;
-- no level-response penalty;
-- no distortion-excess penalty;
-- no independently derived P/K target;
-- no named-amp special cases.
+## North Star v1 — frozen reference
 
-Matched real-guitar level sweeps and nonlinear-residual measurements are still reported, but
-they are diagnostics only and are calculated after the fitted coefficients are frozen.
+`train_namtoclo_north_star.py` is the frozen first canonical implementation. It treats each
+whole synthetic probe file as one normalized FIT example. It is retained so the first
+hardware results remain exactly reproducible.
 
-Final loudness correction, when enabled, uses only real FIT material and scales B512 after
-P/K. It never increases pre-P/K drive as a volume fix.
+The v1 optimiser uses joint/cooperative A + P/K search, one shared analytic B512 solve for
+every candidate, direct NAM-vs-GP50 aligned ESR, a disjoint real-DI selection gate, and no
+level-response/distortion-excess/named-amp objective terms.
 
-### First North Star run
-
-From `src/engine_v2`:
+Example v1 G5 run:
 
 ```bash
 python3 train_namtoclo_north_star.py \
@@ -73,16 +66,66 @@ python3 train_namtoclo_north_star.py \
   --threads 1
 ```
 
-Run the North Star self-tests first after pulling new changes:
+## North Star v2 — segmented / level-balanced evidence
+
+`train_namtoclo_north_star_v2.py` keeps the v1 architecture, source corpus, selection gate
+and anti-overfitting rules, but changes how the structured synthetic FIT probes contribute.
+
+The student still renders every original probe continuously, preserving state and timing.
+For FIT scoring and the analytic B solve, the structured probes are interpreted as logical
+operating-point windows:
+
+```text
+quiet log sweep                 1 window
+multisine level ladder          8 windows
+1 kHz level ladder             10 windows
+frequency x level matrix       20 windows
+two-tone IMD matrix            12 windows
+transient bursts               15 windows
+real guitar FIT                 6 whole-clip windows
+                               --
+                               72 virtual FIT examples
+```
+
+A short part of the silence after each generated tone/burst is retained so decay/tail
+behaviour contributes to the teacher evidence.
+
+Crucially, 72 windows do **not** mean synthetic evidence gets 66/72 of the total weight.
+The six synthetic probe families retain the same total high-level influence as the six real
+FIT clips. Each probe family gets one unit; windows inside that probe divide its unit equally.
+Thus a -36 dB operating point can matter as much as the -3 dB point inside the same ladder,
+without a 20-cell matrix overwhelming the real guitar corpus simply because it has more cells.
+
+The v2 B weighting is applied after A/P-K/POST as linear least-squares evidence. It never
+changes pre-P/K drive. Level-response and distortion-excess measurements remain diagnostics
+only.
+
+Run the v2 self-tests first:
 
 ```bash
 python3 test_north_star.py
+python3 test_north_star_v2.py
 python3 test_distiller_v2.py
+```
+
+Then run the first v2 G5 comparison:
+
+```bash
+python3 train_namtoclo_north_star_v2.py \
+  --teacher-root ~/NamtoCloTeacherDataset \
+  --output ~/NamtoCloNorthStarV2_JCM800_G5 \
+  --model-regex "^JCM800 2203 D\.I\. - G5 B5 M5 T5 P5 V5 - STD$" \
+  --a-controls 24 \
+  --rounds 3 \
+  --pk-passes 3 \
+  --level-groups 3 \
+  --threads 1
 ```
 
 Each NAM output directory contains:
 
 - `report.json` with the exact material/task manifest and optimisation philosophy;
+- v2 reports also include the complete virtual evidence-window manifest and weights;
 - `distilled.clo`;
 - real-DI fit/selection/benchmark NAM-vs-CLO preview WAVs.
 
@@ -123,7 +166,7 @@ Validate a generated file with the existing EngineV2 CLI, adjusting the binary p
 build directory:
 
 ```bash
-../../build-macos/namtoclo clo-info ~/NamtoCloNorthStar_JCM800_G5/.../distilled.clo
+../../build-macos/namtoclo clo-info ~/NamtoCloNorthStarV2_JCM800_G5/.../distilled.clo
 ```
 
 The decisive research comparison remains:
