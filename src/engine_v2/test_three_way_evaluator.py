@@ -10,21 +10,23 @@ from distiller_v2_data import Pair
 from distiller_v2_dsp import POST, PRE, controls_to_a, render_full, write_clo
 from evaluate_north_star_vs_original import (
     BANDS,
+    _discover_clo,
     _spectral_views,
     _tail_indices,
+    _tail_metrics,
     read_compact_clo,
     render_compact_clo,
     select_shared_real_material,
 )
 
 
-def _pair(task, model_key, source, start=0.0, role="benchmark"):
+def _pair(task, model_key, source, start=0.0, role="benchmark", model_id=2):
     return Pair(
         task_id=task,
         model_key=model_key,
         model_name=model_key,
         tone_id=1,
-        model_id=2,
+        model_id=model_id,
         nam_split="development",
         role=role,
         dataset="guitarset",
@@ -62,6 +64,22 @@ def main():
         trusted = render_full(x, clo.a, clo.pk, clo.b)
         parsed = render_compact_clo(x, clo)
         assert np.max(np.abs(trusted - parsed)) < 1e-12
+
+    # Current NSv2 names must be discoverable by model ID even when the file is
+    # copied outside its normal per-model output directory. Legacy names stay
+    # supported for reproducibility of the first v2 runs.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        pair = _pair("naming", "tone1_model403887_deadbeef", "common", model_id=403887)
+        current = root / "NSV2__403887__JCM800_G5.clo"
+        write_clo(current, a, pk, b)
+        assert _discover_clo(root, pair, "north_star") == current
+        current.unlink()
+        legacy_dir = root / "tone1_model403887_deadbeef__JCM800_G5"
+        legacy_dir.mkdir()
+        legacy = legacy_dir / "distilled.clo"
+        write_clo(legacy, a, pk, b)
+        assert _discover_clo(root, pair, "north_star") == legacy
 
     # Shared material selection must use the same underlying performance for
     # every model even though model-specific teacher task IDs differ.
@@ -123,6 +141,25 @@ def main():
     tails = _tail_indices(x, frame=frame)
     assert tails
     assert all(a >= frame * 2 and b <= frame * 6 for a, b in tails)
+
+    # Disjoint tail frames are never concatenated for spectral analysis. An
+    # identical teacher/student tail must therefore remain exactly zero-error,
+    # rather than acquiring broadband energy from artificial stitch boundaries.
+    rng = np.random.default_rng(456)
+    frames = []
+    for amp in (0.10, 0.10, 0.10, 0.010, 0.006, 0.003, 0.0015, 0.0, 0.0):
+        frames.append(rng.standard_normal(frame) * amp)
+    x = np.concatenate(frames)
+    target = 0.63 * x
+    tail = _tail_metrics(x, target, target.copy())
+    assert tail is not None
+    assert tail["seconds"] >= 0.25
+    assert abs(tail["esr"]) < 1e-15
+    assert abs(tail["gain_matched_esr"]) < 1e-15
+    assert tail["gain_matched_spectral_rmse_db"] < 1e-10
+    confident_tail = [r for r in tail["curve"] if r["confident"]]
+    assert confident_tail
+    assert max(abs(r["gain_matched_error_db"]) for r in confident_tail) < 1e-10
 
     print("three-way evaluator self-tests passed")
 
