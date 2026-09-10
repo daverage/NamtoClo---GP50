@@ -178,6 +178,60 @@ def fit_pk(probe_input: np.ndarray, nam_output: np.ndarray) -> FitResult:
     return FitResult(best_pk.tolist(), best_obj, best_fund, best_harm, evaluations)
 
 
+def _make_probe_input() -> np.ndarray:
+    """Recreate the corpus 1-kHz ladder deterministically for analyser tests."""
+    parts = [np.zeros(int(round(LEAD_S * SR)), dtype=np.float64)]
+    for level in DEFAULT_LEVELS_DB:
+        n = int(round(TONE_S * SR))
+        t = np.arange(n, dtype=np.float64) / SR
+        tone = np.sin(2.0 * np.pi * FUND_HZ * t) * (10.0 ** (level / 20.0))
+        # Match the corpus probe's short cosine edge fade. The signature trims
+        # 100 ms from both ends, so this mainly keeps the generated control
+        # faithful rather than influencing the measured steady state.
+        fade_n = min(int(round(0.01 * SR)), len(tone) // 2)
+        if fade_n > 1:
+            f = np.linspace(0.0, 1.0, fade_n)
+            tone[:fade_n] *= f
+            tone[-fade_n:] *= f[::-1]
+        parts.append(tone)
+        parts.append(np.zeros(int(round(GAP_S * SR)), dtype=np.float64))
+    return np.concatenate(parts)
+
+
+def _print_signature(title: str, sig: Signature) -> None:
+    print(f"\n{title}")
+    print(" input     fundamental     H2      H3      H4      H5")
+    for i, level in enumerate(sig.levels_db):
+        hs = sig.harmonic_dbc[i]
+        print(
+            f"{level:+5.0f} dB  {sig.fundamental_db[i]:+9.2f} dB  "
+            f"{hs[0]:+7.1f} {hs[1]:+7.1f} {hs[2]:+7.1f} {hs[3]:+7.1f}"
+        )
+
+
+def _roundtrip_self_test() -> int:
+    """Known-family control: can the analyser recover a GP50 transfer at all?"""
+    # Geometric mean(Pp,Pn)=0.1, matching fit_pk's identifiable convention.
+    known = np.array([0.125, 0.08, 3.0, 2.0], dtype=np.float64)
+    x = _make_probe_input()
+    y = pk_render(x, known)
+    result = fit_pk(x, y)
+    recovered = np.asarray(result.pk, dtype=np.float64)
+    pred = pk_render(x, recovered)
+    sig_obj, sig_fund, sig_harm = compare_signatures(signature(pred), signature(y))
+
+    print("GP50 transfer analyser round-trip control")
+    print(f"known:     Pp={known[0]:.6g} Pn={known[1]:.6g} Kp={known[2]:.6g} Kn={known[3]:.6g}")
+    print(f"recovered: Pp={recovered[0]:.6g} Pn={recovered[1]:.6g} Kp={recovered[2]:.6g} Kn={recovered[3]:.6g}")
+    print(
+        f"signature error: objective={sig_obj:.4f} dB "
+        f"fundamental={sig_fund:.4f} dB harmonic-growth={sig_harm:.4f} dB "
+        f"evaluations={result.evaluations}"
+    )
+    print("NOTE: this is a diagnostic control, not a CLO conversion.")
+    return 0
+
+
 def _find_probe(model_pairs):
     hits = [
         p for p in model_pairs
@@ -200,9 +254,20 @@ def main():
         )
     )
     ap.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
-    ap.add_argument("--model-regex", required=True)
+    ap.add_argument("--model-regex")
     ap.add_argument("--output", default="~/NamtoCloTransferAnalysis")
+    ap.add_argument(
+        "--self-test", action="store_true",
+        help="Run a known-GP50 P/K round-trip control instead of analysing a NAM.",
+    )
     args = ap.parse_args()
+
+    print("warming JIT...")
+    warm()
+    if args.self_test:
+        return _roundtrip_self_test()
+    if not args.model_regex:
+        raise SystemExit("Choose --self-test or provide --model-regex REGEX")
 
     root = Path(args.teacher_root).expanduser()
     groups = group_models(load_pairs(root))
@@ -222,19 +287,12 @@ def main():
 
     print(f"model: {pair.model_name}")
     print(f"probe: {Path(pair.source_path).name}")
-    print("warming JIT...")
-    warm()
     target = signature(nam)
     result = fit_pk(x, nam)
+    fitted = signature(pk_render(np.asarray(x, dtype=np.float64), np.asarray(result.pk, dtype=np.float64)))
 
-    print("\nNAM 1 kHz transfer signature")
-    print(" input     fundamental     H2      H3      H4      H5")
-    for i, level in enumerate(target.levels_db):
-        hs = target.harmonic_dbc[i]
-        print(
-            f"{level:+5.0f} dB  {target.fundamental_db[i]:+9.2f} dB  "
-            f"{hs[0]:+7.1f} {hs[1]:+7.1f} {hs[2]:+7.1f} {hs[3]:+7.1f}"
-        )
+    _print_signature("NAM 1 kHz transfer signature", target)
+    _print_signature("fitted GP50 1 kHz transfer signature", fitted)
 
     print("\ntransfer-derived GP50 P/K")
     print(
@@ -260,19 +318,22 @@ def main():
         "probe_task_id": pair.task_id,
         "probe_source": pair.source_path,
         "target_signature": asdict(target),
+        "fitted_gp50_signature": asdict(fitted),
         "fit": asdict(result),
         "integration_constraint": "A magnitude must be anchored to 0 dB at 1 kHz; final level belongs to B/output.",
         "notes": [
             "P/K is fit independently of A/B and output gain.",
             "Common P scale is fixed because it is degenerate with final B gain.",
             "Harmonic growth is compared relatively across input levels so fixed linear EQ does not drive P/K.",
+            "The full -42..-1 dBFS probe is diagnostic; control-model results must be validated before choosing a perceptually relevant operating range.",
             "This script does not create a CLO; validate the transfer fit before integrating it into the converter.",
         ],
     }
     path = out / f"{pair.model_key}_transfer.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"report: {path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
