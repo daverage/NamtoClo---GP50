@@ -42,7 +42,7 @@ def _pair(task, model_key, source, start=0.0, role="benchmark"):
 
 def main():
     # Compact parser/renderer must reproduce the trusted device-style renderer
-    # for a CLO written by the clean-sheet serializer.
+    # from the coefficients actually quantized into the CLO file.
     a = controls_to_a(np.zeros(24))
     pk = np.array([0.08, 0.11, 4.0, 5.0])
     b = np.zeros(512)
@@ -59,9 +59,9 @@ def main():
         assert np.allclose(clo.b, b, atol=1e-7)
         rng = np.random.default_rng(260910)
         x = rng.standard_normal(8192) * 0.05
-        trusted = render_full(x, a, pk, b)
+        trusted = render_full(x, clo.a, clo.pk, clo.b)
         parsed = render_compact_clo(x, clo)
-        assert np.max(np.abs(trusted - parsed)) < 2e-7
+        assert np.max(np.abs(trusted - parsed)) < 1e-12
 
     # Shared material selection must use the same underlying performance for
     # every model even though model-specific teacher task IDs differ.
