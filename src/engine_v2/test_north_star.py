@@ -66,6 +66,17 @@ def main():
                 _pair(f"{role}-{i}-p6", role, dataset, source=source, level=6.0, start=i),
             ]
 
+    # The wider research corpus intentionally contains bass and sample-library
+    # artifacts. They must never consume a canonical real-guitar slot.
+    pairs += [
+        _pair("bass-fit", "fit", "growlybass", source="/tmp/a2_staccato_rr2.wav"),
+        _pair("bass-fit-2", "fit", "black-blue-basses", source="/tmp/bass_note.wav"),
+        _pair("release-name", "fit", "black-green", source="/tmp/release_b5_rr4.wav"),
+        _pair("release-dir", "fit", "black-green", source="/tmp/Samples/green/rel/e4_rr1.wav"),
+        _pair("noise-name", "fit", "shinyguitar", source="/tmp/string_noise_rr1.wav"),
+        _pair("silence-name", "fit", "emilyguitar", source="/tmp/silence.wav"),
+    ]
+
     material = select_north_star_material(
         pairs, fit_real=6, selection_real=4, benchmark_real=3, seed=123
     )
@@ -81,6 +92,13 @@ def main():
     assert all(abs(p.level_offset_db) < 1e-12 for p in material.benchmark_real)
     # Dataset round-robin should preserve diversity in the fit set.
     assert {p.dataset for p in material.fit_real} == {"guitarjam", "freepats"}
+    selected_tasks = {p.task_id for p in material.fit_real}
+    assert "bass-fit" not in selected_tasks
+    assert "bass-fit-2" not in selected_tasks
+    assert "release-name" not in selected_tasks
+    assert "release-dir" not in selected_tasks
+    assert "noise-name" not in selected_tasks
+    assert "silence-name" not in selected_tasks
 
     # Normalized shared-B solve: recover the same one-tap gain from examples
     # whose target amplitudes differ by two orders of magnitude.
