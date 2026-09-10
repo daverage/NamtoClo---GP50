@@ -126,7 +126,7 @@ Each NAM output directory contains:
 
 - `report.json` with the exact material/task manifest and optimisation philosophy;
 - v2 reports also include the complete virtual evidence-window manifest and weights;
-- `distilled.clo`;
+- `NSV2__<model_id>__<model-name>.clo`;
 - real-DI fit/selection/benchmark NAM-vs-CLO preview WAVs.
 
 The output root contains `summary.json`.
@@ -156,6 +156,9 @@ For each system it reports:
 - teacher-energy confidence flags so near-silent frequency regions are not over-interpreted;
 - low-level/tail ESR and full-spectrum tail error using input frames 20-50 dB below normal
   playing level while excluding numerical silence;
+- artifact-safe tail spectra: disjoint low-level frames are windowed and power-averaged
+  independently rather than concatenated, so the evaluator cannot manufacture HF energy at
+  artificial stitch boundaries;
 - nonlinear residual difference as a diagnostic only;
 - CSV/JSON output plus optional PNG plots when matplotlib is installed;
 - a four-way listening preview for the first held-out clip: input, NAM teacher, original CLO,
@@ -180,10 +183,10 @@ python3 evaluate_north_star_vs_original.py \
 ```
 
 The ordinary converter directory is discovered by model ID from filenames ending in
-`_NATIVE_GP5GP50_512.clo`. North Star v2 files are discovered from the normal per-model
-`distilled.clo` output directories.
+`_NATIVE_GP5GP50_512.clo`. Current North Star v2 files are discovered from
+`NSV2__<model_id>__*.clo`; legacy `distilled.clo` v2 runs remain supported.
 
-The model directory contains `per_clip.csv`, `bands.csv`, `spectrum.csv`, tail equivalents,
+Each model directory contains `per_clip.csv`, `bands.csv`, `spectrum.csv`, tail equivalents,
 preview WAVs, `summary.json`, and spectral plots when matplotlib is available. The output root
 contains the overall `summary.json`.
 
@@ -228,7 +231,7 @@ Validate a generated file with the existing EngineV2 CLI, adjusting the binary p
 build directory:
 
 ```bash
-../../build-macos/namtoclo clo-info ~/NamtoCloNorthStarV2_JCM800_G5/.../distilled.clo
+../../build-macos/namtoclo clo-info ~/NamtoCloNorthStarV2_JCM800_G5/.../NSV2__403887__*.clo
 ```
 
 The decisive research comparison remains:
