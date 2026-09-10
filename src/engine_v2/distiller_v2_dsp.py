@@ -106,15 +106,22 @@ def crc16_modbus(data:bytes)->int:
         for _ in range(8): crc=(crc>>1)^0xA001 if crc&1 else crc>>1
     return crc&0xffff
 
-def write_clo(path:Path,a:np.ndarray,pk:np.ndarray,b_internal:np.ndarray)->None:
-    if len(a)!=A_TAPS or len(b_internal)!=B_TAPS: raise ValueError('A128/B512 required')
+def write_clo(path:Path,a:np.ndarray,pk:np.ndarray,b_device:np.ndarray)->None:
+    """Write a direct-44.1-kHz GP5/GP50 compact CLO.
+
+    Unlike EngineV2's legacy trainer-domain serializer, this distiller solves
+    B directly against the final 44.1-kHz device-domain target. Therefore the
+    solved B512 is already the coefficient block that belongs in the CLO and
+    MUST NOT be multiplied by four during serialization.
+    """
+    if len(a)!=A_TAPS or len(b_device)!=B_TAPS: raise ValueError('A128/B512 required')
     d=bytearray(CLO_BYTES);d[:4]=b'VTSI';struct.pack_into('<I',d,4,CLO_BYTES);struct.pack_into('<I',d,0x14,0x0A00)
     for off,v in zip((0x18,0x20,0x28,0x30,0x38),(1.,0.,0.,0.,0.)):struct.pack_into('<d',d,off,v)
     for off,v in zip((0x40,0x48,0x50,0x58,0x60),POST):struct.pack_into('<d',d,off,float(v))
     for off,v in zip((0x68,0x6c,0x70,0x74),pk):struct.pack_into('<f',d,off,float(v))
     for off,v in ((0x78,0),(0x7c,128),(0x80,128),(0x84,512)):struct.pack_into('<I',d,off,v)
     for i,v in enumerate(a):struct.pack_into('<f',d,COEFF_BASE+4*i,float(v))
-    for i,v in enumerate(np.asarray(b_internal)*4.):struct.pack_into('<f',d,COEFF_BASE+4*(128+i),float(v))
+    for i,v in enumerate(np.asarray(b_device)):struct.pack_into('<f',d,COEFF_BASE+4*(128+i),float(v))
     crc=crc16_modbus(d[0x0c:]);d[8]=(crc>>8)&255;d[9]=crc&255
     path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(d);verify_clo(path)
 
