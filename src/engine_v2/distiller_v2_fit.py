@@ -2,6 +2,7 @@ from __future__ import annotations
 import math,os,time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 from distiller_v2_dsp import B_TAPS,controls_to_a,render_full,bq_pre,pre_fir,pk_render
 
@@ -36,6 +37,8 @@ class Candidate:
     b:np.ndarray
     fit:Metrics
     selection:Metrics
+    fit_level_response_db:float=0.0
+    selection_level_response_db:float=0.0
 
 @dataclass
 class _FitWorkspace:
@@ -44,10 +47,74 @@ class _FitWorkspace:
     target_ffts:list[np.ndarray]
     lengths:list[int]
     bqx:list[np.ndarray]
+    pairs:list[object]
 
 
 def _nextpow2(n:int)->int:
     return 1 << (max(1,n)-1).bit_length()
+
+
+def _dbfs_rms(x):
+    if len(x)==0:return -300.0
+    r=math.sqrt(float(np.mean(np.asarray(x,dtype=np.float64)**2))+1e-30)
+    return 20.0*math.log10(max(r,1e-15))
+
+
+def _pair_level_key(pair):
+    if pair is None:return None
+    source=getattr(pair,'source_sha256','') or getattr(pair,'source_path','')
+    if not source:return None
+    return (
+        getattr(pair,'dataset','unknown'),source,
+        round(float(getattr(pair,'start_s',0.0)),6),
+        round(float(getattr(pair,'duration_s',0.0)),6),
+        getattr(pair,'role','unknown'),
+    )
+
+
+def _level_response_stats(preds,targets,pairs,with_rows=False):
+    """Compare NAM and CLO output-vs-input curves independent of global gain.
+
+    Each group is the exact same source segment rendered at multiple teacher
+    input offsets.  We anchor each group to its 0 dB variant when present
+    (otherwise the closest level to 0) and compare relative output level.
+    This measures compression/cleanup response while cancelling any constant
+    output gain difference that belongs to the final linear B stage.
+    """
+    grouped={}
+    for i,pair in enumerate(pairs):
+        k=_pair_level_key(pair)
+        if k is None:continue
+        level=round(float(getattr(pair,'level_offset_db',0.0)),6)
+        grouped.setdefault(k,{})[level]=i
+    errors=[];rows=[];used_groups=0
+    for gi,(k,by_level) in enumerate(sorted(grouped.items(),key=lambda kv:str(kv[0]))):
+        if len(by_level)<2:continue
+        levels=sorted(by_level)
+        anchor=min(levels,key=lambda v:(abs(v),v))
+        ai=by_level[anchor]
+        pt0=_dbfs_rms(preds[ai]);tt0=_dbfs_rms(targets[ai]);used_groups+=1
+        source_path=str(getattr(pairs[ai],'source_path',''))
+        group_name=f"{getattr(pairs[ai],'dataset','unknown')}:{Path(source_path).name or 'source'}@{float(getattr(pairs[ai],'start_s',0.0)):.3f}s"
+        for level in levels:
+            i=by_level[level];pr=_dbfs_rms(preds[i]);tr=_dbfs_rms(targets[i])
+            pred_rel=pr-pt0;target_rel=tr-tt0;err=pred_rel-target_rel;input_delta=level-anchor
+            if level!=anchor:errors.append(err)
+            if with_rows:
+                rows.append({
+                    'group':group_name,'group_index':gi,'task_id':str(getattr(pairs[i],'task_id','')),
+                    'input_level_db':float(level),'anchor_input_level_db':float(anchor),
+                    'nam_output_rms_dbfs':tr,'clo_output_rms_dbfs':pr,
+                    'absolute_level_error_db':pr-tr,
+                    'input_delta_db':float(input_delta),
+                    'nam_output_delta_db':target_rel,'clo_output_delta_db':pred_rel,
+                    'response_error_db':err,
+                    'nam_departure_from_linear_db':target_rel-input_delta,
+                    'clo_departure_from_linear_db':pred_rel-input_delta,
+                })
+    rmse=math.sqrt(float(np.mean(np.square(errors)))) if errors else 0.0
+    mx=max((abs(x) for x in errors),default=0.0)
+    return {'rmse_db':rmse,'max_abs_db':mx,'groups':used_groups,'points':len(errors),'rows':rows if with_rows else []}
 
 
 # render_preb's leading stage (bq_pre) depends only on each clip's raw input
@@ -61,7 +128,8 @@ def _workspace(audio)->_FitWorkspace:
     target_ffts=[np.fft.rfft(t,nfft) for t in targets]
     lengths=[min(len(x),len(t)) for x,t,_ in audio]
     bqx=_map(bq_pre,[np.asarray(x,dtype=np.float64) for x,_,_ in audio])
-    return _FitWorkspace(nfft,targets,target_ffts,lengths,bqx)
+    pairs=[p for _,_,p in audio]
+    return _FitWorkspace(nfft,targets,target_ffts,lengths,bqx,pairs)
 
 
 def _aligned_esr(p,t,maxlag=256):
@@ -103,6 +171,13 @@ def score(audio,a,pk,b)->Metrics:
     return _score_predictions(preds,targets)
 
 
+def level_response_report(audio,a,pk,b):
+    """Trusted exact matched-level diagnostic for final reports/benchmarks."""
+    if not audio:return {'rmse_db':0.0,'max_abs_db':0.0,'groups':0,'points':0,'rows':[]}
+    preds=_map(lambda xt:render_full(xt[0],a,pk,b),[(x,t) for x,t,_ in audio])
+    return _level_response_stats(preds,[t for _,t,_ in audio],[p for _,_,p in audio],with_rows=True)
+
+
 def _solve_b_and_score(prebs:list[np.ndarray],ws:_FitWorkspace):
     """Solve B and score the fit while reusing each candidate's pre-B render.
 
@@ -122,6 +197,24 @@ def _solve_b_and_score(prebs:list[np.ndarray],ws:_FitWorkspace):
     return b,_score_predictions(preds,ws.targets)
 
 
+def _fast_preds_from_aouts(aouts,pk,b,ws:_FitWorkspace):
+    prebs=_map(lambda aout:pk_render(aout,pk),aouts);B=np.fft.rfft(b,ws.nfft);preds=[]
+    for p,n in zip(prebs,ws.lengths):
+        P=np.fft.rfft(p,ws.nfft);preds.append(np.fft.irfft(P*B,ws.nfft)[:n])
+    return preds
+
+
+def _level_error_from_aouts(aouts,pk,b,ws:_FitWorkspace):
+    preds=_fast_preds_from_aouts(aouts,pk,b,ws)
+    return float(_level_response_stats(preds,ws.targets,ws.pairs,False)['rmse_db'])
+
+
+def _candidate_level_error(c:Candidate,ws:_FitWorkspace|None):
+    if ws is None:return 0.0
+    a=controls_to_a(c.controls_db);aouts=_map(lambda bqx:pre_fir(bqx,a),ws.bqx)
+    return _level_error_from_aouts(aouts,c.pk,c.b,ws)
+
+
 def _evaluate_fit(fit,ctrl,pk,ws:_FitWorkspace):
     a=controls_to_a(ctrl)
     prebs=_map(lambda bqx:pk_render(pre_fir(bqx,a),pk),ws.bqx)
@@ -130,25 +223,23 @@ def _evaluate_fit(fit,ctrl,pk,ws:_FitWorkspace):
     return Candidate(ctrl.copy(),pk.copy(),b,m,inf)
 
 
-def _evaluate_pk_only(aouts,ctrl,pk,ws:_FitWorkspace):
+def _evaluate_pk_only(aouts,ctrl,pk,ws:_FitWorkspace,level_aouts=None,level_ws:_FitWorkspace|None=None):
     """Like _evaluate_fit, but for use when ctrl (hence A and the pre_fir
     stage) is held fixed across a whole sweep of pk candidates -- aouts is
     the already-computed pre_fir(bqx, a) for each clip, reused unchanged."""
     prebs=_map(lambda aout:pk_render(aout,pk),aouts)
     b,m=_solve_b_and_score(prebs,ws)
     inf=Metrics(float('inf'),float('inf'),float('inf'),float('inf'),float('inf'))
-    return Candidate(ctrl.copy(),pk.copy(),b,m,inf)
+    c=Candidate(ctrl.copy(),pk.copy(),b,m,inf)
+    if level_ws is not None and level_aouts is not None:c.fit_level_response_db=_level_error_from_aouts(level_aouts,pk,b,level_ws)
+    return c
 
 
 def _selection_score(audio,c:Candidate,ws:_FitWorkspace|None=None)->Metrics:
     """Fast round-gate score; final benchmark still uses score()."""
     if ws is None:ws=_workspace(audio)
-    a=controls_to_a(c.controls_db)
-    prebs=_map(lambda bqx:pk_render(pre_fir(bqx,a),c.pk),ws.bqx)
-    B=np.fft.rfft(c.b,ws.nfft)
-    preds=[]
-    for p,n in zip(prebs,ws.lengths):
-        P=np.fft.rfft(p,ws.nfft);preds.append(np.fft.irfft(P*B,ws.nfft)[:n])
+    a=controls_to_a(c.controls_db);aouts=_map(lambda bqx:pre_fir(bqx,a),ws.bqx)
+    preds=_fast_preds_from_aouts(aouts,c.pk,c.b,ws)
     return _score_predictions(preds,ws.targets)
 
 
@@ -162,32 +253,49 @@ def _yield_cpu(pause_ms:float):
     if pause_ms>0:time.sleep(pause_ms/1000.0)
 
 
-def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0):
+def _objective(base:Metrics,level_error_db:float,weight:float):
+    return base.composite+max(0.0,float(weight))*max(0.0,float(level_error_db))
+
+
+def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0,level_fit=None,level_sel=None,level_weight=0.08):
     fit_ws=_workspace(fit);gate_audio=sel or fit;gate_ws=_workspace(gate_audio)
-    ctrl=np.zeros(controls);pk=np.array([.1,.1,1.,1.]);best=_evaluate_fit(fit,ctrl,pk,fit_ws);best.selection=_selection_score(gate_audio,best,gate_ws);_yield_cpu(pause_ms);status(f'seed fit={best.fit.composite:.6g} sel={best.selection.composite:.6g}')
+    level_fit_ws=_workspace(level_fit) if level_fit else None
+    level_sel_ws=_workspace(level_sel) if level_sel else None
+    ctrl=np.zeros(controls);pk=np.array([.1,.1,1.,1.]);best=_evaluate_fit(fit,ctrl,pk,fit_ws);best.selection=_selection_score(gate_audio,best,gate_ws)
+    best.fit_level_response_db=_candidate_level_error(best,level_fit_ws);best.selection_level_response_db=_candidate_level_error(best,level_sel_ws);_yield_cpu(pause_ms)
+    status(f'seed fit={best.fit.composite:.6g} sel={best.selection.composite:.6g} level-fit={best.fit_level_response_db:.3f}dB level-sel={best.selection_level_response_db:.3f}dB')
     for r,(astep,pstep) in enumerate(zip((3.,1.5,.75,.35),(.45,.28,.16,.08)),1):
         if r>rounds:break
         rt=time.monotonic();before=best;work=best;evals=0
         for i in range(controls):
             for d in (astep,-astep):
                 c=work.controls_db.copy();c[i]=np.clip(c[i]+d,-18,18);q=_evaluate_fit(fit,c,work.pk,fit_ws);evals+=1;_yield_cpu(pause_ms)
+                # A remains a tonal/linear fit control. Do not let it chase the
+                # level-response diagnostic that is intended specifically to
+                # identify the nonlinear P/K behaviour.
                 if q.fit.composite<work.fit.composite:work=q
         # controls_db (hence A and the pre_fir stage) is fixed for this whole
-        # pk sweep, so the expensive controls_to_a + pre_fir(bqx, a) work is
-        # done once here instead of being repeated for each of the 8 pk
-        # candidates below.
+        # pk sweep, so cache both normal-fit and matched-level A outputs once.
         a_fixed=controls_to_a(work.controls_db);aouts=_map(lambda bqx:pre_fir(bqx,a_fixed),fit_ws.bqx)
+        level_aouts=_map(lambda bqx:pre_fir(bqx,a_fixed),level_fit_ws.bqx) if level_fit_ws is not None else None
+        work.fit_level_response_db=_level_error_from_aouts(level_aouts,work.pk,work.b,level_fit_ws) if level_fit_ws is not None else 0.0
         for i in range(4):
             for s in (1.,-1.):
-                p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.);q=_evaluate_pk_only(aouts,work.controls_db,p,fit_ws);evals+=1;_yield_cpu(pause_ms)
-                if q.fit.composite<work.fit.composite:work=q
+                p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.)
+                q=_evaluate_pk_only(aouts,work.controls_db,p,fit_ws,level_aouts,level_fit_ws);evals+=1;_yield_cpu(pause_ms)
+                if _objective(q.fit,q.fit_level_response_db,level_weight)<_objective(work.fit,work.fit_level_response_db,level_weight):work=q
         # Selection is a round gate only. It is intentionally not scored for
         # every coordinate candidate because those intermediate values are
-        # never used to choose a candidate.
-        work.selection=_selection_score(gate_audio,work,gate_ws);_yield_cpu(pause_ms)
+        # never used to choose a candidate. The matched-level selection sweep
+        # is likewise consulted only here, never inside candidate generation.
+        work.selection=_selection_score(gate_audio,work,gate_ws)
+        work.selection_level_response_db=_candidate_level_error(work,level_sel_ws);_yield_cpu(pause_ms)
         elapsed=time.monotonic()-rt
-        if work.selection.composite<before.selection.composite:
-            best=work;status(f'round {r} ACCEPT sel {before.selection.composite:.6g}->{best.selection.composite:.6g} ({evals} candidates, {elapsed:.1f}s)')
+        before_obj=_objective(before.selection,before.selection_level_response_db,level_weight)
+        work_obj=_objective(work.selection,work.selection_level_response_db,level_weight)
+        dyn=f' level {before.selection_level_response_db:.3f}->{work.selection_level_response_db:.3f}dB'
+        if work_obj<before_obj:
+            best=work;status(f'round {r} ACCEPT sel {before.selection.composite:.6g}->{best.selection.composite:.6g}{dyn} ({evals} candidates, {elapsed:.1f}s)')
         else:
-            status(f'round {r} REJECT sel {before.selection.composite:.6g}->{work.selection.composite:.6g} ({evals} candidates, {elapsed:.1f}s)')
+            status(f'round {r} REJECT sel {before.selection.composite:.6g}->{work.selection.composite:.6g}{dyn} ({evals} candidates, {elapsed:.1f}s)')
     return best
