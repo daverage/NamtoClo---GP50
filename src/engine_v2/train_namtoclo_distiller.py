@@ -19,7 +19,7 @@ if _THREAD_CAP:
     for _var in ('VECLIB_MAXIMUM_THREADS','OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS','NUMBA_NUM_THREADS'):
         os.environ[_var]=str(_THREAD_CAP)
 
-import argparse,json,re,time
+import argparse,json,re,time,math
 from dataclasses import asdict
 from pathlib import Path
 import numpy as np
@@ -44,20 +44,63 @@ def _metrics_for_roles(fit,sel,bench,a,pk,b):
         'benchmark':score(bench,a,pk,b) if bench else None,
     }
 
-def _calibrate_output_gain(audio,a,pk,b,max_abs_db=12.0):
-    """Apply one final linear output-gain correction to B.
+def _db_ratio(num,den):
+    return 20.0*math.log10(max(float(num),1e-15)/max(float(den),1e-15))
 
-    The final B block is linear, so a constant level error should not be left
-    for P/K or the A controls to absorb.  Calibration uses selection material
-    only (fit material when no selection split exists), never benchmark audio.
-    The clamp prevents pathological silent/broken clips causing huge gains.
+def _peak_safe_gain_cap(audio,a,pk,b,margin_db=0.25):
+    """Return a conservative gain cap derived only from selection material.
+
+    A pure RMS match can make a distorted CLO sound more clipped by lifting
+    transient/high-percentile levels above the NAM even when average level is
+    correct.  For every selection clip we compare both absolute sample peak
+    and the 99.9th percentile absolute amplitude.  The strictest clip wins.
+    A small margin avoids reacting to insignificant float/sample differences.
     """
-    if not audio:return b.copy(),0.0,None,None
+    caps=[];details=[]
+    for x,t,pair in audio:
+        pred=render_full(x,a,pk,b)
+        n=min(len(pred),len(t));pred=np.asarray(pred[:n]);target=np.asarray(t[:n])
+        if n==0:continue
+        pa=np.abs(pred);ta=np.abs(target)
+        p_peak=float(np.max(pa));t_peak=float(np.max(ta))
+        p_q=float(np.quantile(pa,0.999));t_q=float(np.quantile(ta,0.999))
+        peak_cap=_db_ratio(t_peak,p_peak)
+        q_cap=_db_ratio(t_q,p_q)
+        cap=min(peak_cap,q_cap)+float(margin_db)
+        caps.append(cap)
+        details.append({
+            'task_id':getattr(pair,'task_id',''),
+            'peak_cap_db':peak_cap,
+            'p999_cap_db':q_cap,
+            'cap_with_margin_db':cap,
+            'pred_peak':p_peak,'target_peak':t_peak,
+            'pred_p999':p_q,'target_p999':t_q,
+        })
+    return (min(caps) if caps else float('inf')),details
+
+def _calibrate_output_gain(audio,a,pk,b,max_abs_db=12.0,peak_margin_db=0.25):
+    """Apply one final linear output-gain correction to B, safely.
+
+    RMS level supplies the desired correction, but selection-set peak and
+    99.9th-percentile envelopes cap it so calibration cannot simply turn a
+    dynamics mismatch into extra clipping. Benchmark audio is never used.
+    """
+    if not audio:return b.copy(),0.0,None,None,{}
     before=score(audio,a,pk,b)
-    gain_db=float(np.clip(-before.signed_level_db,-max_abs_db,max_abs_db))
+    requested_db=float(np.clip(-before.signed_level_db,-max_abs_db,max_abs_db))
+    peak_cap_db,peak_details=_peak_safe_gain_cap(audio,a,pk,b,peak_margin_db)
+    gain_db=float(np.clip(min(requested_db,peak_cap_db),-max_abs_db,max_abs_db))
     scaled=b*(10.0**(gain_db/20.0))
     after=score(audio,a,pk,scaled)
-    return scaled,gain_db,before,after
+    info={
+        'requested_rms_gain_db':requested_db,
+        'peak_safe_cap_db':peak_cap_db,
+        'peak_margin_db':peak_margin_db,
+        'applied_gain_db':gain_db,
+        'limited_by_peak_safety':bool(gain_db < requested_db-1e-9),
+        'clips':peak_details,
+    }
+    return scaled,gain_db,before,after,info
 
 def run_model(ps,out,args):
     name=ps[0].model_name;print(f'\n=== {name} ===')
@@ -66,10 +109,13 @@ def run_model(ps,out,args):
     t=time.monotonic();best=distill(fit,sel,args.a_controls,args.rounds,pause_ms=args.yield_ms);a=controls_to_a(best.controls_db)
     b_uncalibrated=best.b.copy();pre_metrics=_metrics_for_roles(fit,sel,bench,a,best.pk,b_uncalibrated)
     if args.no_level_calibration:
-        b_storage=b_uncalibrated.copy();gain_db=0.0;cal_before=cal_after=None
+        b_storage=b_uncalibrated.copy();gain_db=0.0;cal_before=cal_after=None;cal_info={'disabled':True}
     else:
-        b_storage,gain_db,cal_before,cal_after=_calibrate_output_gain(sel or fit,a,best.pk,b_uncalibrated)
-        print(f'output gain calibration: {gain_db:+.2f} dB (selection level {cal_before.signed_level_db:+.2f}->{cal_after.signed_level_db:+.2f} dB)')
+        b_storage,gain_db,cal_before,cal_after,cal_info=_calibrate_output_gain(sel or fit,a,best.pk,b_uncalibrated,peak_margin_db=args.peak_margin_db)
+        req=cal_info.get('requested_rms_gain_db',gain_db);cap=cal_info.get('peak_safe_cap_db',gain_db)
+        limited=' PEAK-LIMITED' if cal_info.get('limited_by_peak_safety') else ''
+        print(f'output gain calibration: requested {req:+.2f} dB, cap {cap:+.2f} dB, applied {gain_db:+.2f} dB{limited}')
+        print(f'  selection level {cal_before.signed_level_db:+.2f}->{cal_after.signed_level_db:+.2f} dB')
     final_metrics=_metrics_for_roles(fit,sel,bench,a,best.pk,b_storage);bm=final_metrics['benchmark']
     d=out/safe(ps[0].model_key+'__'+name);clo=d/'distilled.clo';write_clo(clo,a,best.pk,b_storage)
     previews={}
@@ -86,6 +132,7 @@ def run_model(ps,out,args):
         'pre_calibration_metrics':pre_metrics,
         'output_gain_calibration_db':gain_db,
         'output_gain_calibration_source':'selection' if sel else 'fit',
+        'output_gain_calibration':cal_info,
         'fit_metrics':final_metrics['fit'],'selection_metrics':final_metrics['selection'],'benchmark_metrics':bm,
         'serialized_domain_metrics':final_metrics,'storage_b_scale':1.0,
         'cpu_controls':{'threads':args.threads,'yield_ms':args.yield_ms},
@@ -96,9 +143,10 @@ def run_model(ps,out,args):
     print('CLO:',clo);return report
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--teacher-root',default='~/NamtoCloTeacherDataset');p.add_argument('--output',default='~/NamtoCloDistillerProof');p.add_argument('--proof5',action='store_true');p.add_argument('--model-regex');p.add_argument('--list-models',action='store_true');p.add_argument('--fit-seconds',type=float,default=30);p.add_argument('--selection-seconds',type=float,default=15);p.add_argument('--benchmark-seconds',type=float,default=30);p.add_argument('--a-controls',type=int,default=24);p.add_argument('--rounds',type=int,default=3);p.add_argument('--seed',type=int,default=260910);p.add_argument('--threads',type=int,default=0,help='Cap native math-library worker threads; 0 keeps library defaults.');p.add_argument('--yield-ms',type=float,default=0.0,help='Sleep this many ms after each optimisation candidate to reduce sustained CPU load.');p.add_argument('--no-level-calibration',action='store_true',help='Do not apply the final selection-derived B output-gain correction.');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--teacher-root',default='~/NamtoCloTeacherDataset');p.add_argument('--output',default='~/NamtoCloDistillerProof');p.add_argument('--proof5',action='store_true');p.add_argument('--model-regex');p.add_argument('--list-models',action='store_true');p.add_argument('--fit-seconds',type=float,default=30);p.add_argument('--selection-seconds',type=float,default=15);p.add_argument('--benchmark-seconds',type=float,default=30);p.add_argument('--a-controls',type=int,default=24);p.add_argument('--rounds',type=int,default=3);p.add_argument('--seed',type=int,default=260910);p.add_argument('--threads',type=int,default=0,help='Cap native math-library worker threads; 0 keeps library defaults.');p.add_argument('--yield-ms',type=float,default=0.0,help='Sleep this many ms after each optimisation candidate to reduce sustained CPU load.');p.add_argument('--no-level-calibration',action='store_true',help='Do not apply the final selection-derived B output-gain correction.');p.add_argument('--peak-margin-db',type=float,default=.25,help='Allowed CLO overshoot above selection NAM peak/p99.9 during final level calibration.');a=p.parse_args()
     if a.threads<0:raise SystemExit('--threads must be >= 0')
     if a.yield_ms<0:raise SystemExit('--yield-ms must be >= 0')
+    if a.peak_margin_db<0:raise SystemExit('--peak-margin-db must be >= 0')
     root=Path(a.teacher_root).expanduser();out=Path(a.output).expanduser();groups=group_models(load_pairs(root))
     if a.list_models:
         for k in sorted(groups):print(groups[k][0].nam_split,groups[k][0].model_name,k)
