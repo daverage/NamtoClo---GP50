@@ -257,13 +257,14 @@ def _objective(base:Metrics,level_error_db:float,weight:float):
     return base.composite+max(0.0,float(weight))*max(0.0,float(level_error_db))
 
 
-def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0,level_fit=None,level_sel=None,level_weight=0.08):
+def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0,level_fit=None,level_sel=None,level_weight=0.08,pk_passes=3):
     fit_ws=_workspace(fit);gate_audio=sel or fit;gate_ws=_workspace(gate_audio)
     level_fit_ws=_workspace(level_fit) if level_fit else None
     level_sel_ws=_workspace(level_sel) if level_sel else None
     ctrl=np.zeros(controls);pk=np.array([.1,.1,1.,1.]);best=_evaluate_fit(fit,ctrl,pk,fit_ws);best.selection=_selection_score(gate_audio,best,gate_ws)
     best.fit_level_response_db=_candidate_level_error(best,level_fit_ws);best.selection_level_response_db=_candidate_level_error(best,level_sel_ws);_yield_cpu(pause_ms)
     status(f'seed fit={best.fit.composite:.6g} sel={best.selection.composite:.6g} level-fit={best.fit_level_response_db:.3f}dB level-sel={best.selection_level_response_db:.3f}dB')
+    max_pk_passes=max(1,int(pk_passes))
     for r,(astep,pstep) in enumerate(zip((3.,1.5,.75,.35),(.45,.28,.16,.08)),1):
         if r>rounds:break
         rt=time.monotonic();before=best;work=best;evals=0
@@ -275,15 +276,33 @@ def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0,level_fit=Non
                 # identify the nonlinear P/K behaviour.
                 if q.fit.composite<work.fit.composite:work=q
         # controls_db (hence A and the pre_fir stage) is fixed for this whole
-        # pk sweep, so cache both normal-fit and matched-level A outputs once.
+        # P/K search, so cache both normal-fit and matched-level A outputs once.
         a_fixed=controls_to_a(work.controls_db);aouts=_map(lambda bqx:pre_fir(bqx,a_fixed),fit_ws.bqx)
         level_aouts=_map(lambda bqx:pre_fir(bqx,a_fixed),level_fit_ws.bqx) if level_fit_ws is not None else None
         work.fit_level_response_db=_level_error_from_aouts(level_aouts,work.pk,work.b,level_fit_ws) if level_fit_ws is not None else 0.0
-        for i in range(4):
-            for s in (1.,-1.):
-                p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.)
-                q=_evaluate_pk_only(aouts,work.controls_db,p,fit_ws,level_aouts,level_fit_ws);evals+=1;_yield_cpu(pause_ms)
-                if _objective(q.fit,q.fit_level_response_db,level_weight)<_objective(work.fit,work.fit_level_response_db,level_weight):work=q
+
+        # The old search allowed only one +/- test per P/K coordinate in each
+        # round. On distorted models this created an artificial travel limit:
+        # if K wanted to rise every round it could reach only exp(sum(step))
+        # from the seed, even when the objective was still improving strongly.
+        # With real matched-level evidence available, take a few coordinate
+        # passes at the same step and stop as soon as a full pass makes no move.
+        # If no level sweep exists, preserve the historical single-pass path.
+        passes_allowed=max_pk_passes if level_fit_ws is not None else 1
+        passes_used=0
+        for _pass in range(passes_allowed):
+            pass_start=_objective(work.fit,work.fit_level_response_db,level_weight)
+            moved=False
+            for i in range(4):
+                for s in (1.,-1.):
+                    p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.)
+                    q=_evaluate_pk_only(aouts,work.controls_db,p,fit_ws,level_aouts,level_fit_ws);evals+=1;_yield_cpu(pause_ms)
+                    if _objective(q.fit,q.fit_level_response_db,level_weight)<_objective(work.fit,work.fit_level_response_db,level_weight):
+                        work=q;moved=True
+            passes_used+=1
+            pass_end=_objective(work.fit,work.fit_level_response_db,level_weight)
+            if not moved or pass_start-pass_end<1e-6:break
+
         # Selection is a round gate only. It is intentionally not scored for
         # every coordinate candidate because those intermediate values are
         # never used to choose a candidate. The matched-level selection sweep
@@ -294,8 +313,9 @@ def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0,level_fit=Non
         before_obj=_objective(before.selection,before.selection_level_response_db,level_weight)
         work_obj=_objective(work.selection,work.selection_level_response_db,level_weight)
         dyn=f' level {before.selection_level_response_db:.3f}->{work.selection_level_response_db:.3f}dB'
+        pks=' '.join(f'{v:.3g}' for v in work.pk)
         if work_obj<before_obj:
-            best=work;status(f'round {r} ACCEPT sel {before.selection.composite:.6g}->{best.selection.composite:.6g}{dyn} ({evals} candidates, {elapsed:.1f}s)')
+            best=work;status(f'round {r} ACCEPT sel {before.selection.composite:.6g}->{best.selection.composite:.6g}{dyn} pk=[{pks}] pk-passes={passes_used} ({evals} candidates, {elapsed:.1f}s)')
         else:
-            status(f'round {r} REJECT sel {before.selection.composite:.6g}->{work.selection.composite:.6g}{dyn} ({evals} candidates, {elapsed:.1f}s)')
+            status(f'round {r} REJECT sel {before.selection.composite:.6g}->{work.selection.composite:.6g}{dyn} pk=[{pks}] pk-passes={passes_used} ({evals} candidates, {elapsed:.1f}s)')
     return best
