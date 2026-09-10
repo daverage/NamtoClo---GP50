@@ -188,7 +188,9 @@ def run_model(pairs, out, args):
 
     directory = out / safe(pairs[0].model_key + "__" + name)
     directory.mkdir(parents=True, exist_ok=True)
-    clo = directory / "distilled.clo"
+    clo = directory / (
+        f"NSV2__{pairs[0].model_id}__{safe(name)}.clo"
+    )
     write_clo(clo, a, best.pk, b_device)
 
     previews = {
