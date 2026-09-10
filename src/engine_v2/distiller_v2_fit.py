@@ -5,9 +5,20 @@ import numpy as np
 from distiller_v2_dsp import controls_to_a,render_preb,render_full,solve_shared_b
 
 @dataclass
-class Metrics: composite:float; esr:float; spectral:float; level_db:float
+class Metrics:
+    composite:float
+    esr:float
+    spectral:float
+    level_db:float
+    signed_level_db:float
+
 @dataclass
-class Candidate: controls_db:np.ndarray; pk:np.ndarray; b:np.ndarray; fit:Metrics; selection:Metrics
+class Candidate:
+    controls_db:np.ndarray
+    pk:np.ndarray
+    b:np.ndarray
+    fit:Metrics
+    selection:Metrics
 
 def _aligned_esr(p,t,maxlag=256):
     n=min(len(p),len(t));p=p[:n];t=t[:n];dec=max(1,n//100000);ps=p[::dec];ts=t[::dec];ml=max(1,maxlag//dec);best=-1e99;lag0=0
@@ -28,11 +39,11 @@ def _spectral(p,t):
     return float(np.sqrt(np.mean(np.log(np.maximum(P[mask],1e-12)/T[mask])**2))) if np.any(mask) else 0.
 
 def score(audio,a,pk,b)->Metrics:
-    if not audio:return Metrics(float('inf'),float('inf'),float('inf'),float('inf'))
-    E=[];S=[];L=[]
+    if not audio:return Metrics(float('inf'),float('inf'),float('inf'),float('inf'),float('inf'))
+    E=[];S=[];L=[];SL=[]
     for x,t,_ in audio:
-        p=render_full(x,a,pk,b);E.append(_aligned_esr(p,t));S.append(_spectral(p,t));pr=math.sqrt(float(np.mean(p*p))+1e-30);tr=math.sqrt(float(np.mean(t*t))+1e-30);L.append(abs(20*math.log10(max(pr,1e-15)/max(tr,1e-15))))
-    e=float(np.mean(E));s=float(np.mean(S));l=float(np.mean(L));return Metrics(.7*e+.3*s+.01*l,e,s,l)
+        p=render_full(x,a,pk,b);E.append(_aligned_esr(p,t));S.append(_spectral(p,t));pr=math.sqrt(float(np.mean(p*p))+1e-30);tr=math.sqrt(float(np.mean(t*t))+1e-30);signed=20*math.log10(max(pr,1e-15)/max(tr,1e-15));SL.append(signed);L.append(abs(signed))
+    e=float(np.mean(E));s=float(np.mean(S));l=float(np.mean(L));sl=float(np.mean(SL));return Metrics(.7*e+.3*s+.01*l,e,s,l,sl)
 
 def fit_b(audio,a,pk):return solve_shared_b([render_preb(x,a,pk) for x,_,_ in audio],[t for _,t,_ in audio])
 def evaluate(fit,sel,ctrl,pk):
