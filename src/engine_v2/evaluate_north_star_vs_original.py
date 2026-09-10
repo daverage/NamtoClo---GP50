@@ -211,16 +211,39 @@ def _discover_clo(root: Path, pair: Pair, kind: str) -> Path:
                 and _safe(pair.model_name).lower() in _safe(p.stem).lower()
             ]
     elif kind == "north_star":
+        # Prefer the new identifiable NSV2 filenames.
         candidates = [
             p
             for p in files
-            if p.name == "distilled.clo" and pair.model_key in str(p.parent)
+            if p.name.startswith("NSV2__")
+            and p.suffix.lower() == ".clo"
+            and pair.model_key in str(p.parent)
         ]
+
         if not candidates and model_id:
             candidates = [
                 p
                 for p in files
-                if p.name == "distilled.clo" and f"model{model_id}_" in str(p.parent)
+                if p.name.startswith(f"NSV2__{model_id}__")
+                and p.suffix.lower() == ".clo"
+            ]
+
+        # Backward compatibility with v2 files generated before the
+        # identifiable filename convention.
+        if not candidates:
+            candidates = [
+                p
+                for p in files
+                if p.name == "distilled.clo"
+                and pair.model_key in str(p.parent)
+            ]
+
+        if not candidates and model_id:
+            candidates = [
+                p
+                for p in files
+                if p.name == "distilled.clo"
+                and f"model{model_id}_" in str(p.parent)
             ]
     else:
         raise ValueError(kind)
