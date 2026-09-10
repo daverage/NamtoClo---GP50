@@ -32,6 +32,18 @@ def main():
     assert not info['limited_by_peak_safety'],info
     assert info['peak_safe_cap_db']>=gain_db,info
 
+    # Synthetic probes may participate in fitting but must not dictate the
+    # final audible output-gain/peak cap when real guitar selection exists.
+    real=SimpleNamespace(synthetic=False,task_id='real',level_offset_db=0.0)
+    synth=SimpleNamespace(synthetic=True,task_id='synth',level_offset_db=0.0)
+    scaled2,gain2,_,after2,info2=_calibrate_output_gain([(x,2.0*y,real),(x,0.5*y,synth)],a,pk,b)
+    assert abs(gain2-6.020599913)<1e-5,(gain2,info2)
+    assert abs(scaled2[0]-.5)<1e-6,scaled2[0]
+    assert abs(after2.signed_level_db)<1e-5,after2.signed_level_db
+    assert info2['clips_used']==1 and info2['clips_total']==2,info2
+    assert info2['excluded_synthetic_clips']==1,info2
+    assert info2['calibration_material']=='real-guitar',info2
+
     # Level-sweep discovery must only join the exact same real source segment,
     # and it must preserve ordered input levels.
     def pair(task,level,start=1.25,role='fit'):
