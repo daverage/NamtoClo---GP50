@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "description": "Curated modern-A2 TONE3000 packs used by build_namtoclo_nam_corpus.py",
+  "tone_ids": [
+    10912,
+    755,
+    42319,
+    89722,
+    29285,
+    37987,
+    50546,
+    57410,
+    36551,
+    63491,
+    84925,
+    62048,
+    59309,
+    32868,
+    64090,
+    32152,
+    70286,
+    43985
+  ],
+  "note": "The Python builder is authoritative for split/model-name selectors. This lightweight manifest is convenient for auditing IDs."
+}

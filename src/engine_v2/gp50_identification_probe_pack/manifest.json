@@ -1,0 +1,220 @@
+{
+  "version": 1,
+  "purpose": "Designed identification probes for NAM -> GP50 CLO system identification/distillation.",
+  "canonical_sample_rate": 44100,
+  "notes": [
+    "All files are mono float32 WAV.",
+    "44.1 kHz is the canonical domain because the GP50 CLO student is ultimately 44.1 kHz.",
+    "If the NAM requires another sample rate, resample the input to the NAM rate, render the NAM, then resample/alignment-correct the target back to 44.1 kHz before fitting.",
+    "Do not normalise the NAM output independently; preserve absolute input/output gain.",
+    "Use a deterministic high-quality resampler and cache teacher renders."
+  ],
+  "files": [
+    {
+      "file": "00_silence.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Two seconds of digital silence. Useful for state reset / noise-floor / latency sanity checks."
+    },
+    {
+      "file": "01_impulse_-36dBFS.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Single positive impulse at -36 dBFS after 0.5 s silence. Low-level linear-response / latency probe.",
+      "peak_dbfs": -36
+    },
+    {
+      "file": "02_impulse_-12dBFS.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Single positive impulse at -12 dBFS after 0.5 s silence. Low-level linear-response / latency probe.",
+      "peak_dbfs": -12
+    },
+    {
+      "file": "03_polarity_pulses.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Matched positive/negative 4 ms pulses at -30, -18, -9 and -3 dBFS. Exposes polarity asymmetry and transient saturation."
+    },
+    {
+      "file": "04_log_sweep_-36dBFS.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "20 Hz -> 20 kHz logarithmic sweep, peak -36 dBFS. Compare low/mid/high-drive spectral behaviour.",
+      "peak_dbfs": -36,
+      "frequency_start_hz": 20,
+      "frequency_end_hz": 20000
+    },
+    {
+      "file": "05_log_sweep_-18dBFS.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "20 Hz -> 20 kHz logarithmic sweep, peak -18 dBFS. Compare low/mid/high-drive spectral behaviour.",
+      "peak_dbfs": -18,
+      "frequency_start_hz": 20,
+      "frequency_end_hz": 20000
+    },
+    {
+      "file": "06_log_sweep_-6dBFS.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "20 Hz -> 20 kHz logarithmic sweep, peak -6 dBFS. Compare low/mid/high-drive spectral behaviour.",
+      "peak_dbfs": -6,
+      "frequency_start_hz": 20,
+      "frequency_end_hz": 20000
+    },
+    {
+      "file": "07_multisine_level_ladder.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Identical 23-tone multisine repeated from -36 to -3 dBFS peak. Designed for level-dependent gain, tone and compression measurements.",
+      "levels_dbfs_peak": [
+        -36,
+        -30,
+        -24,
+        -18,
+        -12,
+        -9,
+        -6,
+        -3
+      ],
+      "frequencies_hz": [
+        70.0,
+        88.44,
+        111.737,
+        141.171,
+        178.359,
+        225.343,
+        284.704,
+        359.702,
+        454.456,
+        574.171,
+        725.421,
+        916.515,
+        1157.948,
+        1462.979,
+        1848.363,
+        2335.267,
+        2950.433,
+        3727.649,
+        4709.603,
+        5950.227,
+        7517.662,
+        9497.997,
+        12000.0
+      ]
+    },
+    {
+      "file": "08_multisine_drive_ramp.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "23-tone multisine with smooth peak-drive envelope from -36 dBFS to -3 dBFS and back. Useful for compression onset, cleanup and hysteresis/state checks."
+    },
+    {
+      "file": "09_1kHz_level_ladder.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "1 kHz sine at absolute peak levels -42 to -1 dBFS. Measures transfer curve, compression and harmonic growth.",
+      "levels_dbfs_peak": [
+        -42,
+        -36,
+        -30,
+        -24,
+        -18,
+        -12,
+        -9,
+        -6,
+        -3,
+        -1
+      ],
+      "frequency_hz": 1000
+    },
+    {
+      "file": "10_frequency_level_matrix.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "100/400/1000/2500/5000 Hz sines at -30/-18/-9/-3 dBFS. Exposes frequency-dependent nonlinear behaviour.",
+      "frequencies_hz": [
+        100,
+        400,
+        1000,
+        2500,
+        5000
+      ],
+      "levels_dbfs_peak": [
+        -30,
+        -18,
+        -9,
+        -3
+      ]
+    },
+    {
+      "file": "11_two_tone_IMD_matrix.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Two-tone pairs at three levels for intermodulation behaviour: 100+1000, 250+2000, 500+4000, 1000+5000 Hz.",
+      "pairs_hz": [
+        [
+          100,
+          1000
+        ],
+        [
+          250,
+          2000
+        ],
+        [
+          500,
+          4000
+        ],
+        [
+          1000,
+          5000
+        ]
+      ],
+      "levels_dbfs_peak": [
+        -24,
+        -9,
+        -3
+      ]
+    },
+    {
+      "file": "12_broadband_noise_level_ladder.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Identical deterministic broadband noise repeated at multiple peak levels. Useful for broad transfer estimation and level-dependent response.",
+      "levels_dbfs_peak": [
+        -36,
+        -24,
+        -18,
+        -12,
+        -6,
+        -3
+      ],
+      "seed": 260909
+    },
+    {
+      "file": "13_tone_burst_transients.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Short tone bursts from 80 Hz to 4 kHz at -18/-6/-3 dBFS. Tests attack/release behaviour and transient distortion.",
+      "frequencies_hz": [
+        80,
+        160,
+        500,
+        1500,
+        4000
+      ],
+      "levels_dbfs_peak": [
+        -18,
+        -6,
+        -3
+      ]
+    },
+    {
+      "file": "14_pick_like_transient_probe.wav",
+      "sample_rate": 44100,
+      "format": "mono float32 WAV",
+      "description": "Sparse decaying broadband transients at varied levels. Synthetic transient probe only; do not treat as a substitute for real guitar DI."
+    }
+  ]
+}
