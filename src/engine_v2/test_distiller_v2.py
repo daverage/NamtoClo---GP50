@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import struct,tempfile
 from pathlib import Path
+from types import SimpleNamespace
 import numpy as np
 from distiller_v2_dsp import controls_to_a,post_coeffs,render_full,write_clo,crc16_modbus
-from distiller_v2_fit import Candidate,Metrics,_selection_score,_aligned_esr,score
+from distiller_v2_fit import Candidate,Metrics,_selection_score,_aligned_esr,score,_level_response_stats
+from distiller_v2_data import Pair,level_sweep_groups
 from train_namtoclo_distiller import _calibrate_output_gain
 
 def main():
@@ -29,6 +31,26 @@ def main():
     assert abs(info['requested_rms_gain_db']-6.020599913)<1e-5,info
     assert not info['limited_by_peak_safety'],info
     assert info['peak_safe_cap_db']>=gain_db,info
+
+    # Level-sweep discovery must only join the exact same real source segment,
+    # and it must preserve ordered input levels.
+    def pair(task,level,start=1.25,role='fit'):
+        return Pair(task,'m','model',1,2,'development',role,'test',False,'in.wav','out.wav',2.0,task,'/tmp/source.wav','sourcehash',start,level)
+    sweep=[pair('m12',-12),pair('m6',-6),pair('z0',0),pair('p6',6),pair('other',0,start=9.0)]
+    groups=level_sweep_groups(sweep,'fit',max_groups=1,seed=1,min_levels=3)
+    assert len(groups)==1,groups
+    assert [p.level_offset_db for p in groups[0]]==[-12,-6,0,6],groups[0]
+
+    # The nonlinear level metric is relative to the 0-dB member of a matched
+    # sweep, so a constant output-gain error must cancel completely. But if
+    # only one input level has the wrong gain, the cleanup/compression curve
+    # must show a substantial error.
+    wave=np.sin(np.linspace(0,40*np.pi,4096));targets=[.5*wave,wave,1.5*wave]
+    pairs=[SimpleNamespace(dataset='test',source_sha256='same',source_path='/tmp/g.wav',start_s=0.,duration_s=1.,role='fit',level_offset_db=l,task_id=str(l)) for l in (-12,0,6)]
+    preds=[.25*t for t in targets]
+    lr=_level_response_stats(preds,targets,pairs,True);assert lr['rmse_db']<1e-10,lr
+    bad=[preds[0]*2,preds[1],preds[2]]
+    lr_bad=_level_response_stats(bad,targets,pairs,True);assert lr_bad['rmse_db']>4.0,lr_bad
 
     # FFT lag search must preserve the old aligned-ESR behaviour.
     rng=np.random.default_rng(260910);t=rng.standard_normal(4096);p=np.concatenate((np.zeros(17),t[:-17]));assert _aligned_esr(p,t)<1e-12
