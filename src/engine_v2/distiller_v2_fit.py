@@ -73,6 +73,7 @@ def _score_predictions(preds,targets)->Metrics:
 
 
 def score(audio,a,pk,b)->Metrics:
+    """Trusted exact score using the device-style sample renderer."""
     if not audio:return Metrics(float('inf'),float('inf'),float('inf'),float('inf'),float('inf'))
     preds=[];targets=[]
     for x,t,_ in audio:
@@ -107,16 +108,22 @@ def _evaluate_fit(fit,ctrl,pk,ws:_FitWorkspace):
     return Candidate(ctrl.copy(),pk.copy(),b,m,inf)
 
 
-def _selection_score(audio,c:Candidate)->Metrics:
+def _selection_score(audio,c:Candidate,ws:_FitWorkspace|None=None)->Metrics:
+    """Fast round-gate score; final benchmark still uses score()."""
+    if ws is None:ws=_workspace(audio)
     a=controls_to_a(c.controls_db)
-    # Selection is deliberately evaluated only at the seed and round gates.
-    # It does not influence coordinate choices inside a round.
-    return score(audio,a,c.pk,c.b)
+    prebs=[render_preb(x,a,c.pk) for x,_,_ in audio]
+    B=np.fft.rfft(c.b,ws.nfft)
+    preds=[]
+    for p,n in zip(prebs,ws.lengths):
+        P=np.fft.rfft(p,ws.nfft);preds.append(np.fft.irfft(P*B,ws.nfft)[:n])
+    return _score_predictions(preds,ws.targets)
 
 
 def evaluate(fit,sel,ctrl,pk):
     """Compatibility wrapper used by experiments/tests outside distill()."""
-    ws=_workspace(fit);c=_evaluate_fit(fit,ctrl,pk,ws);c.selection=_selection_score(sel or fit,c);return c
+    fit_ws=_workspace(fit);gate=sel or fit;gate_ws=_workspace(gate)
+    c=_evaluate_fit(fit,ctrl,pk,fit_ws);c.selection=_selection_score(gate,c,gate_ws);return c
 
 
 def _yield_cpu(pause_ms:float):
@@ -124,8 +131,8 @@ def _yield_cpu(pause_ms:float):
 
 
 def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0):
-    fit_ws=_workspace(fit);gate_audio=sel or fit
-    ctrl=np.zeros(controls);pk=np.array([.1,.1,1.,1.]);best=_evaluate_fit(fit,ctrl,pk,fit_ws);best.selection=_selection_score(gate_audio,best);_yield_cpu(pause_ms);status(f'seed fit={best.fit.composite:.6g} sel={best.selection.composite:.6g}')
+    fit_ws=_workspace(fit);gate_audio=sel or fit;gate_ws=_workspace(gate_audio)
+    ctrl=np.zeros(controls);pk=np.array([.1,.1,1.,1.]);best=_evaluate_fit(fit,ctrl,pk,fit_ws);best.selection=_selection_score(gate_audio,best,gate_ws);_yield_cpu(pause_ms);status(f'seed fit={best.fit.composite:.6g} sel={best.selection.composite:.6g}')
     for r,(astep,pstep) in enumerate(zip((3.,1.5,.75,.35),(.45,.28,.16,.08)),1):
         if r>rounds:break
         rt=time.monotonic();before=best;work=best;evals=0
@@ -137,10 +144,10 @@ def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0):
             for s in (1.,-1.):
                 p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.);q=_evaluate_fit(fit,work.controls_db,p,fit_ws);evals+=1;_yield_cpu(pause_ms)
                 if q.fit.composite<work.fit.composite:work=q
-        # Selection is a round gate only. The previous implementation scored
-        # it inside every candidate evaluation even though those values were
-        # never consulted, roughly doubling expensive device renders.
-        work.selection=_selection_score(gate_audio,work);_yield_cpu(pause_ms)
+        # Selection is a round gate only. It is intentionally not scored for
+        # every coordinate candidate because those intermediate values are
+        # never used to choose a candidate.
+        work.selection=_selection_score(gate_audio,work,gate_ws);_yield_cpu(pause_ms)
         elapsed=time.monotonic()-rt
         if work.selection.composite<before.selection.composite:
             best=work;status(f'round {r} ACCEPT sel {before.selection.composite:.6g}->{best.selection.composite:.6g} ({evals} candidates, {elapsed:.1f}s)')
