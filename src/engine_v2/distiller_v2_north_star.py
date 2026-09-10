@@ -24,6 +24,17 @@ NORTH_STAR_PROBES = (
     ("transient_bursts", "13_tone_burst_transients.wav"),
 )
 
+# The source corpus deliberately contains bass and sample-library artifacts for
+# broader research, but the canonical North Star "real" slots are dry guitar
+# playing. Bass is a useful separate domain, not a substitute for one of the
+# six guitar examples. Likewise release/noise/silence artifacts are instrument
+# assets rather than performances/excitation we want counted as real playing.
+_NORTH_STAR_BASS_DATASETS = frozenset({"growlybass", "black-blue-basses"})
+_NORTH_STAR_NONPLAYING_COMPONENTS = frozenset(
+    {"noise", "noises", "release", "releases", "rel", "silence"}
+)
+_NORTH_STAR_NONPLAYING_TOKENS = frozenset({"noise", "release", "silence"})
+
 
 @dataclass(frozen=True)
 class NorthStarMaterial:
@@ -57,6 +68,11 @@ class NorthStarMaterial:
                 "regardless of their historical teacher-dataset role tag. Real selection and "
                 "benchmark material never moves into FIT."
             ),
+            "real_material_policy": (
+                "Canonical real slots use dry guitar material only: bass datasets and obvious "
+                "release/noise/silence sample artifacts are excluded. The broader research "
+                "corpus remains unchanged."
+            ),
         }
 
 
@@ -75,17 +91,48 @@ def _real_performance_key(p: Pair):
     )
 
 
+def _is_canonical_real_guitar(p: Pair) -> bool:
+    """True for real guitar excitation suitable for canonical real slots.
+
+    This is intentionally a corpus-definition filter, not a model-dependent
+    quality heuristic. It removes domains/assets that contradict the North Star
+    definition of the real corpus while leaving the wider teacher dataset intact.
+    """
+    if p.synthetic:
+        return False
+    dataset = str(p.dataset).strip().lower()
+    if dataset in _NORTH_STAR_BASS_DATASETS or "bass" in dataset:
+        return False
+
+    path = Path(p.source_path or p.input_path)
+    components = {part.lower() for part in path.parts}
+    if components & _NORTH_STAR_NONPLAYING_COMPONENTS:
+        return False
+
+    stem = path.stem.lower()
+    for sep in ("-", ".", " "):
+        stem = stem.replace(sep, "_")
+    tokens = {tok for tok in stem.split("_") if tok}
+    if tokens & _NORTH_STAR_NONPLAYING_TOKENS:
+        return False
+    return True
+
+
 def _base_real_pairs(pairs: list[Pair], role: str) -> list[Pair]:
-    """One deterministic near-0-dB task per underlying real performance.
+    """One deterministic near-0-dB task per underlying real guitar performance.
 
     The teacher corpus may contain -12/-6/0/+6 digital-drive variants of the
     same source segment. The canonical first prototype uses one base rendition
     per real performance; matched level variants remain available as held-out
     diagnostics rather than silently multiplying the real fitting set.
+
+    The broader corpus also contains bass and sample-library release/noise
+    artifacts. Those stay available to other research, but they are not allowed
+    to consume one of the canonical real-guitar slots.
     """
     grouped: dict[tuple, list[Pair]] = {}
     for p in pairs:
-        if p.synthetic or p.role != role:
+        if p.role != role or not _is_canonical_real_guitar(p):
             continue
         grouped.setdefault(_real_performance_key(p), []).append(p)
 
@@ -168,11 +215,11 @@ def select_north_star_material(
 
     shortages = []
     if len(rf) < fit_real:
-        shortages.append(f"fit real {len(rf)}/{fit_real}")
+        shortages.append(f"fit real guitar {len(rf)}/{fit_real}")
     if len(rs) < selection_real:
-        shortages.append(f"selection real {len(rs)}/{selection_real}")
+        shortages.append(f"selection real guitar {len(rs)}/{selection_real}")
     if len(rb) < benchmark_real:
-        shortages.append(f"benchmark real {len(rb)}/{benchmark_real}")
+        shortages.append(f"benchmark real guitar {len(rb)}/{benchmark_real}")
     if shortages:
         raise RuntimeError("Insufficient North Star real-DI material: " + ", ".join(shortages))
 
