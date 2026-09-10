@@ -23,20 +23,20 @@ def post_coeffs(sr:int=SR)->np.ndarray:
     return np.array([b0,b1,b2,a1,a2],dtype=np.float64)
 POST=post_coeffs(); PRE=np.array([1.,0.,0.,0.,0.],dtype=np.float64)
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def _ap(x, coeffs, states):
     for i in range(len(coeffs)):
         a=coeffs[i]; s=states[i]; y=s+a*x; states[i]=x-a*y; x=y
     return x
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def _up(x,ac,ast,bc,bst): return _ap(x,ac,ast),_ap(x,bc,bst)
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def _down(e,o,ac,ast,bc,bst,delay):
     x=_ap(e,ac,ast); y=_ap(o,bc,bst); return 0.5*(x+delay),y
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def _fir(x,h):
     out=np.zeros(len(x),dtype=np.float64); hist=np.zeros(len(h),dtype=np.float64); ix=0
     for i in range(len(x)):
@@ -46,7 +46,7 @@ def _fir(x,h):
         out[i]=s; ix=ix+1 if ix+1<len(h) else 0
     return out
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def _bq(x,c):
     out=np.empty(len(x),dtype=np.float64); w1=0.; w2=0.
     for i in range(len(x)):
@@ -54,7 +54,7 @@ def _bq(x,c):
         w2=w1; w1=w0; out[i]=float(np.float32(float(np.float32(yd))*0.001))
     return out
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def _preb_from_aout(aout,pp,pn,kp,kn,post):
     n=len(aout); out=np.empty(n,dtype=np.float64)
     u1as=np.zeros(len(U1_A));u1bs=np.zeros(len(U1_B));u2as=np.zeros(len(U2_A));u2bs=np.zeros(len(U2_B))
@@ -75,9 +75,21 @@ def _preb_from_aout(aout,pp,pn,kp,kn,post):
         w2=w1;w1=w0;out[i]=float(np.float32(float(np.float32(yd))*0.001))
     return out
 
-@njit(cache=True)
-def render_preb(x,a,pk): return _preb_from_aout(_fir(_bq(x,PRE),a),pk[0],pk[1],pk[2],pk[3],POST)
-@njit(cache=True)
+# Stage-split helpers. PRE is a fixed identity-shaped filter and A/PK/B each
+# only vary independently in different phases of the distiller's coordinate
+# search, so callers that hold one of (x, a) fixed across many candidates can
+# call these directly and cache the unchanged intermediate instead of paying
+# for the full x->preb chain on every candidate. Composing them below is
+# bit-identical to the previous single fused njit implementation -- same ops,
+# same float64 intermediates, just materialized as separate arrays.
+@njit(cache=True,nogil=True)
+def bq_pre(x): return _bq(x,PRE)
+@njit(cache=True,nogil=True)
+def pre_fir(bqx,a): return _fir(bqx,a)
+@njit(cache=True,nogil=True)
+def pk_render(aout,pk): return _preb_from_aout(aout,pk[0],pk[1],pk[2],pk[3],POST)
+
+def render_preb(x,a,pk): return pk_render(pre_fir(bq_pre(x),a),pk)
 def render_full(x,a,pk,b): return _fir(render_preb(x,a,pk),b)
 
 def controls_to_a(ctrl_db:np.ndarray)->np.ndarray:

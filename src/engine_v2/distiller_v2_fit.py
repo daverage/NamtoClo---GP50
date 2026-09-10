@@ -1,8 +1,25 @@
 from __future__ import annotations
-import math,time
+import math,os,time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import numpy as np
-from distiller_v2_dsp import B_TAPS,controls_to_a,render_preb,render_full
+from distiller_v2_dsp import B_TAPS,controls_to_a,render_full,bq_pre,pre_fir,pk_render
+
+# The per-sample DSP kernels in distiller_v2_dsp are njit(nogil=True), so they
+# release the GIL while running -- a thread pool gets real parallelism across
+# a clip list without altering any render output (each clip is rendered
+# independently; results are combined in the same list order as a serial
+# loop). Sized lazily so importing this module never spins up threads.
+_POOL=None
+def _pool():
+    global _POOL
+    if _POOL is None:_POOL=ThreadPoolExecutor(max_workers=max(1,os.cpu_count() or 1))
+    return _POOL
+
+def _map(fn,items):
+    items=list(items)
+    if len(items)<=1:return [fn(it) for it in items]
+    return list(_pool().map(fn,items))
 
 @dataclass
 class Metrics:
@@ -26,19 +43,25 @@ class _FitWorkspace:
     targets:list[np.ndarray]
     target_ffts:list[np.ndarray]
     lengths:list[int]
+    bqx:list[np.ndarray]
 
 
 def _nextpow2(n:int)->int:
     return 1 << (max(1,n)-1).bit_length()
 
 
+# render_preb's leading stage (bq_pre) depends only on each clip's raw input
+# audio, which never changes across the hundreds of candidates a distill()
+# run evaluates -- so it is computed once per clip here and reused from the
+# workspace instead of being recomputed by every candidate evaluation.
 def _workspace(audio)->_FitWorkspace:
     if not audio:raise ValueError('empty audio workspace')
     nfft=_nextpow2(max(max(len(x),len(t)) for x,t,_ in audio)+B_TAPS)
     targets=[np.asarray(t,dtype=np.float64) for _,t,_ in audio]
     target_ffts=[np.fft.rfft(t,nfft) for t in targets]
     lengths=[min(len(x),len(t)) for x,t,_ in audio]
-    return _FitWorkspace(nfft,targets,target_ffts,lengths)
+    bqx=_map(bq_pre,[np.asarray(x,dtype=np.float64) for x,_,_ in audio])
+    return _FitWorkspace(nfft,targets,target_ffts,lengths,bqx)
 
 
 def _aligned_esr(p,t,maxlag=256):
@@ -75,9 +98,8 @@ def _score_predictions(preds,targets)->Metrics:
 def score(audio,a,pk,b)->Metrics:
     """Trusted exact score using the device-style sample renderer."""
     if not audio:return Metrics(float('inf'),float('inf'),float('inf'),float('inf'),float('inf'))
-    preds=[];targets=[]
-    for x,t,_ in audio:
-        preds.append(render_full(x,a,pk,b));targets.append(t)
+    preds=_map(lambda xt:render_full(xt[0],a,pk,b),[(x,t) for x,t,_ in audio])
+    targets=[t for _,t,_ in audio]
     return _score_predictions(preds,targets)
 
 
@@ -102,7 +124,17 @@ def _solve_b_and_score(prebs:list[np.ndarray],ws:_FitWorkspace):
 
 def _evaluate_fit(fit,ctrl,pk,ws:_FitWorkspace):
     a=controls_to_a(ctrl)
-    prebs=[render_preb(x,a,pk) for x,_,_ in fit]
+    prebs=_map(lambda bqx:pk_render(pre_fir(bqx,a),pk),ws.bqx)
+    b,m=_solve_b_and_score(prebs,ws)
+    inf=Metrics(float('inf'),float('inf'),float('inf'),float('inf'),float('inf'))
+    return Candidate(ctrl.copy(),pk.copy(),b,m,inf)
+
+
+def _evaluate_pk_only(aouts,ctrl,pk,ws:_FitWorkspace):
+    """Like _evaluate_fit, but for use when ctrl (hence A and the pre_fir
+    stage) is held fixed across a whole sweep of pk candidates -- aouts is
+    the already-computed pre_fir(bqx, a) for each clip, reused unchanged."""
+    prebs=_map(lambda aout:pk_render(aout,pk),aouts)
     b,m=_solve_b_and_score(prebs,ws)
     inf=Metrics(float('inf'),float('inf'),float('inf'),float('inf'),float('inf'))
     return Candidate(ctrl.copy(),pk.copy(),b,m,inf)
@@ -112,7 +144,7 @@ def _selection_score(audio,c:Candidate,ws:_FitWorkspace|None=None)->Metrics:
     """Fast round-gate score; final benchmark still uses score()."""
     if ws is None:ws=_workspace(audio)
     a=controls_to_a(c.controls_db)
-    prebs=[render_preb(x,a,c.pk) for x,_,_ in audio]
+    prebs=_map(lambda bqx:pk_render(pre_fir(bqx,a),c.pk),ws.bqx)
     B=np.fft.rfft(c.b,ws.nfft)
     preds=[]
     for p,n in zip(prebs,ws.lengths):
@@ -140,9 +172,14 @@ def distill(fit,sel,controls=24,rounds=3,status=print,pause_ms=0.0):
             for d in (astep,-astep):
                 c=work.controls_db.copy();c[i]=np.clip(c[i]+d,-18,18);q=_evaluate_fit(fit,c,work.pk,fit_ws);evals+=1;_yield_cpu(pause_ms)
                 if q.fit.composite<work.fit.composite:work=q
+        # controls_db (hence A and the pre_fir stage) is fixed for this whole
+        # pk sweep, so the expensive controls_to_a + pre_fir(bqx, a) work is
+        # done once here instead of being repeated for each of the 8 pk
+        # candidates below.
+        a_fixed=controls_to_a(work.controls_db);aouts=_map(lambda bqx:pre_fir(bqx,a_fixed),fit_ws.bqx)
         for i in range(4):
             for s in (1.,-1.):
-                p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.);q=_evaluate_fit(fit,work.controls_db,p,fit_ws);evals+=1;_yield_cpu(pause_ms)
+                p=work.pk.copy();p[i]*=math.exp(s*pstep);p[:2]=np.clip(p[:2],.01,2.);p[2:]=np.clip(p[2:],.05,80.);q=_evaluate_pk_only(aouts,work.controls_db,p,fit_ws);evals+=1;_yield_cpu(pause_ms)
                 if q.fit.composite<work.fit.composite:work=q
         # Selection is a round gate only. It is intentionally not scored for
         # every coordinate candidate because those intermediate values are

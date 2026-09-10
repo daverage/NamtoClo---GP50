@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib,json,re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable,Optional
@@ -55,7 +56,14 @@ def read_pair(p:Pair):
         return np.asarray(x,dtype=np.float64)
     x=rd(p.input_path);y=rd(p.target_path);n=min(len(x),len(y));return x[:n],y[:n],p
 
-def load_audio(pairs:list[Pair]):return [read_pair(p) for p in pairs if p.duration_s>0]
+def load_audio(pairs:list[Pair]):
+    """Read each clip's WAV pair. File I/O releases the GIL, so a small
+    thread pool overlaps disk reads across clips instead of doing them
+    strictly one at a time; the returned list order matches the input order."""
+    todo=[p for p in pairs if p.duration_s>0]
+    if len(todo)<=1:return [read_pair(p) for p in todo]
+    with ThreadPoolExecutor(max_workers=min(8,len(todo))) as ex:
+        return list(ex.map(read_pair,todo))
 
 def proof_keys(groups:dict[str,list[Pair]])->list[str]:
     keys=sorted(k for k,v in groups.items() if v and v[0].nam_split=='development');chosen=[]
