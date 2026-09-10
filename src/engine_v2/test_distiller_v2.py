@@ -44,6 +44,18 @@ def main():
     assert info2['excluded_synthetic_clips']==1,info2
     assert info2['calibration_material']=='real-guitar',info2
 
+    # Peak safety is a ceiling on positive gain, not an attenuation request.
+    # A target can have greater RMS while having a lower isolated peak; in
+    # that case calibration must leave gain at 0 dB rather than turn down an
+    # already-too-quiet model just because the computed peak cap is negative.
+    peak=float(np.max(np.abs(y)));flat=np.where(y>=0.0,.9*peak,-.9*peak)
+    scaled3,gain3,_,_,info3=_calibrate_output_gain([(x,flat,real)],a,pk,b)
+    assert info3['requested_rms_gain_db']>0.0,info3
+    assert info3['peak_safe_cap_db']<0.0,info3
+    assert abs(gain3)<1e-12,(gain3,info3)
+    assert np.allclose(scaled3,b),gain3
+    assert info3['limited_by_peak_safety'],info3
+
     # Level-sweep discovery must only join the exact same real source segment,
     # and it must preserve ordered input levels.
     def pair(task,level,start=1.25,role='fit'):
