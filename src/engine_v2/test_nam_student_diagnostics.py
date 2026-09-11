@@ -5,12 +5,28 @@ import numpy as np
 
 from analyze_nam_student_diagnostics import (
     _envelope_diagnostics,
+    _role_context,
     _signal_stats,
     _static_diagnostics,
 )
 
 
 def main() -> None:
+    for role in ("fit", "selection", "benchmark"):
+        context = _role_context(role)
+        assert context["title"]
+        assert context["material_label"]
+        assert context["influence_note"]
+    assert _role_context("fit")["benchmark_only"] is False
+    assert _role_context("selection")["benchmark_only"] is False
+    assert _role_context("benchmark")["benchmark_only"] is True
+    try:
+        _role_context("not-a-role")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid role should fail")
+
     rng = np.random.default_rng(260911)
     target = rng.standard_normal(44100) * 0.05
     pred = target * 0.5
