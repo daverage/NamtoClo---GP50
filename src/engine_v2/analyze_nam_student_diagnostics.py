@@ -31,6 +31,39 @@ ENVELOPE_FRAME = 1024
 ENVELOPE_HOP = 256
 ENVELOPE_RELATIVE_FLOOR_DB = 50.0
 ENVELOPE_ABSOLUTE_FLOOR_DBFS = -85.0
+ROLE_CONTEXT = {
+    "fit": {
+        "title": "NAM-CENTERED FIT DIAGNOSTICS",
+        "material_label": "shared real FIT performances",
+        "influence_note": (
+            "FIT material may have influenced the frozen coefficients; "
+            "this run is diagnostic only."
+        ),
+        "benchmark_only": False,
+    },
+    "selection": {
+        "title": "NAM-CENTERED SELECTION DIAGNOSTICS",
+        "material_label": "shared real SELECTION performances",
+        "influence_note": (
+            "SELECTION material may have influenced candidate choice; "
+            "this run is diagnostic only."
+        ),
+        "benchmark_only": False,
+    },
+    "benchmark": {
+        "title": "NAM-CENTERED HELD-OUT BENCHMARK DIAGNOSTICS",
+        "material_label": "shared held-out BENCHMARK performances",
+        "influence_note": "BENCHMARK material remains evaluation-only.",
+        "benchmark_only": True,
+    },
+}
+
+
+def _role_context(role: str) -> dict:
+    try:
+        return ROLE_CONTEXT[role]
+    except KeyError as exc:
+        raise ValueError(f"unsupported diagnostic role: {role}") from exc
 
 
 def _dbfs(value: float) -> float:
@@ -239,6 +272,7 @@ def evaluate_model(
     north_path: Path,
     directory: Path,
     original_path: Path | None = None,
+    role: str = "benchmark",
 ) -> dict:
     north = read_compact_clo(north_path)
     original = read_compact_clo(original_path) if original_path else None
@@ -266,6 +300,7 @@ def evaluate_model(
             "source": Path(pair.source_path).name,
             "start_s": pair.start_s,
             "duration_s": pair.duration_s,
+            "role": role,
         }
         for prefix, (system_name, pred) in systems.items():
             diag, env, bands = _system_diagnostics(x, target, pred)
@@ -275,6 +310,7 @@ def evaluate_model(
                     "clip": clip_index,
                     "task_id": pair.task_id,
                     "source": Path(pair.source_path).name,
+                    "role": role,
                     "system": system_name,
                     **frame,
                 }
@@ -285,6 +321,7 @@ def evaluate_model(
                     "clip": clip_index,
                     "task_id": pair.task_id,
                     "source": Path(pair.source_path).name,
+                    "role": role,
                     "system": system_name,
                     "band": band["band"],
                     "lo_hz": band["lo_hz"],
@@ -304,10 +341,12 @@ def evaluate_model(
     if original is not None:
         band_summary.extend(_aggregate_bands(band_rows, "original_baseline"))
 
+    context = _role_context(role)
     summary = {
         "model_name": pairs[0].model_name,
         "model_key": pairs[0].model_key,
         "model_id": pairs[0].model_id,
+        "role": role,
         "target": "NAM teacher",
         "north_star_v2_clo": str(north_path),
         "original_baseline_clo": str(original_path) if original_path else None,
@@ -319,7 +358,8 @@ def evaluate_model(
         ),
         "bands": band_summary,
         "analysis": {
-            "benchmark_only": True,
+            "role": role,
+            "benchmark_only": context["benchmark_only"],
             "nam_is_behavioral_authority": True,
             "original_converter_is_baseline_only": True,
             "envelope_frame_samples": ENVELOPE_FRAME,
@@ -394,8 +434,9 @@ def _print_summary(summary: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "NAM-centered held-out diagnostics for frozen North Star v2. "
-            "NAM is the target; original NamToClo is optional baseline only."
+            "NAM-centered diagnostics for frozen North Star v2 on real FIT, "
+            "SELECTION, or held-out BENCHMARK material. NAM is the target; "
+            "original NamToClo is optional baseline only."
         )
     )
     parser.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
@@ -403,12 +444,38 @@ def main() -> int:
     parser.add_argument("--original-root")
     parser.add_argument("--output", default="~/NamtoCloNAMCenteredDiagnostics")
     parser.add_argument("--model-regex", required=True)
-    parser.add_argument("--benchmark-count", type=int, default=3)
+    parser.add_argument(
+        "--role",
+        choices=tuple(ROLE_CONTEXT),
+        default="benchmark",
+        help="real corpus split to diagnose (default: benchmark)",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        help="number of shared real performances to analyze (default: 3)",
+    )
+    parser.add_argument(
+        "--benchmark-count",
+        type=int,
+        help="deprecated alias for --count, retained for existing commands",
+    )
     parser.add_argument("--seed", type=int, default=260910)
     args = parser.parse_args()
-    if args.benchmark_count < 1:
-        raise SystemExit("--benchmark-count must be >= 1")
 
+    if args.count is not None and args.benchmark_count is not None:
+        raise SystemExit("Use --count or --benchmark-count, not both")
+    count = (
+        args.count
+        if args.count is not None
+        else args.benchmark_count
+        if args.benchmark_count is not None
+        else 3
+    )
+    if count < 1:
+        raise SystemExit("--count must be >= 1")
+
+    context = _role_context(args.role)
     groups = group_models(load_pairs(Path(args.teacher_root).expanduser()))
     rx = re.compile(args.model_regex, re.I)
     keys = [k for k in sorted(groups) if rx.search(groups[k][0].model_name)]
@@ -418,18 +485,19 @@ def main() -> int:
     shared_keys, selected = select_shared_real_material(
         groups,
         keys,
-        role="benchmark",
-        count=args.benchmark_count,
+        role=args.role,
+        count=count,
         seed=args.seed,
     )
-    print("NAM-CENTERED HELD-OUT DIAGNOSTICS")
+    print(context["title"])
     print("NAM teacher is the behavioral authority.")
     print("Frozen NSv2 is the student under test.")
     if args.original_root:
         print("Original NamToClo is reported only as a baseline.")
-    print("No coefficients are changed; benchmark remains evaluation-only.")
+    print("No coefficients are changed.")
+    print(context["influence_note"])
     print("selected models:", *[groups[k][0].model_name for k in keys], sep="\n  ")
-    print("shared held-out performances:")
+    print(context["material_label"] + ":")
     for index in range(len(shared_keys)):
         pair = selected[keys[0]][index]
         print(
@@ -456,16 +524,19 @@ def main() -> int:
             north,
             directory,
             original_path=original,
+            role=args.role,
         )
         results.append(summary)
         _print_summary(summary)
 
     root_summary = {
-        "method": "nam-centered-heldout-perceptual-diagnostics-v1",
+        "method": "nam-centered-role-perceptual-diagnostics-v2",
         "north_star_document": "ENGINE_V2_RESEARCH_NORTH_STAR.md",
-        "benchmark_only": True,
+        "role": args.role,
+        "benchmark_only": context["benchmark_only"],
         "nam_is_behavioral_authority": True,
         "original_converter_is_baseline_only": True,
+        "diagnostics_do_not_change_coefficients": True,
         "same_underlying_performances_across_models": True,
         "shared_performance_keys": [list(key) for key in shared_keys],
         "results": results,
