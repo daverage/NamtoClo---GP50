@@ -5,6 +5,7 @@ import json
 import math
 import subprocess
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -149,9 +150,7 @@ def prepare_multilevel_teacher_audio(
     model_dir = cache_root / model_pair.model_key
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    audio = []
-    level_rows = []
-    for level_db in levels_db:
+    def _level_paths(level_db):
         ident = {
             "nam_sha256": nam.sha256,
             "stimulus_sha256": stimulus_sha,
@@ -167,34 +166,56 @@ def prepare_multilevel_teacher_audio(
             json.dumps(ident, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:32]
         tag = f"L{level_db:+06.1f}dB__{task_id[:10]}"
-        native_input = model_dir / "native_inputs" / f"{tag}.wav"
-        native_target = model_dir / "native_targets" / f"{tag}.wav"
-        student_input = model_dir / "student_44100" / "inputs" / f"{tag}.wav"
-        student_target = model_dir / "student_44100" / "targets" / f"{tag}.wav"
+        return task_id, (
+            model_dir / "native_inputs" / f"{tag}.wav",
+            model_dir / "native_targets" / f"{tag}.wav",
+            model_dir / "student_44100" / "inputs" / f"{tag}.wav",
+            model_dir / "student_44100" / "targets" / f"{tag}.wav",
+        )
 
-        if not student_input.exists() or not student_target.exists():
-            scaled = base * _dbamp(level_db)
-            native_x = resample_audio(scaled, base_sr, nam.expected_sample_rate)
-            native_input.parent.mkdir(parents=True, exist_ok=True)
-            write_float_wav(native_input, native_x, nam.expected_sample_rate)
-            _render_nam(renderer, nam, native_input, native_target, slim_value)
+    def _ensure_level(level_db):
+        """Render (if not already cached) one level variant.
 
-            y_native, y_sr = sf.read(
-                str(native_target), dtype="float32", always_2d=False
-            )
-            y_native = np.asarray(y_native, dtype=np.float64)
-            if y_native.ndim > 1:
-                y_native = y_native[:, 0]
-            if not np.all(np.isfinite(y_native)):
-                raise RuntimeError("NAM stimulus render contains NaN/Inf")
+        Each level is an independent NAM render (its own external renderer
+        subprocess plus resampling) writing to its own files, so levels with
+        a cache miss can run concurrently instead of one after another --
+        the renderer subprocess spends most of its time off the GIL anyway.
+        """
+        _, (native_input, native_target, student_input, student_target) = _level_paths(level_db)
+        if student_input.exists() and student_target.exists():
+            return
+        scaled = base * _dbamp(level_db)
+        native_x = resample_audio(scaled, base_sr, nam.expected_sample_rate)
+        native_input.parent.mkdir(parents=True, exist_ok=True)
+        write_float_wav(native_input, native_x, nam.expected_sample_rate)
+        _render_nam(renderer, nam, native_input, native_target, slim_value)
 
-            student_x = resample_audio(native_x, nam.expected_sample_rate, SR)
-            student_y = resample_audio(y_native, int(y_sr), SR)
-            n = min(len(student_x), len(student_y))
-            student_input.parent.mkdir(parents=True, exist_ok=True)
-            student_target.parent.mkdir(parents=True, exist_ok=True)
-            write_float_wav(student_input, student_x[:n], SR)
-            write_float_wav(student_target, student_y[:n], SR)
+        y_native, y_sr = sf.read(str(native_target), dtype="float32", always_2d=False)
+        y_native = np.asarray(y_native, dtype=np.float64)
+        if y_native.ndim > 1:
+            y_native = y_native[:, 0]
+        if not np.all(np.isfinite(y_native)):
+            raise RuntimeError("NAM stimulus render contains NaN/Inf")
+
+        student_x = resample_audio(native_x, nam.expected_sample_rate, SR)
+        student_y = resample_audio(y_native, int(y_sr), SR)
+        n = min(len(student_x), len(student_y))
+        student_input.parent.mkdir(parents=True, exist_ok=True)
+        student_target.parent.mkdir(parents=True, exist_ok=True)
+        write_float_wav(student_input, student_x[:n], SR)
+        write_float_wav(student_target, student_y[:n], SR)
+
+    if len(levels_db) > 1:
+        with ThreadPoolExecutor(max_workers=len(levels_db)) as ex:
+            list(ex.map(_ensure_level, levels_db))
+    else:
+        for level_db in levels_db:
+            _ensure_level(level_db)
+
+    audio = []
+    level_rows = []
+    for level_db in levels_db:
+        task_id, (native_input, native_target, student_input, student_target) = _level_paths(level_db)
 
         x, sx = sf.read(str(student_input), dtype="float32", always_2d=False)
         y, sy = sf.read(str(student_target), dtype="float32", always_2d=False)
