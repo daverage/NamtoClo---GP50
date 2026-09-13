@@ -72,17 +72,55 @@ from north_star_v4_stimulus import (
 from train_namtoclo_north_star import _preview_real, dump, safe
 from train_namtoclo_north_star_v4 import (
     _calibrate_stimulus_post_gain,
+    _find_v3_report,
     _pair_row,
     _v3_scores,
 )
 
 
-METHOD = "north-star-teacher-student-varpro-v4.2-t3k-multilevel-line-converged"
+METHOD = "north-star-teacher-student-varpro-v4.2-t3k-multilevel-bracket-refine"
+
+
+def _compatible_v41_warm_start(root, pair, stimulus_manifest, levels_db, controls):
+    """Return a compatible V4.1 A/P-K restart, never its stored B/score."""
+    found = _find_v3_report(Path(root).expanduser(), pair)
+    if found is None:
+        return None
+    path, report = found
+    if "v4.1" not in str(report.get("method", "")).lower():
+        return None
+
+    stimulus = report.get("stimulus") or {}
+    if stimulus.get("stimulus_sha256") != stimulus_manifest.get("stimulus_sha256"):
+        return None
+    try:
+        old_levels = tuple(float(v) for v in stimulus.get("levels_db", []))
+        new_levels = tuple(float(v) for v in levels_db)
+    except Exception:
+        return None
+    if old_levels != new_levels:
+        return None
+
+    controls_db = report.get("controls_db")
+    pk = report.get("pk")
+    if not isinstance(controls_db, list) or len(controls_db) != int(controls):
+        return None
+    if not isinstance(pk, list) or len(pk) != 4:
+        return None
+
+    return {
+        "report_path": str(path),
+        "controls_db": controls_db,
+        "pk": pk,
+        "reported_fit_evidence_esr": (
+            (report.get("optimizer_fit_evidence_metrics") or {}).get("esr")
+        ),
+    }
 
 
 def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path, out, args):
     name = pairs[0].model_name
-    print(f"\n=== NORTH STAR v4.2 STIMULUS + LINE CONVERGENCE: {name} ===")
+    print(f"\n=== NORTH STAR v4.2 STIMULUS + ACCELERATED CONVERGENCE: {name} ===")
 
     material = select_north_star_material(
         pairs,
@@ -111,8 +149,7 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
         cache_root = out / "_v42_teacher_cache"
     print("stimulus teacher cache:", cache_root)
 
-    # Uses the latest EngineV2 stimulus renderer. At current branch head, cache
-    # misses for the five independent level renders are prepared concurrently.
+    # Uses latest EngineV2 stimulus preparation, including parallel cache misses.
     fit, stimulus_manifest = prepare_multilevel_teacher_audio(
         nam=nam,
         model_pair=pairs[0],
@@ -136,11 +173,32 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
         "objective=EXACT V4 direct aligned ESR across whole T3K level variants; "
         "B=target-energy-normalized shared analytic B512; guitar objective terms=NONE"
     )
+
+    warm_start = None
+    if not args.no_v41_warm_start:
+        warm_start = _compatible_v41_warm_start(
+            args.v41_root,
+            pairs[0],
+            stimulus_manifest,
+            args.stimulus_levels_db,
+            args.a_controls,
+        )
+    if warm_start:
+        print("search=WARM START from compatible V4.1 A/P-K, re-evaluate on current FIT and re-solve B")
+        print("  warm-start report:", warm_start["report_path"])
+        if warm_start.get("reported_fit_evidence_esr") is not None:
+            print(
+                f"  V4.1 reported FIT ESR: {float(warm_start['reported_fit_evidence_esr']):.6g}"
+            )
+    else:
+        print(
+            f"search=no compatible V4.1 warm start; fall back to exact V4 multistart "
+            f"({args.multistarts}) x <= {args.rounds} rounds"
+        )
     print(
-        f"search=EXACT V4 deterministic multistart ({args.multistarts}) + coarse-to-fine "
-        f"FIT-only trajectories (max {args.rounds} rounds), then line-coordinate polish "
-        f"at A={FINE_A_STEP_DB:g}dB P/K={FINE_PK_LOG_STEP:g}; "
-        f"max-line-steps={args.max_line_steps}, <= {args.polish_cycles} cycles"
+        f"polish=bracket/refine on unchanged fine grid A={FINE_A_STEP_DB:g}dB "
+        f"P/K={FINE_PK_LOG_STEP:g}; max-line-distance={args.max_line_steps}, "
+        f"<= {args.polish_cycles} cycles"
     )
     print("evaluation path=latest EngineV2 threaded clip evaluation + latest stimulus cache/render path")
 
@@ -158,12 +216,15 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
         pause_ms=args.yield_ms,
         fit_evidence=evidence,
         search_report=search_info,
+        warm_start_controls_db=(warm_start or {}).get("controls_db"),
+        warm_start_pk=(warm_start or {}).get("pk"),
+        warm_start_source=(warm_start or {}).get("report_path"),
     )
     a = controls_to_a(best.controls_db)
     print("final P/K:", " ".join(f"{v:.6g}" for v in best.pk))
 
-    # Keep V4/V4.1 output calibration unchanged. Its behavior remains a separate
-    # experiment so V4.2 isolates the search-convergence change.
+    # Keep V4/V4.1 output calibration unchanged; calibration remains a separate
+    # experiment so this run isolates optimizer convergence/runtime mechanics.
     b_uncalibrated = best.b.copy()
     if args.no_level_calibration:
         b_device = b_uncalibrated.copy()
@@ -249,8 +310,9 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
             "fit_objective": "EXACT V4 direct aligned waveform ESR; one equal-weight target-energy-normalized whole-stimulus unit per level",
             "candidate_choice": "FIT stimulus evidence only",
             "v42_only_change": (
-                "after exact V4 basin selection, follow each improving A/P-K coordinate "
-                "repeatedly at the existing fine step until the next step fails"
+                "reuse a compatible V4.1 A/P-K state as an optimization restart when available, "
+                "re-evaluate it on current FIT evidence/re-solve B, then use exponential bracket "
+                "plus discrete fine-grid refinement instead of walking one fine step at a time"
             ),
             "guitar_used_for_training": False,
             "guitar_used_for_candidate_choice": False,
@@ -274,8 +336,10 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
         "runtime_efficiency": {
             "uses_current_threaded_clip_map": True,
             "uses_current_parallel_multilevel_teacher_render": True,
+            "uses_compatible_v41_warm_start": bool(warm_start),
+            "warm_start_report": (warm_start or {}).get("report_path"),
             "stimulus_cache_root": str(cache_root),
-            "note": "Runtime-only infrastructure; not part of V4.2 fitting philosophy.",
+            "note": "Runtime/search mechanics only; no change to V4 fitting evidence or objective.",
         },
         "stimulus": stimulus_manifest,
         "fit_evidence": evidence.manifest(fit),
@@ -317,7 +381,7 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
     selected = search_info.get("selected", {})
     if selected:
         print(
-            f"convergence: V4 ESR={selected.get('v4_fit_evidence_esr', float('nan')):.6g} "
+            f"convergence: start ESR={selected.get('starting_fit_evidence_esr', float('nan')):.6g} "
             f"-> V4.2 ESR={selected.get('v42_fit_evidence_esr', float('nan')):.6g} "
             f"rel-improve={selected.get('relative_improvement', 0.0):.3g}"
         )
@@ -336,9 +400,9 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
 def main():
     p = argparse.ArgumentParser(
         description=(
-            "EngineV2 North Star v4.2: exact V4 TONE3000 multilevel stimulus-only "
-            "search followed by efficient fine line-coordinate convergence. Real "
-            "guitar remains comparison-only."
+            "EngineV2 North Star v4.2: V4 stimulus-only objective with accelerated "
+            "bracket/refine fine-grid convergence. Uses compatible V4.1 A/P-K as a "
+            "warm start when available. Real guitar remains comparison-only."
         )
     )
     p.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
@@ -355,7 +419,7 @@ def main():
     p.add_argument(
         "--stimulus-cache-root",
         help=(
-            "Optional reusable V4-family teacher cache. You can point this at an existing "
+            "Optional reusable V4-family teacher cache. Point this at an existing "
             "V4.1 _v41_teacher_cache to avoid re-rendering matching NAM/stimulus levels."
         ),
     )
@@ -363,6 +427,11 @@ def main():
     p.add_argument("--compare-selection-real", type=int, default=4)
     p.add_argument("--compare-benchmark-real", type=int, default=3)
     p.add_argument("--v41-root", default="~/NamtoCloNorthStarV4_1_Converged")
+    p.add_argument(
+        "--no-v41-warm-start",
+        action="store_true",
+        help="Ignore compatible V4.1 report and rerun the exact V4 multistart basin search.",
+    )
     p.add_argument("--v4-root", default="~/NamtoCloNorthStarV4_StimulusOnly")
     p.add_argument("--v3-root", default="~/NamtoCloNorthStarV3_SearchRobust")
     p.add_argument("--a-controls", type=int, default=24)
@@ -504,6 +573,7 @@ def main():
                 "fine_pk_log_step": FINE_PK_LOG_STEP,
                 "guitar_used_for_training": False,
                 "v41_root": str(Path(args.v41_root).expanduser()),
+                "v41_warm_start_enabled": not args.no_v41_warm_start,
                 "v4_root": str(Path(args.v4_root).expanduser()),
                 "v3_root": str(Path(args.v3_root).expanduser()),
                 "threads": args.threads,
