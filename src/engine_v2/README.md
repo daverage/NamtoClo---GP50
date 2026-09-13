@@ -4,7 +4,7 @@
 
 The active experiment is **V4.2**: TONE3000 multilevel stimulus-only NAM -> constrained GP50 distillation, with exact V4 basin selection followed by fine line-coordinate convergence. Guitar remains comparison-only.
 
-Historical/unused EngineV2 files were moved to `research/engine_v2_legacy/`; they were not deleted.
+Historical/unused EngineV2 files were moved to `research/engine_v2_legacy/`; they were not deleted. If the folder needs pruning again, use `scripts/clean_engine_v2_active.py`, which applies the conservative cleanup logic with the current V4.2 roots.
 
 ## Active entrypoints
 
