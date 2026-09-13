@@ -25,7 +25,7 @@ def _candidate(ctrl=0.0, pk=None, esr=1.0) -> Candidate:
     )
 
 
-def test_a_line_search_follows_direction_until_failure():
+def test_a_line_search_brackets_and_refines_near_target():
     original = v42._evaluate_fit
     target = 0.15
 
@@ -49,7 +49,37 @@ def test_a_line_search_follows_direction_until_failure():
 
     assert abs(float(out.controls_db[0]) - target) < 1e-12
     assert moved == 3
-    assert evaluations >= 5
+    assert evaluations >= 4
+    assert not capped
+
+
+def test_a_line_search_accelerates_far_coordinate():
+    original = v42._evaluate_fit
+    target_steps = 32
+    target = target_steps * v42.FINE_A_STEP_DB
+
+    def fake_eval(ctrl, pk, *_args):
+        esr = float((ctrl[0] - target) ** 2)
+        return Candidate(ctrl.copy(), pk.copy(), np.zeros(1), _metrics(esr), _metrics(float("inf")))
+
+    try:
+        v42._evaluate_fit = fake_eval
+        start = _candidate(esr=target**2)
+        out, moved, evaluations, capped = v42._line_search_a_coordinate(
+            start,
+            0,
+            None,
+            None,
+            None,
+            max_line_steps=96,
+        )
+    finally:
+        v42._evaluate_fit = original
+
+    assert abs(float(out.controls_db[0]) - target) < 1e-12
+    assert moved == target_steps
+    # The old walk needed ~target_steps sequential improving evaluations.
+    assert evaluations < target_steps
     assert not capped
 
 
@@ -104,7 +134,7 @@ def test_pk_line_search_is_multiplicative_and_converges():
 
     assert abs(math.log(float(out.pk[2]) / target)) < 1e-12
     assert moved == 3
-    assert evaluations >= 5
+    assert evaluations >= 4
     assert not capped
 
 
@@ -124,12 +154,13 @@ def test_constants_preserve_v4_fine_resolution():
 
 
 def main():
-    test_a_line_search_follows_direction_until_failure()
+    test_a_line_search_brackets_and_refines_near_target()
+    test_a_line_search_accelerates_far_coordinate()
     test_a_line_search_reports_safety_cap()
     test_pk_line_search_is_multiplicative_and_converges()
     test_stop_rules()
     test_constants_preserve_v4_fine_resolution()
-    print("north-star v4.2 line-search convergence self-tests passed")
+    print("north-star v4.2 accelerated convergence self-tests passed")
 
 
 if __name__ == "__main__":
