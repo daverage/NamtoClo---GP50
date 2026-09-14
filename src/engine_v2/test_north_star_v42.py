@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 
 import distiller_v2_north_star_v42 as v42
+import train_namtoclo_north_star_v42 as trainer
 from distiller_v2_fit import Candidate, Metrics
 
 
@@ -162,6 +164,78 @@ def test_constants_preserve_v4_fine_resolution():
     assert v42.DEFAULT_MAX_LINE_STEPS >= 1
 
 
+def _fake_report(method: str):
+    return {
+        "method": method,
+        "stimulus": {
+            "stimulus_sha256": "stim-sha",
+            "levels_db": [0.0, -6.0, -12.0, -18.0, -24.0],
+        },
+        "controls_db": [0.0, 1.0],
+        "pk": [0.1, 0.1, 1.0, 1.0],
+        "optimizer_fit_evidence_metrics": {"esr": 0.25},
+    }
+
+
+def test_v4_report_is_valid_optimization_warm_start():
+    original = trainer._find_v3_report
+    report = _fake_report("north-star-teacher-student-varpro-v4-t3k-multilevel-stimulus-only")
+    try:
+        trainer._find_v3_report = lambda root, pair: (Path(root) / "report.json", report)
+        warm = trainer._compatible_v4_family_warm_start(
+            "/v4",
+            object(),
+            {"stimulus_sha256": "stim-sha"},
+            (0.0, -6.0, -12.0, -18.0, -24.0),
+            2,
+            "V4",
+        )
+        wrong_family = trainer._compatible_v4_family_warm_start(
+            "/v4",
+            object(),
+            {"stimulus_sha256": "stim-sha"},
+            (0.0, -6.0, -12.0, -18.0, -24.0),
+            2,
+            "V4.1",
+        )
+    finally:
+        trainer._find_v3_report = original
+
+    assert warm is not None
+    assert warm["source_family"] == "V4"
+    assert warm["controls_db"] == [0.0, 1.0]
+    assert warm["pk"] == [0.1, 0.1, 1.0, 1.0]
+    assert wrong_family is None
+
+
+def test_warm_start_priority_prefers_newest_family():
+    original = trainer._compatible_v4_family_warm_start
+    calls = []
+
+    def fake_compatible(root, pair, manifest, levels, controls, family):
+        calls.append((family, str(root)))
+        if family == "V4":
+            return {"source_family": family}
+        return None
+
+    try:
+        trainer._compatible_v4_family_warm_start = fake_compatible
+        warm = trainer._best_compatible_warm_start(
+            "/out",
+            "/v41",
+            "/v4",
+            object(),
+            {"stimulus_sha256": "stim-sha"},
+            (0.0, -6.0, -12.0, -18.0, -24.0),
+            24,
+        )
+    finally:
+        trainer._compatible_v4_family_warm_start = original
+
+    assert warm == {"source_family": "V4"}
+    assert [family for family, _ in calls] == ["V4.2", "V4.1", "V4"]
+
+
 def main():
     test_a_line_search_brackets_and_refines_near_target()
     test_a_line_search_accelerates_far_coordinate()
@@ -169,6 +243,8 @@ def main():
     test_pk_line_search_is_multiplicative_and_converges()
     test_stop_rules()
     test_constants_preserve_v4_fine_resolution()
+    test_v4_report_is_valid_optimization_warm_start()
+    test_warm_start_priority_prefers_newest_family()
     print("north-star v4.2 accelerated convergence self-tests passed")
 
 
