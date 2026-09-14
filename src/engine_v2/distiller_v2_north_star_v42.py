@@ -19,7 +19,9 @@ from distiller_v2_north_star_v4 import (
 # V4.2 changes only convergence mechanics after a V4-family basin has been found.
 # The evidence, objective, DSP, bounds and analytic B solve remain unchanged.
 DEFAULT_POLISH_CYCLES = 12
-DEFAULT_POLISH_REL_TOL = 1.0e-5
+# Stop after a complete A/P-K cycle contributes <= 0.1% relative FIT-ESR
+# improvement. The CLI remains able to override this for convergence studies.
+DEFAULT_POLISH_REL_TOL = 1.0e-3
 DEFAULT_MAX_LINE_STEPS = 96
 FINE_A_STEP_DB = float(A_STEP_FLOOR_DB)
 FINE_PK_LOG_STEP = float(PK_LOG_STEP_FLOOR)
