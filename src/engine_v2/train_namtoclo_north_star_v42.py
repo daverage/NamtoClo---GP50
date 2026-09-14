@@ -79,15 +79,31 @@ from train_namtoclo_north_star_v4 import (
 
 
 METHOD = "north-star-teacher-student-varpro-v4.2-t3k-multilevel-bracket-refine"
+V4_FAMILY_METHOD_PREFIXES = {
+    "V4.2": "north-star-teacher-student-varpro-v4.2-",
+    "V4.1": "north-star-teacher-student-varpro-v4.1-",
+    "V4": "north-star-teacher-student-varpro-v4-",
+}
 
 
-def _compatible_v41_warm_start(root, pair, stimulus_manifest, levels_db, controls):
-    """Return a compatible V4.1 A/P-K restart, never its stored B/score."""
+def _compatible_v4_family_warm_start(
+    root,
+    pair,
+    stimulus_manifest,
+    levels_db,
+    controls,
+    family,
+):
+    """Return a compatible V4-family A/P-K restart, never stored B/score."""
+    if family not in V4_FAMILY_METHOD_PREFIXES:
+        raise ValueError(f"unsupported V4-family warm-start label: {family}")
     found = _find_v3_report(Path(root).expanduser(), pair)
     if found is None:
         return None
     path, report = found
-    if "v4.1" not in str(report.get("method", "")).lower():
+    method = str(report.get("method", "")).lower()
+    prefix = V4_FAMILY_METHOD_PREFIXES[family].lower()
+    if not method.startswith(prefix):
         return None
 
     stimulus = report.get("stimulus") or {}
@@ -109,6 +125,7 @@ def _compatible_v41_warm_start(root, pair, stimulus_manifest, levels_db, control
         return None
 
     return {
+        "source_family": family,
         "report_path": str(path),
         "controls_db": controls_db,
         "pk": pk,
@@ -116,6 +133,35 @@ def _compatible_v41_warm_start(root, pair, stimulus_manifest, levels_db, control
             (report.get("optimizer_fit_evidence_metrics") or {}).get("esr")
         ),
     }
+
+
+def _best_compatible_warm_start(
+    out,
+    v41_root,
+    v4_root,
+    pair,
+    stimulus_manifest,
+    levels_db,
+    controls,
+):
+    """Prefer newest compatible solved basin and fall back through V4 history."""
+    sources = (
+        ("V4.2", out),
+        ("V4.1", v41_root),
+        ("V4", v4_root),
+    )
+    for family, root in sources:
+        warm_start = _compatible_v4_family_warm_start(
+            root,
+            pair,
+            stimulus_manifest,
+            levels_db,
+            controls,
+            family,
+        )
+        if warm_start is not None:
+            return warm_start
+    return None
 
 
 def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path, out, args):
@@ -175,24 +221,31 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
     )
 
     warm_start = None
-    if not args.no_v41_warm_start:
-        warm_start = _compatible_v41_warm_start(
+    if not args.no_prior_warm_start:
+        warm_start = _best_compatible_warm_start(
+            out,
             args.v41_root,
+            args.v4_root,
             pairs[0],
             stimulus_manifest,
             args.stimulus_levels_db,
             args.a_controls,
         )
     if warm_start:
-        print("search=WARM START from compatible V4.1 A/P-K, re-evaluate on current FIT and re-solve B")
+        family = warm_start["source_family"]
+        print(
+            f"search=WARM START from compatible {family} A/P-K, "
+            "re-evaluate on current FIT and re-solve B"
+        )
         print("  warm-start report:", warm_start["report_path"])
         if warm_start.get("reported_fit_evidence_esr") is not None:
             print(
-                f"  V4.1 reported FIT ESR: {float(warm_start['reported_fit_evidence_esr']):.6g}"
+                f"  {family} reported FIT ESR: "
+                f"{float(warm_start['reported_fit_evidence_esr']):.6g}"
             )
     else:
         print(
-            f"search=no compatible V4.1 warm start; fall back to exact V4 multistart "
+            f"search=no compatible V4-family warm start; fall back to exact V4 multistart "
             f"({args.multistarts}) x <= {args.rounds} rounds"
         )
     print(
@@ -310,7 +363,7 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
             "fit_objective": "EXACT V4 direct aligned waveform ESR; one equal-weight target-energy-normalized whole-stimulus unit per level",
             "candidate_choice": "FIT stimulus evidence only",
             "v42_only_change": (
-                "reuse a compatible V4.1 A/P-K state as an optimization restart when available, "
+                "reuse a compatible V4-family A/P-K state as an optimization restart when available, "
                 "re-evaluate it on current FIT evidence/re-solve B, then use exponential bracket "
                 "plus discrete fine-grid refinement instead of walking one fine step at a time"
             ),
@@ -336,8 +389,13 @@ def run_model(pairs, nam, renderer, renderer_sha, renderer_commit, stimulus_path
         "runtime_efficiency": {
             "uses_current_threaded_clip_map": True,
             "uses_current_parallel_multilevel_teacher_render": True,
-            "uses_compatible_v41_warm_start": bool(warm_start),
+            "uses_compatible_prior_warm_start": bool(warm_start),
+            "uses_compatible_v41_warm_start": bool(
+                warm_start and warm_start.get("source_family") == "V4.1"
+            ),
+            "warm_start_family": (warm_start or {}).get("source_family"),
             "warm_start_report": (warm_start or {}).get("report_path"),
+            "warm_start_priority": ["V4.2 output", "V4.1", "V4"],
             "stimulus_cache_root": str(cache_root),
             "note": "Runtime/search mechanics only; no change to V4 fitting evidence or objective.",
         },
@@ -401,8 +459,9 @@ def main():
     p = argparse.ArgumentParser(
         description=(
             "EngineV2 North Star v4.2: V4 stimulus-only objective with accelerated "
-            "bracket/refine fine-grid convergence. Uses compatible V4.1 A/P-K as a "
-            "warm start when available. Real guitar remains comparison-only."
+            "bracket/refine fine-grid convergence. Reuses the newest compatible "
+            "V4.2/V4.1/V4 A/P-K state as a warm start when available. Real guitar "
+            "remains comparison-only."
         )
     )
     p.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
@@ -420,19 +479,24 @@ def main():
         "--stimulus-cache-root",
         help=(
             "Optional reusable V4-family teacher cache. Point this at an existing "
-            "V4.1 _v41_teacher_cache to avoid re-rendering matching NAM/stimulus levels."
+            "V4/V4.1 cache to avoid re-rendering matching NAM/stimulus levels."
         ),
     )
     p.add_argument("--compare-fit-real", type=int, default=6)
     p.add_argument("--compare-selection-real", type=int, default=4)
     p.add_argument("--compare-benchmark-real", type=int, default=3)
     p.add_argument("--v41-root", default="~/NamtoCloNorthStarV4_1_Converged")
-    p.add_argument(
-        "--no-v41-warm-start",
-        action="store_true",
-        help="Ignore compatible V4.1 report and rerun the exact V4 multistart basin search.",
-    )
     p.add_argument("--v4-root", default="~/NamtoCloNorthStarV4_StimulusOnly")
+    p.add_argument(
+        "--no-prior-warm-start",
+        "--no-v41-warm-start",
+        dest="no_prior_warm_start",
+        action="store_true",
+        help=(
+            "Ignore compatible V4.2/V4.1/V4 reports and rerun the exact V4 "
+            "multistart basin search. --no-v41-warm-start is kept as a compatibility alias."
+        ),
+    )
     p.add_argument("--v3-root", default="~/NamtoCloNorthStarV3_SearchRobust")
     p.add_argument("--a-controls", type=int, default=24)
     p.add_argument("--rounds", type=int, default=DEFAULT_MAX_ROUNDS)
@@ -573,8 +637,9 @@ def main():
                 "fine_pk_log_step": FINE_PK_LOG_STEP,
                 "guitar_used_for_training": False,
                 "v41_root": str(Path(args.v41_root).expanduser()),
-                "v41_warm_start_enabled": not args.no_v41_warm_start,
                 "v4_root": str(Path(args.v4_root).expanduser()),
+                "prior_warm_start_enabled": not args.no_prior_warm_start,
+                "warm_start_priority": ["V4.2 output", "V4.1", "V4"],
                 "v3_root": str(Path(args.v3_root).expanduser()),
                 "threads": args.threads,
                 "yield_ms": args.yield_ms,
