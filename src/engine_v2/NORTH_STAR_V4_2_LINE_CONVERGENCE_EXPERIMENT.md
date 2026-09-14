@@ -29,11 +29,22 @@ No spectral, level-response, harmonic, compression or named-model penalty is add
 
 ## Warm-start reuse is optimization caching, not new evidence
 
-If a compatible V4.1 report already exists for the same model, exact T3K stimulus SHA, level set and A-control count, V4.2 may reuse only its stored `controls_db` and `pk` as the starting optimization state.
+V4.2 now reuses the newest compatible solved V4-family A/P-K state in this priority order:
 
-The stored V4.1 B512 and stored score are not trusted. V4.2 re-evaluates the A/P-K state against the current authoritative FIT evidence and analytically solves B512 again before polishing.
+```text
+1. existing V4.2 report in the current output root
+2. compatible V4.1 report
+3. compatible V4 report
+4. otherwise rerun the exact V4 deterministic multistart basin search
+```
 
-This avoids rerunning the three-start/eight-round V4 basin search that has already been performed for that exact experiment. If no compatible V4.1 report is available, V4.2 falls back to the exact V4 deterministic multistart/coarse-to-fine search.
+Compatibility requires the same model, exact T3K stimulus SHA, input-level set and A-control count. Only stored `controls_db` and `pk` are reused.
+
+Stored B512 and stored FIT score are never trusted. Every warm start is re-evaluated against the current authoritative FIT evidence and B512 is analytically solved again before polishing. This makes the reuse an optimization restart, not additional teacher evidence and not a shortcut around the current objective.
+
+The practical reason is substantial: the original V4 three-start/eight-round basin search has already been paid for on the development panel. Repeating that identical basin search before every V4.2 polish adds hours without providing new evidence.
+
+`--no-prior-warm-start` forces the original V4 multistart path for explicit reproducibility checks. The older `--no-v41-warm-start` spelling remains as a compatibility alias.
 
 ## Accelerated fine-grid line search
 
@@ -76,7 +87,7 @@ V4.2 is built on the latest `EngineV2` branch and inherits the current runtime-o
 - clip-level DSP evaluation uses the current threaded `_map` path in `distiller_v2_fit.py`;
 - independent stimulus-level cache misses can be prepared concurrently;
 - `--stimulus-cache-root` can reuse an existing matching V4-family teacher cache;
-- compatible V4.1 A/P-K state is used as a restart by default, avoiding redundant basin search;
+- compatible V4.2/V4.1/V4 A/P-K states can be used as optimization restarts, avoiding redundant basin searches;
 - progress is printed per A and P/K coordinate so a long full-stimulus sweep no longer appears hung.
 
 These are implementation/runtime efficiencies only. They do not change the teacher data, objective, DSP structure, parameter bounds or guitar-exclusion rule.
@@ -86,7 +97,8 @@ These are implementation/runtime efficiencies only. They do not change the teach
 Run the same G3 development model used to diagnose V4.1. The useful signals are:
 
 ```text
-re-evaluated V4.1 starting FIT ESR
+re-evaluated warm-start FIT ESR
+warm-start family and report path
 V4.2 final FIT ESR
 candidate evaluations per coordinate/cycle
 line-polish cycles to stop
