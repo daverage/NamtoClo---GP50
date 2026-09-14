@@ -38,7 +38,9 @@ V4.2 now reuses the newest compatible solved V4-family A/P-K state in this prior
 4. otherwise rerun the exact V4 deterministic multistart basin search
 ```
 
-Compatibility requires the same model, exact T3K stimulus SHA, input-level set and A-control count. Only stored `controls_db` and `pk` are reused.
+Compatibility requires the same model, exact T3K stimulus SHA, input-level set and A-control count.
+
+For V4.2/V4.1 reports that stored `controls_db`, only `controls_db` and `pk` are reused. Historical V4 reports predate storing `controls_db`; the current fast launcher therefore samples the stored V4 `A128` magnitude response on the same logarithmic A-control grid to reconstruct an approximate control-vector restart, then reuses that projected A state plus stored `pk`. The projection is restart-only and its response error is diagnostic.
 
 Stored B512 and stored FIT score are never trusted. Every warm start is re-evaluated against the current authoritative FIT evidence and B512 is analytically solved again before polishing. This makes the reuse an optimization restart, not additional teacher evidence and not a shortcut around the current objective.
 
@@ -88,6 +90,7 @@ V4.2 is built on the latest `EngineV2` branch and inherits the current runtime-o
 - independent stimulus-level cache misses can be prepared concurrently;
 - `--stimulus-cache-root` can reuse an existing matching V4-family teacher cache;
 - compatible V4.2/V4.1/V4 A/P-K states can be used as optimization restarts, avoiding redundant basin searches;
+- historical V4 A128 can be projected back to the A-control grid when no stored `controls_db` exists;
 - progress is printed per A and P/K coordinate so a long full-stimulus sweep no longer appears hung.
 
 These are implementation/runtime efficiencies only. They do not change the teacher data, objective, DSP structure, parameter bounds or guitar-exclusion rule.
