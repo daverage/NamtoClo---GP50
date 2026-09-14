@@ -60,8 +60,12 @@ Thus the returned A coordinate remains on the exact 0.05 dB grid and P/K remains
 A complete A sweep is followed by one or more P/K sweeps with A held fixed. Full A/P-K cycles repeat until:
 
 - no coordinate moves;
-- relative FIT improvement becomes negligible; or
+- a complete cycle improves FIT ESR by **0.1% or less** (`relative_improvement_tolerance = 0.001`); or
 - the cycle safety cap is reached.
+
+The 0.1% default is a practical convergence threshold, not a new objective term. It was adopted after the accelerated G3 development run showed that the search had already reached the same stable neighbourhood while late cycles consumed several additional minutes for progressively smaller full-cycle changes. The CLI may still override the tolerance for convergence studies.
+
+Because that G3 run influenced this policy, its existing guitar partitions and stimulus result remain consumed development evidence, not fresh benchmark evidence for the next claim.
 
 Every evaluated candidate still receives a newly solved shared analytic B512. This remains joint A/P-K/B teacher/student fitting, not isolated nonlinear identification.
 
@@ -89,6 +93,8 @@ line-polish cycles to stop
 A/P-K fine-step distances
 paired guitar comparison against V4.1, V4 and V3
 ```
+
+The accelerated G3 run reduced stimulus FIT ESR from approximately `0.2127` to `0.0869`, while P/K had already stopped moving and the remaining late-cycle A changes were in a diminishing-return regime. Under the new default 0.1% full-cycle threshold, that run would have stopped around the point where the major descent was already complete rather than spending additional cycles polishing very small improvements.
 
 A successful search change should reach or beat the V4.1 stimulus fit substantially faster and then stall naturally, with coordinate moves collapsing toward zero. Improvement on the already-consumed guitar comparison material is useful corroborating development evidence but is not a fresh held-out claim.
 
