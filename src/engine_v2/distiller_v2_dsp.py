@@ -92,6 +92,19 @@ def pk_render(aout,pk): return _preb_from_aout(aout,pk[0],pk[1],pk[2],pk[3],POST
 def render_preb(x,a,pk): return pk_render(pre_fir(bq_pre(x),a),pk)
 def render_full(x,a,pk,b): return _fir(render_preb(x,a,pk),b)
 
+# Parameterized variants (additive; render_preb/render_full above are
+# unchanged and keep using the fixed module-level PRE/POST). These accept an
+# explicit pre/post biquad, needed because a real CLO decoded by clo_reader.py
+# (e.g. one produced by the shipped C++ engine, src/core/native_converter.cpp
+# + clo_refiner.cpp) may carry different pre/post biquad coefficients than
+# this module's fixed constants -- see src/engine_v2/baseline_compare.py.
+# _bq/_preb_from_aout already take coeffs as plain arguments (not globals),
+# so no njit recompilation/global-mutation hazard is involved here.
+def render_preb_with(x,pre,a,pk,post):
+    return _preb_from_aout(_fir(_bq(x,pre),a),pk[0],pk[1],pk[2],pk[3],post)
+def render_full_with(x,pre,a,pk,post,b):
+    return _fir(render_preb_with(x,pre,a,pk,post),b)
+
 def controls_to_a(ctrl_db:np.ndarray)->np.ndarray:
     ctrl=np.asarray(ctrl_db,dtype=np.float64); cf=np.geomspace(30.,20000.,len(ctrl)); nfft=2048
     f=np.fft.rfftfreq(nfft,1./SR); mag=10.**(np.interp(np.log(np.maximum(f,cf[0])),np.log(cf),ctrl)/20.)

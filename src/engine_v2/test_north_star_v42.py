@@ -8,6 +8,8 @@ import numpy as np
 
 import distiller_v2_north_star_v42 as v42
 import train_namtoclo_north_star_v42 as trainer
+from clo_reader import read_clo
+from distiller_v2_dsp import A_TAPS, B_TAPS, POST, write_clo
 from distiller_v2_fit import Candidate, Metrics
 
 
@@ -248,5 +250,32 @@ def main():
     print("north-star v4.2 accelerated convergence self-tests passed")
 
 
+def test_clo_reader_round_trips_against_write_clo(tmp_path=None):
+    """clo_reader.read_clo must agree with this project's own write_clo.
+
+    Uses distiller_v2_dsp.write_clo (this project's own byte-level writer) as
+    independent ground truth for clo_reader.py's offset reading, rather than
+    trusting a re-read of the C++ parseModel offsets alone -- see
+    src/engine_v2/clo_reader.py's module docstring for the C++ cross-reference.
+    """
+    rng = np.random.default_rng(1234)
+    a = rng.normal(size=A_TAPS)
+    pk = np.array([0.123, 0.234, 1.11, 0.98])
+    b = rng.normal(size=B_TAPS)
+
+    path = Path("/tmp") / "namtoclo_clo_reader_roundtrip_test.clo"
+    write_clo(path, a, pk, b)
+    try:
+        model = read_clo(path)
+        assert np.allclose(model.pre, [1.0, 0.0, 0.0, 0.0, 0.0])
+        assert np.allclose(model.post, POST)
+        assert np.allclose([model.pp, model.pn, model.kp, model.kn], pk, atol=1e-6)
+        assert np.allclose(model.a, a, atol=1e-6)
+        assert np.allclose(model.b, b, atol=1e-6)
+    finally:
+        path.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
+    test_clo_reader_round_trips_against_write_clo()
     main()

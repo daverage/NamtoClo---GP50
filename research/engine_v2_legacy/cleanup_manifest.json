@@ -1,8 +1,9 @@
 {
   "active_entrypoints": [
-    "train_namtoclo_north_star_v4.py",
+    "train_namtoclo_north_star_v42_fast.py",
     "analyze_north_star_v4_stimulus_diagnostics.py",
-    "test_north_star_v4.py",
+    "test_north_star_v42.py",
+    "test_north_star_v42_fast_warm_start.py",
     "test_north_star_v4_stimulus_diagnostics.py"
   ],
   "branch": "EngineV2",
@@ -11,8 +12,11 @@
     "ENGINE_V2_RESEARCH_NORTH_STAR.md": [
       "protected research document"
     ],
-    "NORTH_STAR_V4_STIMULUS_EXPERIMENT.md": [
+    "NORTH_STAR_V4_2_LINE_CONVERGENCE_EXPERIMENT.md": [
       "protected research document"
+    ],
+    "README.md": [
+      "active folder index"
     ],
     "analyze_north_star_v4_stimulus_diagnostics.py": [
       "active entrypoint",
@@ -28,55 +32,71 @@
       "textually referenced by active Python"
     ],
     "build_namtoclo_teacher_dataset.py": [
-      "imported by train_namtoclo_north_star_v4.py",
       "imported by analyze_north_star_v4_stimulus_diagnostics.py",
-      "imported by north_star_v4_stimulus.py"
+      "imported by train_namtoclo_north_star_v42.py",
+      "imported by north_star_v4_stimulus.py",
+      "imported by train_namtoclo_north_star_v4.py"
     ],
     "distiller_v2_data.py": [
-      "imported by train_namtoclo_north_star_v4.py",
-      "imported by test_north_star_v4.py",
+      "imported by train_namtoclo_north_star_v42.py",
       "imported by distiller_v2_north_star.py",
       "imported by north_star_v4_stimulus.py",
-      "imported by train_namtoclo_north_star.py"
+      "imported by train_namtoclo_north_star.py",
+      "imported by train_namtoclo_north_star_v4.py"
     ],
     "distiller_v2_dsp.py": [
-      "imported by train_namtoclo_north_star_v4.py",
+      "imported by train_namtoclo_north_star_v42_fast.py",
       "imported by analyze_north_star_v4_stimulus_diagnostics.py",
+      "imported by test_north_star_v42_fast_warm_start.py",
       "imported by test_north_star_v4_stimulus_diagnostics.py",
-      "imported by distiller_v2_data.py",
+      "imported by train_namtoclo_north_star_v42.py",
+      "imported by distiller_v2_north_star_v2.py",
       "imported by distiller_v2_fit.py",
+      "imported by distiller_v2_north_star_v42.py",
+      "imported by distiller_v2_data.py",
       "imported by distiller_v2_north_star.py",
       "imported by distiller_v2_north_star_v3.py",
       "imported by distiller_v2_north_star_v4.py",
       "imported by north_star_v4_stimulus.py",
       "imported by train_namtoclo_north_star.py",
-      "imported by distiller_v2_north_star_v2.py"
+      "imported by train_namtoclo_north_star_v4.py"
     ],
     "distiller_v2_fit.py": [
-      "imported by train_namtoclo_north_star_v4.py",
-      "imported by test_north_star_v4.py",
+      "imported by test_north_star_v42.py",
+      "imported by train_namtoclo_north_star_v42.py",
+      "imported by distiller_v2_north_star_v2.py",
+      "imported by distiller_v2_north_star_v42.py",
       "imported by distiller_v2_north_star.py",
       "imported by distiller_v2_north_star_v3.py",
       "imported by distiller_v2_north_star_v4.py",
       "imported by train_namtoclo_north_star.py",
-      "imported by distiller_v2_north_star_v2.py"
+      "imported by train_namtoclo_north_star_v4.py"
     ],
     "distiller_v2_north_star.py": [
-      "imported by train_namtoclo_north_star_v4.py",
-      "imported by train_namtoclo_north_star.py"
+      "imported by train_namtoclo_north_star_v42.py",
+      "imported by train_namtoclo_north_star.py",
+      "imported by train_namtoclo_north_star_v4.py"
     ],
     "distiller_v2_north_star_v2.py": [
       "imported by analyze_north_star_v4_stimulus_diagnostics.py",
+      "imported by distiller_v2_north_star_v42.py",
       "imported by distiller_v2_north_star_v3.py",
       "imported by distiller_v2_north_star_v4.py"
     ],
     "distiller_v2_north_star_v3.py": [
-      "imported by train_namtoclo_north_star_v4.py",
-      "imported by distiller_v2_north_star_v4.py"
+      "imported by train_namtoclo_north_star_v42.py",
+      "imported by distiller_v2_north_star_v42.py",
+      "imported by distiller_v2_north_star_v4.py",
+      "imported by train_namtoclo_north_star_v4.py"
     ],
     "distiller_v2_north_star_v4.py": [
-      "imported by train_namtoclo_north_star_v4.py",
-      "imported by test_north_star_v4.py"
+      "imported by train_namtoclo_north_star_v42.py",
+      "imported by distiller_v2_north_star_v42.py",
+      "imported by train_namtoclo_north_star_v4.py"
+    ],
+    "distiller_v2_north_star_v42.py": [
+      "imported by test_north_star_v42.py",
+      "imported by train_namtoclo_north_star_v42.py"
     ],
     "gp50_identification_probe_pack/04_log_sweep_-36dBFS.wav": [
       "textually referenced by active Python"
@@ -100,20 +120,32 @@
       "textually referenced by active Python"
     ],
     "north_star_v4_stimulus.py": [
-      "imported by train_namtoclo_north_star_v4.py",
-      "imported by test_north_star_v4.py"
+      "imported by train_namtoclo_north_star_v42.py",
+      "imported by train_namtoclo_north_star_v4.py"
     ],
-    "test_north_star_v4.py": [
+    "test_north_star_v42.py": [
+      "active entrypoint"
+    ],
+    "test_north_star_v42_fast_warm_start.py": [
       "active entrypoint"
     ],
     "test_north_star_v4_stimulus_diagnostics.py": [
       "active entrypoint"
     ],
     "train_namtoclo_north_star.py": [
+      "imported by train_namtoclo_north_star_v42.py",
       "imported by train_namtoclo_north_star_v4.py"
     ],
     "train_namtoclo_north_star_v4.py": [
-      "active entrypoint"
+      "imported by train_namtoclo_north_star_v42.py"
+    ],
+    "train_namtoclo_north_star_v42.py": [
+      "imported by train_namtoclo_north_star_v42_fast.py",
+      "imported by test_north_star_v42.py"
+    ],
+    "train_namtoclo_north_star_v42_fast.py": [
+      "active entrypoint",
+      "imported by test_north_star_v42_fast_warm_start.py"
     ]
   },
   "kept_python_dependency_closure": [
@@ -129,53 +161,33 @@
     "distiller_v2_north_star_v2.py",
     "distiller_v2_north_star_v3.py",
     "distiller_v2_north_star_v4.py",
+    "distiller_v2_north_star_v42.py",
     "north_star_v4_stimulus.py",
-    "test_north_star_v4.py",
+    "test_north_star_v42.py",
+    "test_north_star_v42_fast_warm_start.py",
     "test_north_star_v4_stimulus_diagnostics.py",
     "train_namtoclo_north_star.py",
-    "train_namtoclo_north_star_v4.py"
+    "train_namtoclo_north_star_v4.py",
+    "train_namtoclo_north_star_v42.py",
+    "train_namtoclo_north_star_v42_fast.py"
   ],
   "moved_from_engine_v2": [
-    "DISTILLER_V2_README.md",
-    "NAMTOCLO_CORPUS_BUILDER_README-3.md",
-    "NAMTOCLO_HF_CORPUS_README.md",
-    "NAMTOCLO_TEACHER_DATASET_README.md",
-    "analyze_nam_student_diagnostics.py",
-    "analyze_nam_student_manifest_diagnostics.py",
-    "distiller_v2_transfer.py",
-    "evaluate_north_star_vs_original.py",
-    "gp50_identification_probe_pack.zip",
-    "gp50_identification_probe_pack/00_silence.wav",
-    "gp50_identification_probe_pack/01_impulse_-36dBFS.wav",
-    "gp50_identification_probe_pack/02_impulse_-12dBFS.wav",
-    "gp50_identification_probe_pack/03_polarity_pulses.wav",
-    "gp50_identification_probe_pack/05_log_sweep_-18dBFS.wav",
-    "gp50_identification_probe_pack/06_log_sweep_-6dBFS.wav",
-    "gp50_identification_probe_pack/08_multisine_drive_ramp.wav",
-    "gp50_identification_probe_pack/12_broadband_noise_level_ladder.wav",
-    "gp50_identification_probe_pack/14_pick_like_transient_probe.wav",
-    "gp50_identification_probe_pack/README.md",
-    "nam_corpus_seed_manifest.json",
-    "test_distiller_v2.py",
-    "test_nam_student_diagnostics.py",
-    "test_nam_student_manifest_diagnostics.py",
-    "test_north_star.py",
-    "test_north_star_v2.py",
-    "test_north_star_v3.py",
-    "test_three_way_evaluator.py",
-    "train_namtoclo_distiller.py",
-    "train_namtoclo_north_star_v2.py",
-    "train_namtoclo_north_star_v3.py"
+    "NORTH_STAR_V4_1_CONVERGENCE_EXPERIMENT.md",
+    "NORTH_STAR_V4_2_FAST_WARM_START.md",
+    "NORTH_STAR_V4_STIMULUS_EXPERIMENT.md",
+    "distiller_v2_north_star_v41.py",
+    "test_north_star_v4.py",
+    "test_north_star_v41.py",
+    "train_namtoclo_north_star_v41.py"
   ],
   "north_star_sha256": "43b6663c355a219ad548e22181249495d73612a25cb13ceedef0112c70e1201e",
   "protected_documents": [
     "ENGINE_V2_RESEARCH_NORTH_STAR.md",
-    "NORTH_STAR_V4_STIMULUS_EXPERIMENT.md"
+    "NORTH_STAR_V4_2_LINE_CONVERGENCE_EXPERIMENT.md"
   ],
   "purpose": "Declutter active EngineV2 workspace without changing V4 fitting/DSP behaviour",
   "removed_generated_untracked": [
     "__pycache__/",
-    "__pycache__/analyze_nam_student_diagnostics.cpython-311.pyc",
     "__pycache__/analyze_north_star_v4_stimulus_diagnostics.cpython-311.pyc",
     "__pycache__/build_namtoclo_nam_corpus.cpython-311.pyc",
     "__pycache__/build_namtoclo_research_corpus.cpython-311.pyc",
@@ -188,17 +200,17 @@
     "__pycache__/distiller_v2_north_star_v2.cpython-311.pyc",
     "__pycache__/distiller_v2_north_star_v3.cpython-311.pyc",
     "__pycache__/distiller_v2_north_star_v4.cpython-311.pyc",
-    "__pycache__/distiller_v2_transfer.cpython-311.pyc",
-    "__pycache__/evaluate_north_star_vs_original.cpython-311.pyc",
+    "__pycache__/distiller_v2_north_star_v41.cpython-311.pyc",
+    "__pycache__/distiller_v2_north_star_v42.cpython-311.pyc",
     "__pycache__/north_star_v4_stimulus.cpython-311.pyc",
-    "__pycache__/test_north_star_v4.cpython-311.pyc",
+    "__pycache__/test_north_star_v42.cpython-311.pyc",
+    "__pycache__/test_north_star_v42_fast_warm_start.cpython-311.pyc",
     "__pycache__/test_north_star_v4_stimulus_diagnostics.cpython-311.pyc",
-    "__pycache__/train_namtoclo_distiller.cpython-311.pyc",
     "__pycache__/train_namtoclo_north_star.cpython-311.pyc",
-    "__pycache__/train_namtoclo_north_star_v4.cpython-311.pyc"
+    "__pycache__/train_namtoclo_north_star_v4.cpython-311.pyc",
+    "__pycache__/train_namtoclo_north_star_v42.cpython-311.pyc",
+    "__pycache__/train_namtoclo_north_star_v42_fast.cpython-311.pyc"
   ],
-  "removed_placeholders": [
-    ".gitkeep"
-  ],
-  "source_commit": "d5e1f1d2943af4c864dc060bca71f1c64aaba962"
+  "removed_placeholders": [],
+  "source_commit": "2fbe9d5be421d7cf09e0ba46aa654bb3b5e2e7c3"
 }
