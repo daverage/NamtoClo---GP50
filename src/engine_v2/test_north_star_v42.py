@@ -146,10 +146,19 @@ def test_stop_rules():
     )
     assert v42._polish_stop_reason(1.0, 0.99, 1, 1e-5) is None
 
+    # The production default stops once a complete cycle contributes <=0.1%
+    # relative FIT-ESR improvement, while materially larger descent continues.
+    assert (
+        v42._polish_stop_reason(1.0, 0.9995, 1)
+        == "negligible_fit_improvement"
+    )
+    assert v42._polish_stop_reason(1.0, 0.998, 1) is None
+
 
 def test_constants_preserve_v4_fine_resolution():
     assert v42.FINE_A_STEP_DB == 0.05
     assert v42.FINE_PK_LOG_STEP == 0.02
+    assert v42.DEFAULT_POLISH_REL_TOL == 1.0e-3
     assert v42.DEFAULT_MAX_LINE_STEPS >= 1
 
 
