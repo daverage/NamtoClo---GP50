@@ -2,37 +2,55 @@
 
 `ENGINE_V2_RESEARCH_NORTH_STAR.md` is the governing research document.
 
-The active experiment is **V4.2**: TONE3000 multilevel stimulus-only NAM -> constrained GP50 distillation, with exact V4 basin selection followed by fine line-coordinate convergence. Guitar remains comparison-only.
+## Project rule
 
-Historical/unused EngineV2 files were moved to `research/engine_v2_legacy/`; they were not deleted. If the folder needs pruning again, use `scripts/clean_engine_v2_active.py`, which applies the conservative cleanup logic with the current V4.2 roots.
+EngineV2 is an alternative NAM -> GP50 conversion method. The source NAM is the behavioural authority and the released NamToClo engine is the permanent baseline to beat. Internal V4.x comparisons are useful diagnostics, but they are not the product success criterion.
 
-## Active entrypoints
+## Canonical active entrypoint
 
-- `train_namtoclo_north_star_v42.py` — active V4.2 trainer
-- `test_north_star_v42.py` — V4.2 search-mechanics self-test
-- `analyze_north_star_v4_stimulus_diagnostics.py` — diagnostic-only stimulus residual analysis
+- `train_namtoclo_north_star_v42_fast.py` — current V4.2 trainer with accelerated bracket/refine convergence and compatible historical V4-family warm starts
 
-V4/V4.1 trainers remain in the active dependency tree as reproducible comparison/reference implementations.
+Current tests/diagnostics:
 
-## Active search path
+- `test_north_star_v42.py`
+- `test_north_star_v42_fast_warm_start.py`
+- `analyze_north_star_v4_stimulus_diagnostics.py`
+- `test_north_star_v4_stimulus_diagnostics.py`
 
-- `distiller_v2_north_star_v42.py` — V4.2 line-coordinate convergence
-- `distiller_v2_north_star_v4.py` — exact V4 stimulus-only multistart/coarse search
-- `distiller_v2_north_star_v3.py` — shared deterministic seed/step definitions
-- `distiller_v2_north_star_v2.py` — balanced evidence evaluation and analytic B solve
-- `distiller_v2_fit.py` — current threaded clip-level evaluation helpers
-- `distiller_v2_dsp.py` — GP50 student DSP and CLO serializer
-- `north_star_v4_stimulus.py` — current multilevel T3K teacher preparation/cache path
+## Required implementation chain
+
+The current trainer deliberately imports shared code from earlier experiments, so some versioned filenames remain genuine dependencies rather than competing active engines:
+
+- `train_namtoclo_north_star_v42.py`
+- `distiller_v2_north_star_v42.py`
+- `distiller_v2_north_star_v4.py`
+- `distiller_v2_north_star_v3.py`
+- `distiller_v2_north_star_v2.py`
+- `distiller_v2_north_star.py`
+- `train_namtoclo_north_star_v4.py`
+- `train_namtoclo_north_star.py`
+- `distiller_v2_fit.py`
+- `distiller_v2_dsp.py`
+- `distiller_v2_data.py`
+- `north_star_v4_stimulus.py`
+- `build_namtoclo_teacher_dataset.py`
 
 ## Research documents
 
+Keep in the active directory:
+
 - `ENGINE_V2_RESEARCH_NORTH_STAR.md`
-- `NORTH_STAR_V4_STIMULUS_EXPERIMENT.md`
-- `NORTH_STAR_V4_1_CONVERGENCE_EXPERIMENT.md`
 - `NORTH_STAR_V4_2_LINE_CONVERGENCE_EXPERIMENT.md`
 
-## V4.2 isolation rule
+Older V4/V4.1 experiment notes and unused code belong under `research/engine_v2_legacy/`.
 
-V4.2 changes only the post-V4 convergence mechanics: an improving A or P/K coordinate is followed repeatedly at the existing fine step until the next step fails. It does **not** change the stimulus, teacher targets, objective, GP50 architecture, P/K bounds, analytic B solve, guitar-training policy, or V4 output-calibration rule.
+## Cleanup
 
-The current branch also contains runtime-only speed improvements (threaded clip evaluation and concurrent preparation of independent stimulus-level cache misses). V4.2 intentionally inherits those latest implementations rather than branching from an older V4.1 snapshot.
+Use the conservative cleanup wrapper:
+
+```bash
+python3 scripts/clean_engine_v2_active.py
+python3 scripts/clean_engine_v2_active.py --apply
+```
+
+The first command is a dry run. The apply step verifies the active dependency closure and tests before and after moving unused files to `research/engine_v2_legacy/`. Historical files are preserved rather than deleted.
