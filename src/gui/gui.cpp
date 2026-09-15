@@ -588,7 +588,6 @@ void startConversion(HWND hwnd) {
 
     ntc::CloRefineConfig refine;
     refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    refine.passes = 4;
     const int refineModeSel = static_cast<int>(SendMessageW(gRefineModeCombo, CB_GETCURSEL, 0, 0));
     static constexpr ntc::ToneMatchReferenceMode kRefineModes[] = {
         ntc::ToneMatchReferenceMode::Default, ntc::ToneMatchReferenceMode::Auto,

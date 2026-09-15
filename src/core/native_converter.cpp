@@ -2307,6 +2307,15 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     std::string levelError;
                     if(buildLevelClips(modelPath,refine.referenceWav,gp5LevelClips,levelError,status,L"GP-5/GP-50 multi-level Tone Match")){
                         std::vector<KSweepCandidate> mlCandidates;std::string mlError;
+                        // A small {0.85,1.0,1.15} K-multiplier grid was tried here (2026-09-15)
+                        // instead of the fixed 1.0 below -- sweepKAndSolveSharedB already supports
+                        // it, and the full research grid remains diagnostic-only via
+                        // runKSweepExperiment. Measured across 4 NAM models: a small real
+                        // held-out-ESR improvement on one (JCM800 crunch, ~1.2%), negligible-to-zero
+                        // on the other three, and confirmed AUDIBLY IDENTICAL on real hardware on
+                        // both models actually A/B'd by ear (JCM800 crunch and Peavey 5150 high-gain).
+                        // Reverted: not worth the added complexity for an inaudible metric-only
+                        // change. Do not re-add without new evidence the difference is perceptible.
                         if(sweepKAndSolveSharedB(gp5PreToneMatchClo,{1.0},gp5LevelClips,mlCandidates,mlError,status)
                            &&!mlCandidates.empty()&&!mlCandidates.front().b.empty()){
                             Model mlM=preM;mlM.B=mlCandidates.front().b;

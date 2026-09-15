@@ -27,7 +27,6 @@ enum class ToneMatchReferenceMode { Default, Auto, Clean, Moderate, High, Bass, 
 
 struct CloRefineConfig {
     bool enabled = false;
-    int passes = 4;
     ToneMatchReferenceMode referenceMode = ToneMatchReferenceMode::Default;
     // Optional refinement test audio, used only when referenceMode == Custom. Its
     // FIRST 20 seconds are adapted to mono PCM16 44.1 kHz and inserted as the
