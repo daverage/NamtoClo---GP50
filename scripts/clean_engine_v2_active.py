@@ -20,6 +20,13 @@ cleanup.ACTIVE_ENTRYPOINTS = (
     "test_north_star_v42.py",
     "test_north_star_v42_fast_warm_start.py",
     "test_north_star_v4_stimulus_diagnostics.py",
+    # Standalone released-vs-EngineV2 scoreboard tooling (see
+    # "Baseline comparison" in README.md) -- not imported by the trainer, so
+    # it needs its own entrypoint root or the dependency-closure walk below
+    # would archive it as unreferenced. clo_reader.py itself is still picked
+    # up transitively (test_north_star_v42.py already imports it).
+    "baseline_compare.py",
+    "test_baseline_compare.py",
 )
 
 # Keep only the governing North Star and the current experiment note in the
@@ -34,11 +41,13 @@ cleanup.ACTIVE_TESTS = (
     "test_north_star_v42.py",
     "test_north_star_v42_fast_warm_start.py",
     "test_north_star_v4_stimulus_diagnostics.py",
+    "test_baseline_compare.py",
 )
 
 cleanup.CLI_CHECKS = (
     ("train_namtoclo_north_star_v42_fast.py", "--help"),
     ("analyze_north_star_v4_stimulus_diagnostics.py", "--help"),
+    ("baseline_compare.py", "--help"),
 )
 
 

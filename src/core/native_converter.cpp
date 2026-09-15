@@ -1852,6 +1852,35 @@ fs::path resolveReferenceClipsDir(){
     return exe.empty()?fs::path{}:exe.parent_path()/L"reference_clips";
 }
 
+// TONE3000's T3K-sweep-v3.wav synthetic sweep, used by the Python EngineV2 side
+// (src/engine_v2/north_star_v4_stimulus.py's ensure_stimulus) as a fitting stimulus.
+// Its redistribution terms weren't confirmed in this session's available docs, so
+// unlike the bundled reference_clips/*.wav files it is NOT vendored into the repo --
+// it is downloaded once (via curl, present on both macOS and modern Windows) into a
+// small cache directory next to the executable and reused thereafter, mirroring the
+// Python side's own cache-on-first-use behavior rather than shipping a possibly
+// non-redistributable file. Explicit/manual mode only (--reference t3k); never
+// resolved by Auto.
+fs::path resolveT3kSweepClip(){
+    const fs::path exe=executablePath();
+    if(exe.empty())return {};
+    const fs::path cacheDir=exe.parent_path()/L"reference_clips_cache";
+    const fs::path dest=cacheDir/L"T3K-sweep-v3.wav";
+    std::error_code ec;
+    if(fs::exists(dest,ec)&&!ec&&fs::file_size(dest,ec)>0&&!ec)return dest;
+    fs::create_directories(cacheDir,ec);
+    if(ec)return {};
+    const fs::path tmp=cacheDir/L"T3K-sweep-v3.wav.download";
+    std::string tmpUtf8=pathToUtf8(tmp);
+    std::string cmd="curl -fsSL -o \""+tmpUtf8+"\" \"https://www.tone3000.com/T3K-sweep-v3.wav\"";
+    const int rc=std::system(cmd.c_str());
+    fs::remove(dest,ec);
+    if(rc!=0||!fs::exists(tmp,ec)||ec||fs::file_size(tmp,ec)==0){fs::remove(tmp,ec);return {};}
+    fs::rename(tmp,dest,ec);
+    if(ec)return tmp; // still usable even if the rename itself failed
+    return dest;
+}
+
 // Deterministically picks the first matching file (alphabetical) for a bucket prefix,
 // so repeated runs on the same NAM pick the same clip rather than depending on
 // filesystem enumeration order varying between machines.
@@ -1890,19 +1919,41 @@ fs::path secondClipWithPrefix(const fs::path& dir,const std::wstring& prefix){
 } // namespace
 
 AmpGainBucket classifyGainBucket(float kp,float kn){
-    // Thresholds set from the gap structure observed across 21 validated NAM captures:
-    // clean amps (guitar and clean-voiced bass alike) cluster under ~15, moderate/crunch
-    // amps span roughly 20-250, and high/extreme-gain amps sit above ~250 with the
-    // nearest neighbors (Green Day Insomniac 185, Marshall Silver Jubilee 184 on one
-    // side; Bogner Ecstasy Blue 339, Metallica Black Album 347 on the other) bracketing
-    // the boundary rather than landing on it.
+    // Clean/Moderate boundary (~15) still matches observed analytic-fit kp/kn.
+    //
+    // The original High boundary here was 260, with named-amp examples (Green Day
+    // Insomniac ~185, Bogner Ecstasy Blue ~339, Metallica Black Album ~347) that are
+    // far higher than any kp/kn this function is actually called with today. Those
+    // reference numbers look like they were measured against the (now off-by-default,
+    // see NativeConverterConfig::dynamicsAwareFitting) dynamics-aware P/K search's
+    // widened steepness, not the plain analytic fit classifyGainBucket sees in the
+    // default pipeline -- with a 260 threshold, Auto's High bucket (high_metalcore.wav/
+    // high_thrash.wav) was unreachable in practice: a 2026-09 sweep across 16 varied
+    // NAM captures -- including amps explicitly named/voiced as extreme (a "HG"-labeled
+    // Mesa Boogie patch at avg=77.2, a Peavey 5150 5150 metal patch at avg=83.9) -- never
+    // exceeded avg=83.9, so every one of them fell into Moderate regardless of how
+    // extreme the source amp actually was.
+    //
+    // 70 is a data-driven placement from that same sweep: it sits above the clearest
+    // moderate/crunch case measured (AC30 crunch, avg=65.3) and below the two clearest
+    // extreme-gain cases (Mesa "HG" bal 77.2, Peavey 5150 83.9), so those two now route
+    // to the intended High-bucket reference clips instead of sharing Moderate's. This is
+    // a coarse two-point recalibration, not a re-run of the original 21-capture study --
+    // revisit if a broader capture set suggests a different cut.
     const float avg=0.5f*(kp+kn);
     if(avg<15.0f)return AmpGainBucket::Clean;
-    if(avg<260.0f)return AmpGainBucket::Moderate;
+    if(avg<70.0f)return AmpGainBucket::Moderate;
     return AmpGainBucket::High;
 }
 
 fs::path resolveNamedReferenceClip(ToneMatchReferenceMode mode,float kp,float kn){
+    // T3kSweep/StandardInput are explicit/manual-only sources resolved by their own
+    // fixed mechanism (download-and-cache / the bundled stimulus file respectively),
+    // not by a bucket prefix lookup in reference_clips/ -- handle them before the
+    // reference_clips directory check below, which doesn't apply to either.
+    if(mode==ToneMatchReferenceMode::T3kSweep)return resolveT3kSweepClip();
+    if(mode==ToneMatchReferenceMode::StandardInput)return resolveOriginalStimulusPath();
+
     const fs::path dir=resolveReferenceClipsDir();
     std::error_code ec;
     if(dir.empty()||!fs::exists(dir,ec)||ec)return {};
@@ -2142,6 +2193,41 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         toneMatched2048=work/L"native_2048_TONEMATCH.clo";
         CloRefineConfig refineRun=refine;
         if(!refineCloBOnly(toneMatchInputClo,refineStimulusPath,refineTargetWavPath,toneMatched2048,refineRun,error,status,&toneMatchIr)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+
+        // Final output-level match: refineCloBOnly's correction-IR path renormalizes
+        // Block B back to the ORIGINAL (pre-Tone-Match) Block B's RMS
+        // (applyCorrectiveIrToClo's automatic rmsGain), which discards the genuine
+        // broadband level difference the correction IR captured between source and
+        // target. Matching that residual gap to the raw NAM target's level (Full A2)
+        // undershoots badly in practice (2026-09-15, see CLAUDE.md): the plain
+        // (non-Tone-Match) conversion is already tuned to sound louder than a literal
+        // Full A2 render, so Tone Match output ended up 10+dB quieter than the plain
+        // conversion of the same NAM, not merely a few dB off. Match to the PLAIN
+        // conversion's own rendered output on this same clip instead, so this step
+        // only ever corrects TONE, never overall loudness relative to what a
+        // non-Tone-Match conversion already sounds like -- same fix applied to the
+        // GP-5/GP-50 path below.
+        {
+            std::vector<float> tmStimulus44;std::string tmErr;
+            if(loadClipAsMono44100(refineStimulusPath,tmStimulus44,tmErr)){
+                std::vector<float> tmRendered,plainRendered;
+                if(renderCloOnSignal(toneMatched2048,tmStimulus44,tmRendered,tmErr)
+                        &&renderCloOnSignal(toneMatchInputClo,tmStimulus44,plainRendered,tmErr)){
+                    const double renderedRmsDbVal=rmsDb(tmRendered);
+                    const double targetRmsDbVal=rmsDb(plainRendered);
+                    if(std::isfinite(renderedRmsDbVal)&&std::isfinite(targetRmsDbVal)){
+                        const double gainDb=targetRmsDbVal-renderedRmsDbVal;
+                        const double gainLinear=std::pow(10.0,gainDb/20.0);
+                        std::string scaleErr;
+                        if(!scaleClo2048BlockB(toneMatched2048,gainLinear,scaleErr)){
+                            report(status,L"Tone Match: final level match failed ("+std::wstring(scaleErr.begin(),scaleErr.end())+L").");
+                        }else{
+                            std::wostringstream os;os<<L"Tone Match: final level match "<<gainDb<<L"dB.";report(status,os.str());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // GP-5/GP-50 device-specific Tone Match: measure and correct the ACTUAL chosen
@@ -2325,22 +2411,28 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                 // a zero-anchored dynamics-tracking error -- both are blind to a
                 // constant absolute-gain offset (the zero-anchoring specifically
                 // subtracts it out by design, see BenchmarkResult's doc comment).
-                // Measured directly against real GP-5/GP-50 hardware-format output
-                // (--verify-gp5-multilevel): high/extreme-gain amps can end up
-                // shipping several dB quieter than the NAM's own true output (Full
-                // A2) even after winning every prior comparison, while clean amps
-                // were already within ~0.1dB. This step rescales the winning B (a
-                // pure linear post-shaper gain, so it cannot change the fitted
-                // nonlinear response shape at all) so the final output RMS on the
-                // Tone Match reference clip matches Full A2's RMS on that same clip.
+                // Originally matched to the NAM's own raw render (Full A2) on the Tone
+                // Match reference clip, but real usage (2026-09-15, see CLAUDE.md) showed
+                // that undershoots badly: the plain (non-Tone-Match) conversion is
+                // ALREADY tuned to sound noticeably louder than a literal Full A2 render
+                // (the same gap the P/K-search/dynamics investigation ran into and
+                // deliberately didn't chase), so matching Tone Match's level to Full A2
+                // instead of to the plain conversion made Tone Match output sound far
+                // quieter than the non-Tone-Match file for the same NAM -- not a subtle
+                // few-dB miss, 10-14dB measured on real converted files. Match to the
+                // PLAIN conversion's own rendered output on this same analysis clip
+                // instead: this step then only ever corrects TONE, never overall
+                // loudness relative to what a non-Tone-Match conversion already sounds
+                // like -- exactly what a "Tone Match" feature should do.
                 gp5FinalB44=gp5DirectSolveWon?gp5DirectSolveB44:
                     (!gp5ToneMatchIr.empty()?gp5CorrectionB44:B44Pre);
                 {
                     Model finalM=preM;finalM.pk=gp5Chosen->pk;finalM.B=gp5FinalB44;
-                    std::vector<float> finalRendered;
+                    std::vector<float> finalRendered,plainRendered;
                     renderModel(finalM,analysisInput,finalRendered,true);
+                    renderModel(preM,analysisInput,plainRendered,true);
                     const double renderedRmsDbVal=rmsDb(finalRendered);
-                    const double targetRmsDbVal=rmsDb(analysisTarget);
+                    const double targetRmsDbVal=rmsDb(plainRendered);
                     if(std::isfinite(renderedRmsDbVal)&&std::isfinite(targetRmsDbVal)){
                         const double gainDb=targetRmsDbVal-renderedRmsDbVal;
                         const double gainLinear=std::pow(10.0,gainDb/20.0);

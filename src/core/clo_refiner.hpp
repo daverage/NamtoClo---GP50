@@ -18,7 +18,12 @@ namespace fs = std::filesystem;
 //  - Clean/Moderate/High/Bass: use a specific bundled reference clip directly, bypassing
 //    classification.
 //  - Custom: use referenceWav verbatim (a user-browsed file).
-enum class ToneMatchReferenceMode { Default, Auto, Clean, Moderate, High, Bass, Custom };
+//  - T3kSweep: use the TONE3000 T3K-sweep-v3.wav synthetic sweep, downloaded and cached
+//    on first use (never bundled -- see resolveT3kSweepClip()). Explicit/manual only,
+//    never selected by Auto.
+//  - StandardInput: use the bundled nam_input_wav.wav (resolveOriginalStimulusPath())
+//    as the Tone Match reference. Explicit/manual only, never selected by Auto.
+enum class ToneMatchReferenceMode { Default, Auto, Clean, Moderate, High, Bass, Custom, T3kSweep, StandardInput };
 
 struct CloRefineConfig {
     bool enabled = false;

@@ -546,7 +546,7 @@ void updateTailControls() {
     const bool refineEnabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(gRefineModeCombo, refineEnabled ? TRUE : FALSE);
     const int refineModeSel = static_cast<int>(SendMessageW(gRefineModeCombo, CB_GETCURSEL, 0, 0));
-    const bool refineCustom = refineModeSel == 6; // "Custom WAV..." is the last item
+    const bool refineCustom = refineModeSel == 6; // "Custom WAV..." (T3K/Standard are indices 7/8, no file picker needed)
     EnableWindow(gRefineTargetEdit, (refineEnabled && refineCustom) ? TRUE : FALSE);
     EnableWindow(gBrowseRefineTargetButton, (refineEnabled && refineCustom) ? TRUE : FALSE);
 }
@@ -594,9 +594,10 @@ void startConversion(HWND hwnd) {
         ntc::ToneMatchReferenceMode::Default, ntc::ToneMatchReferenceMode::Auto,
         ntc::ToneMatchReferenceMode::Clean, ntc::ToneMatchReferenceMode::Moderate,
         ntc::ToneMatchReferenceMode::High, ntc::ToneMatchReferenceMode::Bass,
-        ntc::ToneMatchReferenceMode::Custom
+        ntc::ToneMatchReferenceMode::Custom,
+        ntc::ToneMatchReferenceMode::T3kSweep, ntc::ToneMatchReferenceMode::StandardInput
     };
-    refine.referenceMode = (refineModeSel >= 0 && refineModeSel < 7)
+    refine.referenceMode = (refineModeSel >= 0 && refineModeSel < 9)
         ? kRefineModes[refineModeSel] : ntc::ToneMatchReferenceMode::Default;
     if (refine.referenceMode == ntc::ToneMatchReferenceMode::Custom)
         refine.referenceWav = fs::path(getText(gRefineTargetEdit));
@@ -979,7 +980,8 @@ void createUi(HWND hwnd) {
                                      0, 0, 100, 300, hwnd, controlId(IDC_REFINE_MODE), nullptr, nullptr);
     applyFont(gRefineModeCombo);
     for (const wchar_t* item : {L"Default (standard stimulus)", L"Auto (recommended)", L"Clean",
-                                 L"Moderate", L"High Gain", L"Bass", L"Custom WAV..."}) {
+                                 L"Moderate", L"High Gain", L"Bass", L"Custom WAV...",
+                                 L"T3K Sweep", L"Standard Input"}) {
         SendMessageW(gRefineModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
     }
     SendMessageW(gRefineModeCombo, CB_SETCURSEL, 1, 0); // Auto by default

@@ -67,7 +67,7 @@ struct CloInfoResult {
 }
 
 enum ToneMatchReference: String, CaseIterable, Identifiable {
-    case auto, clean, moderate, high, bass
+    case auto, clean, moderate, high, bass, t3k, standard
     var id: String { rawValue }
     var displayName: String {
         switch self {
@@ -76,6 +76,8 @@ enum ToneMatchReference: String, CaseIterable, Identifiable {
         case .moderate: return "Moderate"
         case .high: return "High Gain"
         case .bass: return "Bass"
+        case .t3k: return "T3K Sweep"
+        case .standard: return "Standard Input"
         }
     }
 }

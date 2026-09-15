@@ -1,0 +1,21 @@
+# First varied-subset pass for the released-vs-EngineV2 baseline scoreboard.
+# Deliberately spans clean / crunch / high-gain / extreme-gain / pedal / bass,
+# plus one same-amp gain progression (JCM800 G3->G10), per
+# ENGINE_V2_RESEARCH_NORTH_STAR.md's "what counts as a real improvement"
+# categories. Not a random sample -- chosen for coverage.
+
+Roland JC 120B Jazz Chorus: Bright Off, SM57
+AC30_CLEAN
+Fender - Princeton Clean 3 SM57
+Dumble Steel SS Clean
+AC30_CRUNCH
+Fender - Princeton Crunch Vol 7 SM57
+JCM800 2203 D.I. - G3 B5 M5 T5 P5 V5 - STD
+JCM800 2203 D.I. - G10 B5 M5 T5 P5 V5 - STD
+SLO-30 - Lead - Gain 5 BMT 466 Pres 8 Depth 5
+Mesa Boogie - Mark V (Ch 3 Ext) HG bal [18dBu]
+Mesa_Boogie Dual Rectifier - SM57 - Gain 10 - m
+Full Rig Peavey 5150 Maxon Mesa OS SM57 - jp_is_out_of_tune
+ProCo Rat - Distortion 5 Filter 4
+BigMuff
+AmpegSVT - Hi IN - Gain 5

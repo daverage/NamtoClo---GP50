@@ -9,3 +9,4 @@ test_assets/
 macos/NamToCloMac/.build/
 macos/NamToCloMac/.swiftpm/
 /src/engine_v2/__pycache__
+/src/engine_v2/_baseline_cache/

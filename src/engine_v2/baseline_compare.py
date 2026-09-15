@@ -18,33 +18,80 @@ for one model, reusing:
     actually trained/scored against;
   - the exact scoring function EngineV2 uses, `evidence_esr` from
     distiller_v2_north_star_v2.py (imported, not reimplemented);
-  - the exact CLO byte layout the shipped engine writes, decoded by the new
+  - the exact CLO byte layout the shipped engine writes, decoded by
     clo_reader.py (a port of src/core/clo_refiner.cpp's parseModel).
+
+CORRECTNESS NOTE (why both sides are scored from the actual final CLO file):
+train_namtoclo_north_star_v42.py's report.json records
+`optimizer_fit_evidence_metrics` = the fit computed on the *uncalibrated* B,
+before `_calibrate_stimulus_post_gain` rescales B into the B that is actually
+written to the CLO (`write_clo(clo, a, best.pk, b_device)`). Since ESR is not
+scale-invariant, that stored number can disagree with how the real, final CLO
+file actually scores. So this script never reads
+`optimizer_fit_evidence_metrics` -- it decodes and renders
+`report["clo_path"]` (EngineV2's own final output file) exactly the same way
+it decodes and renders the shipped engine's output, through the same
+`_score_clo` function, and scores both from that rendering.
 
 IMPORTANT LIMITATION: this only measures fit to a raw-NAM teacher on one
 synthetic sweep stimulus. It is NOT a hardware-validated result and does not
 by itself answer "is EngineV2 better" -- see the verdict field this script
 writes, and ENGINE_V2_RESEARCH_NORTH_STAR.md for the full evidence bar
 (real GP-50 listening, held-out guitar) that a real answer requires.
+
+This script is read-only comparison tooling: it never feeds any result back
+into EngineV2 coefficients, weights, training, or fitting in any way.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import soundfile as sf
 
 from clo_reader import read_clo
 from distiller_v2_dsp import render_full_with
+from distiller_v2_fit import _map
 from distiller_v2_north_star_v2 import evidence_esr
 from distiller_v2_north_star_v4 import StimulusFitEvidence, EvidenceWindow
+
+# Bump this whenever the scoring path here (render/score function, evidence
+# reconstruction, etc.) changes in a way that could change the numbers -- it
+# is folded into the baseline cache key so old cache entries are invalidated
+# automatically rather than silently reused with a stale scorer.
+SCORER_VERSION = 1
+
+# Winner is decided by lower ESR. Below this relative gap the two sides are
+# considered a tie rather than crowning a winner on noise.
+TIE_RELATIVE_EPSILON = 1e-6
+
+DEFAULT_BASELINE_CACHE_DIRNAME = "_baseline_cache"
+
+
+# ---------------------------------------------------------------------------
+# Small utilities
+# ---------------------------------------------------------------------------
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _find_reports(output_root: Path, model_regex_pat) -> list[Path]:
@@ -142,8 +189,29 @@ def _build_evidence_and_audio(level_variants: list[dict], stimulus_sha256: str):
     return inputs, targets, evidence
 
 
-def _run_namtoclo_convert(namtoclo_bin: Path, nam_path: Path, out_dir: Path) -> Path:
-    cmd = [
+def _score_clo(clo_path: Path, inputs: list[np.ndarray], targets: list[np.ndarray], evidence) -> float:
+    """Decode a compact VTSI CLO and score it against evidence.
+
+    This is the SINGLE render/score code path used for both the released
+    (shipped C++ engine) CLO and the EngineV2 CLO -- deliberately, so neither
+    side can drift from the other. Rendering across the (independent) 5
+    stimulus levels is parallelized with distiller_v2_fit._map (the existing
+    nogil-njit threaded helper); `_map` wraps `ThreadPoolExecutor.map`, which
+    preserves input order in its results regardless of which worker finishes
+    first, so the returned per-level predictions line up with `evidence`'s
+    window/level order deterministically.
+    """
+    model = read_clo(clo_path)
+    pk = np.array([model.pp, model.pn, model.kp, model.kn], dtype=np.float64)
+    preds = _map(
+        lambda x: render_full_with(x, model.pre, model.a, pk, model.post, model.b),
+        inputs,
+    )
+    return evidence_esr(preds, targets, evidence)
+
+
+def _run_namtoclo_convert(namtoclo_bin: Path, nam_path: Path, out_dir: Path) -> tuple[Path, list[str]]:
+    argv = [
         str(namtoclo_bin),
         "convert",
         str(nam_path),
@@ -154,11 +222,11 @@ def _run_namtoclo_convert(namtoclo_bin: Path, nam_path: Path, out_dir: Path) -> 
         "auto",
         "--json",
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:
         raise RuntimeError(
             f"namtoclo convert failed (exit {proc.returncode}) for {nam_path}\n"
-            f"command: {' '.join(cmd)}\nstdout:\n{proc.stdout[-4000:]}\n"
+            f"command: {' '.join(argv)}\nstdout:\n{proc.stdout[-4000:]}\n"
             f"stderr:\n{proc.stderr[-4000:]}"
         )
     complete = None
@@ -185,12 +253,204 @@ def _run_namtoclo_convert(namtoclo_bin: Path, nam_path: Path, out_dir: Path) -> 
     path = Path(path_str)
     if not path.is_file():
         raise RuntimeError(f"namtoclo reported output_gp5gp50={path} but it does not exist")
-    return path
+    return path, argv
 
 
-def compare_one(report_path: Path, namtoclo_bin: Path, nam_root: Path | None) -> dict:
+# ---------------------------------------------------------------------------
+# Baseline (released-engine) cache
+# ---------------------------------------------------------------------------
+
+
+def _argv_identity(nam_path: Path) -> list[str]:
+    """The part of the conversion argv that is meaningful to cache identity.
+
+    The namtoclo binary path/hash and the ephemeral --output tmp directory
+    are tracked separately (binary via its own SHA256, output dir is never
+    stable across runs), so they're excluded here to avoid spurious cache
+    misses; everything that actually controls what gets produced is here.
+    """
+    return ["convert", str(nam_path), "--tone-match", "--reference", "auto", "--json"]
+
+
+def _cache_identity(
+    nam_sha256: str,
+    namtoclo_bin_sha256: str,
+    argv_identity: list[str],
+    stimulus_sha256: str,
+    levels_db: tuple[float, ...],
+) -> dict:
+    return {
+        "scorer_version": SCORER_VERSION,
+        "nam_sha256": nam_sha256,
+        "namtoclo_bin_sha256": namtoclo_bin_sha256,
+        "argv": list(argv_identity),
+        "stimulus_sha256": stimulus_sha256,
+        "levels_db": [float(x) for x in levels_db],
+    }
+
+
+def _cache_key(identity: dict) -> str:
+    blob = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return _sha256_bytes(blob.encode("utf-8"))
+
+
+def _cache_paths(cache_root: Path, key: str) -> tuple[Path, Path]:
+    return cache_root / f"{key}.json", cache_root / f"{key}.clo"
+
+
+def get_baseline_result(
+    *,
+    nam_path: Path,
+    namtoclo_bin: Path,
+    namtoclo_bin_sha256: str,
+    stimulus_sha256: str,
+    levels_db: tuple[float, ...],
+    inputs: list[np.ndarray],
+    targets: list[np.ndarray],
+    evidence,
+    cache_root: Path,
+    use_cache: bool,
+    force: bool,
+) -> dict:
+    """Return {esr, clo_path, clo_sha256, provenance, cache_hit}.
+
+    On a cache hit (identity match, cache disk state intact), skips both
+    `namtoclo convert` and the render/score pass entirely by reusing the
+    stored ESR and the cached CLO file. On a miss (or when caching is
+    disabled/forced-refreshed), runs the conversion, renders+scores through
+    `_score_clo` (the same function used for the EngineV2 side), and writes a
+    fresh cache entry (overwriting any stale one) unless `--no-baseline-cache`
+    was given.
+    """
+    nam_sha256 = _sha256_file(nam_path)
+    argv_identity = _argv_identity(nam_path)
+    identity = _cache_identity(nam_sha256, namtoclo_bin_sha256, argv_identity, stimulus_sha256, levels_db)
+    key = _cache_key(identity)
+    entry_path, clo_cache_path = _cache_paths(cache_root, key)
+
+    if use_cache and not force and entry_path.is_file() and clo_cache_path.is_file():
+        try:
+            entry = json.loads(entry_path.read_text())
+        except Exception:
+            entry = None
+        if entry is not None and entry.get("identity") == identity:
+            # Identity matches exactly (including nam/bin SHAs, argv,
+            # stimulus SHA, levels_db, and scorer_version) -- trust the
+            # cached ESR and CLO without re-running or re-rendering.
+            return {
+                "esr": float(entry["esr"]),
+                "clo_path": clo_cache_path,
+                "clo_sha256": entry["clo_sha256"],
+                "provenance": entry["provenance"],
+                "cache_hit": True,
+            }
+
+    # Miss (or cache disabled/forced): run the real conversion.
+    with tempfile.TemporaryDirectory(prefix="namtoclo_baseline_") as tmp:
+        clo_path, exact_argv = _run_namtoclo_convert(namtoclo_bin, nam_path, Path(tmp))
+        clo_sha256 = _sha256_file(clo_path)
+        esr = _score_clo(clo_path, inputs, targets, evidence)
+
+        cache_root.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(clo_path, clo_cache_path)
+
+    provenance = {
+        "namtoclo_bin_path": str(namtoclo_bin.resolve()),
+        "namtoclo_bin_sha256": namtoclo_bin_sha256,
+        "nam_path": str(nam_path),
+        "nam_sha256": nam_sha256,
+        "stimulus_sha256": stimulus_sha256,
+        "levels_db": [float(x) for x in levels_db],
+        "argv": exact_argv,
+        "clo_sha256": clo_sha256,
+    }
+
+    if use_cache:
+        entry = {
+            "identity": identity,
+            "esr": float(esr),
+            "clo_sha256": clo_sha256,
+            "provenance": provenance,
+        }
+        entry_path.write_text(json.dumps(entry, indent=2))
+
+    return {
+        "esr": float(esr),
+        "clo_path": clo_cache_path,
+        "clo_sha256": clo_sha256,
+        "provenance": provenance,
+        "cache_hit": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Scoring math (pure, standalone -- kept separate from I/O for testability)
+# ---------------------------------------------------------------------------
+
+
+def _compute_winner(released_engine_esr: float, engine_v2_esr: float) -> tuple[float, float, str]:
+    """Return (esr_delta, relative_improvement, winner).
+
+    Sign convention: esr_delta = released - engine_v2, so a POSITIVE
+    esr_delta means EngineV2 has the lower (better) ESR. relative_improvement
+    follows the same convention: positive means EngineV2 improved on the
+    released engine. Winner is decided by lower ESR, with ties (relative gap
+    below TIE_RELATIVE_EPSILON) reported as "tie" rather than picking a side
+    on noise.
+    """
+    esr_delta = released_engine_esr - engine_v2_esr
+    if released_engine_esr != 0:
+        relative_improvement = (released_engine_esr - engine_v2_esr) / released_engine_esr
+    else:
+        relative_improvement = float("nan")
+
+    denom = max(abs(released_engine_esr), abs(engine_v2_esr), 1e-30)
+    rel_diff = abs(released_engine_esr - engine_v2_esr) / denom
+    if rel_diff < TIE_RELATIVE_EPSILON:
+        winner = "tie"
+    elif engine_v2_esr < released_engine_esr:
+        winner = "engine_v2"
+    else:
+        winner = "released"
+    return esr_delta, relative_improvement, winner
+
+
+def _build_summary(results: list[dict], failures: list[dict], namtoclo_bin_path: str, namtoclo_bin_sha256: str) -> dict:
+    improvements = [r["relative_improvement"] for r in results if np.isfinite(r["relative_improvement"])]
+    return {
+        "num_models_compared": len(results),
+        "num_models_attempted": len(results) + len(failures),
+        "engine_v2_wins": sum(1 for r in results if r["winner"] == "engine_v2"),
+        "released_wins": sum(1 for r in results if r["winner"] == "released"),
+        "ties": sum(1 for r in results if r["winner"] == "tie"),
+        "mean_relative_improvement": statistics.fmean(improvements) if improvements else None,
+        "median_relative_improvement": statistics.median(improvements) if improvements else None,
+        "namtoclo_bin_path": namtoclo_bin_path,
+        "namtoclo_bin_sha256": namtoclo_bin_sha256,
+        "results": results,
+        "failures": failures,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-model comparison
+# ---------------------------------------------------------------------------
+
+
+def compare_one(
+    report_path: Path,
+    namtoclo_bin: Path,
+    namtoclo_bin_sha256: str,
+    nam_root: Path | None,
+    cache_root: Path,
+    use_cache: bool,
+    force_baseline: bool,
+    progress_prefix: str = "",
+) -> dict:
+    print(f"{progress_prefix}", flush=True, end="")
     report = json.loads(report_path.read_text())
     model_name = report.get("model_name", report_path.parent.name)
+    print(f"{model_name}", flush=True)
 
     nam_path = Path(report.get("stimulus", {}).get("nam_path", ""))
     if not nam_path.is_file():
@@ -206,57 +466,101 @@ def compare_one(report_path: Path, namtoclo_bin: Path, nam_root: Path | None) ->
                 f"named {nam_path.name!r} was found under --nam-root {nam_root}."
             )
         nam_path = matches[0]
+    nam_sha256 = _sha256_file(nam_path)
 
-    engine_v2_esr = (report.get("optimizer_fit_evidence_metrics") or {}).get("esr")
-    if engine_v2_esr is None:
+    engine_v2_clo_path_str = report.get("clo_path")
+    if not engine_v2_clo_path_str:
         raise RuntimeError(
-            f"report.json has no optimizer_fit_evidence_metrics.esr: {report_path}"
+            f"report.json has no 'clo_path' field -- can't score EngineV2's actual "
+            f"final CLO output: {report_path}"
+        )
+    engine_v2_clo_path = Path(engine_v2_clo_path_str)
+    if not engine_v2_clo_path.is_file():
+        raise RuntimeError(
+            f"report.json's clo_path does not exist: {engine_v2_clo_path} "
+            f"(from {report_path})"
         )
 
     level_variants = _load_level_variants(report)
     stimulus_sha256 = report.get("stimulus", {}).get("stimulus_sha256", "")
     inputs, targets, evidence = _build_evidence_and_audio(level_variants, stimulus_sha256)
+    levels_db = tuple(float(lv["level_db"]) for lv in level_variants)
 
-    with tempfile.TemporaryDirectory(prefix="namtoclo_baseline_") as tmp:
-        clo_path = _run_namtoclo_convert(namtoclo_bin, nam_path, Path(tmp))
-        model = read_clo(clo_path)
+    print("  scoring EngineV2's final CLO...", flush=True)
+    engine_v2_clo_sha256 = _sha256_file(engine_v2_clo_path)
+    engine_v2_esr = _score_clo(engine_v2_clo_path, inputs, targets, evidence)
 
-    preds = [
-        render_full_with(x, model.pre, model.a, np.array([model.pp, model.pn, model.kp, model.kn]), model.post, model.b)
-        for x in inputs
-    ]
-    shipped_engine_esr = evidence_esr(preds, targets, evidence)
-
-    if shipped_engine_esr > 0:
-        relative_improvement = (shipped_engine_esr - float(engine_v2_esr)) / shipped_engine_esr
+    identity = _cache_identity(nam_sha256, namtoclo_bin_sha256, _argv_identity(nam_path), stimulus_sha256, levels_db)
+    key = _cache_key(identity)
+    entry_path, _ = _cache_paths(cache_root, key)
+    would_hit = use_cache and not force_baseline and entry_path.is_file()
+    if would_hit:
+        print("  baseline cache: HIT", flush=True)
     else:
-        relative_improvement = float("nan")
+        print("  baseline cache: MISS", flush=True)
+        print("  running released converter...", flush=True)
+        print("  rendering 5 stimulus levels...", flush=True)
 
-    direction = "lower" if engine_v2_esr < shipped_engine_esr else "higher or equal"
+    baseline = get_baseline_result(
+        nam_path=nam_path,
+        namtoclo_bin=namtoclo_bin,
+        namtoclo_bin_sha256=namtoclo_bin_sha256,
+        stimulus_sha256=stimulus_sha256,
+        levels_db=levels_db,
+        inputs=inputs,
+        targets=targets,
+        evidence=evidence,
+        cache_root=cache_root,
+        use_cache=use_cache,
+        force=force_baseline,
+    )
+    released_engine_esr = baseline["esr"]
+
+    esr_delta, relative_improvement, winner = _compute_winner(released_engine_esr, engine_v2_esr)
+
+    direction = "lower" if engine_v2_esr < released_engine_esr else "higher or equal"
     pct = abs(relative_improvement) * 100.0 if np.isfinite(relative_improvement) else float("nan")
     verdict = (
-        f"EngineV2 ESR ({engine_v2_esr:.6g}) is {direction} than the shipped C++ engine's "
-        f"ESR ({shipped_engine_esr:.6g}) against the same NAM-teacher evidence -- "
-        f"a {pct:.3g}% relative difference on this one stimulus-fit-to-raw-NAM-teacher "
-        "metric only. This is NOT a hardware-validated result and does NOT by itself "
+        f"EngineV2 ESR ({engine_v2_esr:.6g}), rendered from its actual final CLO "
+        f"file ({engine_v2_clo_path.name}), is {direction} than the shipped C++ "
+        f"engine's ESR ({released_engine_esr:.6g}, also rendered from its actual "
+        f"final CLO file) against the same NAM-teacher evidence -- a {pct:.3g}% "
+        "relative difference on this one stimulus-fit-to-raw-NAM-teacher metric "
+        "only. This is NOT a hardware-validated result and does NOT by itself "
         "resolve whether EngineV2 is actually better: see "
         "ENGINE_V2_RESEARCH_NORTH_STAR.md 'Existing converter baseline' for the full "
         "required evidence (real GP-50 listening, held-out guitar) before treating "
         "this as a resolved comparison."
     )
 
-    return {
+    result = {
         "model_name": model_name,
         "model_key": report.get("model_key"),
         "nam_path": str(nam_path),
+        "nam_sha256": nam_sha256,
         "report_path": str(report_path),
-        "shipped_engine_esr": shipped_engine_esr,
-        "engine_v2_esr": float(engine_v2_esr),
-        "relative_improvement": relative_improvement,
+        "engine_v2_report_path": str(report_path),
+        "engine_v2_clo_path": str(engine_v2_clo_path),
+        "engine_v2_clo_sha256": engine_v2_clo_sha256,
+        "released_clo_path": str(baseline["clo_path"]),
+        "released_clo_sha256": baseline["clo_sha256"],
+        "namtoclo_bin_path": str(namtoclo_bin.resolve()),
+        "namtoclo_bin_sha256": namtoclo_bin_sha256,
         "stimulus_sha256": stimulus_sha256,
-        "levels_db": [float(lv["level_db"]) for lv in level_variants],
+        "levels_db": list(levels_db),
+        "released_engine_esr": released_engine_esr,
+        "engine_v2_esr": float(engine_v2_esr),
+        "esr_delta": esr_delta,
+        "relative_improvement": relative_improvement,
+        "winner": winner,
+        "baseline_cache_hit": baseline["cache_hit"],
+        "baseline_provenance": baseline["provenance"],
         "verdict": verdict,
+        # Kept for backwards compatibility with earlier consumers of this
+        # script's output; prefer released_engine_esr/engine_v2_esr above.
+        "shipped_engine_esr": released_engine_esr,
     }
+    return result
 
 
 def main() -> int:
@@ -265,6 +569,9 @@ def main() -> int:
     p.add_argument("--nam-root", default=None, help="Fallback search root for the .nam file if report.json's recorded nam_path no longer exists.")
     p.add_argument("--output-root", required=True, help="An EngineV2 output directory: either one model's directory (containing report.json directly) or a parent containing several model subdirectories.")
     p.add_argument("--namtoclo-bin", default="build-macos/namtoclo", help="Path to the built namtoclo CLI.")
+    p.add_argument("--baseline-cache-root", default=None, help=f"Directory for the persistent released-engine baseline cache (default: <output-root>/{DEFAULT_BASELINE_CACHE_DIRNAME}).")
+    p.add_argument("--no-baseline-cache", action="store_true", help="Never read or write the baseline cache; always recompute the released-engine result.")
+    p.add_argument("--force-baseline", action="store_true", help="Ignore any existing baseline cache hit and recompute the released-engine result, then refresh the cache.")
     p.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of a human summary line.")
     args = p.parse_args()
 
@@ -276,6 +583,15 @@ def main() -> int:
         raise SystemExit(f"--namtoclo-bin does not exist: {namtoclo_bin}")
     nam_root = Path(args.nam_root).expanduser() if args.nam_root else None
 
+    cache_root = (
+        Path(args.baseline_cache_root).expanduser()
+        if args.baseline_cache_root
+        else output_root / DEFAULT_BASELINE_CACHE_DIRNAME
+    )
+    use_cache = not args.no_baseline_cache
+
+    namtoclo_bin_sha256 = _sha256_file(namtoclo_bin)
+
     reports = _find_reports(output_root, args.model)
     if not reports:
         raise SystemExit(
@@ -284,8 +600,25 @@ def main() -> int:
         )
 
     results = []
-    for report_path in reports:
-        result = compare_one(report_path, namtoclo_bin, nam_root)
+    failures = []
+    n = len(reports)
+    for i, report_path in enumerate(reports, start=1):
+        try:
+            result = compare_one(
+                report_path,
+                namtoclo_bin,
+                namtoclo_bin_sha256,
+                nam_root,
+                cache_root,
+                use_cache,
+                args.force_baseline,
+                progress_prefix=f"[{i}/{n}] ",
+            )
+        except Exception as exc:  # noqa: BLE001 -- one model's failure must not abort the run
+            failures.append({"report_path": str(report_path), "error": str(exc)})
+            print(f"  FAILED: {exc}", flush=True)
+            continue
+
         out_path = report_path.parent / "baseline_report.json"
         out_path.write_text(json.dumps(result, indent=2))
         result["baseline_report_path"] = str(out_path)
@@ -294,14 +627,29 @@ def main() -> int:
         if args.json:
             print(json.dumps(result))
         else:
-            print(
-                f"{result['model_name']}: shipped_engine_esr={result['shipped_engine_esr']:.6g} "
-                f"engine_v2_esr={result['engine_v2_esr']:.6g} "
-                f"relative_improvement={result['relative_improvement']:.4g} "
-                f"-> {out_path}"
-            )
+            print(f"  released: {result['released_engine_esr']:.6g}", flush=True)
+            print(f"  EngineV2: {result['engine_v2_esr']:.6g}", flush=True)
+            pct = result["relative_improvement"] * 100.0 if np.isfinite(result["relative_improvement"]) else float("nan")
+            print(f"  EngineV2 improvement: {pct:.3g}%", flush=True)
+            print(f"  winner: {result['winner']}", flush=True)
+            print(f"  baseline cache: {'HIT' if result['baseline_cache_hit'] else 'MISS'}", flush=True)
+            print(f"  -> {out_path}", flush=True)
 
-    return 0
+    # Always write the aggregate summary (even for a single-model run) so
+    # downstream tooling has one stable path to look at; per-model detail
+    # still lives in each model's own baseline_report.json.
+    summary = _build_summary(results, failures, str(namtoclo_bin.resolve()), namtoclo_bin_sha256)
+    summary_path = output_root / "baseline_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2))
+    if not args.json:
+        print(
+            f"\nSummary: {summary['num_models_compared']}/{summary['num_models_attempted']} compared, "
+            f"engine_v2 wins={summary['engine_v2_wins']} released wins={summary['released_wins']} "
+            f"ties={summary['ties']} failures={len(failures)} -> {summary_path}",
+            flush=True,
+        )
+
+    return 0 if not failures or results else 1
 
 
 if __name__ == "__main__":
