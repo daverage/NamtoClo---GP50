@@ -13,7 +13,7 @@
 //
 // Subcommands:
 //   convert <input.nam> --output <dir-or-file.clo> [--tone-match]
-//                        [--reference clean|moderate|high|bass|auto]
+//                        [--reference clean|moderate|high|bass|auto|custom|t3k|standard] [--reference-audio <wav>]
 //                        [--recorded-audio <wav>] [--corrective-ir <wav>]
 //                        [--no-gp5-direct-fit] [--slot N] [--json]
 //   midi-list [--json]
@@ -58,7 +58,7 @@ void printUsage() {
         "namtoclo -- NAM to CLO conversion and GP-5/GP-50/GP-200 upload CLI\n\n"
         "Usage:\n"
         "  namtoclo convert <input.nam> --output <dir-or-file.clo> [--tone-match]\n"
-        "                              [--reference clean|moderate|high|bass|auto]\n"
+        "                              [--reference clean|moderate|high|bass|auto|custom|t3k|standard] [--reference-audio <wav>]\n"
         "                              [--recorded-audio <wav>] [--corrective-ir <wav>]\n"
         "                              [--no-gp5-direct-fit] [--slot N] [--json]\n"
         "  namtoclo midi-list [--json]\n"
@@ -85,6 +85,7 @@ struct Args {
     bool gp5DirectFit = true;
     std::string output;
     std::string reference;
+    std::string referenceAudio;
     std::string recordedAudio;
     std::string correctiveIr;
     std::string device; // accepted; see midi-list for why device selection is limited today
@@ -115,6 +116,7 @@ Args parseArgs(int argc, char** argv, int startAt) {
         else if (arg == "--no-gp5-direct-fit") a.gp5DirectFit = false;
         else if (arg == "--output" || arg == "-o") a.output = next("--output");
         else if (arg == "--reference") a.reference = next("--reference");
+        else if (arg == "--reference-audio") a.referenceAudio = next("--reference-audio");
         else if (arg == "--recorded-audio") a.recordedAudio = next("--recorded-audio");
         else if (arg == "--corrective-ir") a.correctiveIr = next("--corrective-ir");
         else if (arg == "--slot") a.slot = std::stoi(next("--slot"));
@@ -202,6 +204,9 @@ ntc::ToneMatchReferenceMode parseReferenceMode(const std::string& s) {
     if (s == "moderate") return ntc::ToneMatchReferenceMode::Moderate;
     if (s == "high") return ntc::ToneMatchReferenceMode::High;
     if (s == "bass") return ntc::ToneMatchReferenceMode::Bass;
+    if (s == "custom") return ntc::ToneMatchReferenceMode::Custom;
+    if (s == "t3k") return ntc::ToneMatchReferenceMode::T3kSweep;
+    if (s == "standard") return ntc::ToneMatchReferenceMode::StandardInput;
     return ntc::ToneMatchReferenceMode::Auto;
 }
 
@@ -235,6 +240,10 @@ int cmdConvert(const Args& a) {
     ntc::CloRefineConfig refine;
     refine.enabled = a.toneMatch;
     if (!a.reference.empty()) refine.referenceMode = parseReferenceMode(a.reference);
+    if (!a.referenceAudio.empty()) {
+        refine.referenceMode = ntc::ToneMatchReferenceMode::Custom;
+        refine.referenceWav = fs::path(a.referenceAudio);
+    }
 
     ntc::NativeConverterConfig converter;
     converter.gp5DirectFit = a.gp5DirectFit;

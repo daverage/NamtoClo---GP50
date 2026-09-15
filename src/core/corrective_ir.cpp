@@ -409,4 +409,41 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
     return applyCorrectiveIrToClo(sourceClo, ir, destinationClo, stats, error, postCorrectionDb);
 }
 
+bool scaleClo2048BlockB(const fs::path& cloPath, double gainLinear, std::string& error) {
+    std::vector<std::uint8_t> data;
+    if (!readFileBytes(cloPath, data, error)) return false;
+    if (data.size() != kPhysicalSize) {
+        error = "Source Ampero CLO is not exactly 0x2288 bytes.";
+        return false;
+    }
+    if (std::memcmp(data.data(), "VTSI", 4) != 0) {
+        error = "Source Ampero CLO magic is not VTSI.";
+        return false;
+    }
+    if (!std::isfinite(gainLinear)) {
+        error = "Block B gain is not finite.";
+        return false;
+    }
+
+    for (std::size_t i = 0; i < kBlockBCount; ++i) {
+        float value = 0.0f;
+        std::memcpy(&value, data.data() + kBlockBOffset + i * sizeof(float), sizeof(value));
+        const double scaled = static_cast<double>(value) * gainLinear;
+        if (!std::isfinite(scaled)
+            || scaled > static_cast<double>(std::numeric_limits<float>::max())
+            || scaled < -static_cast<double>(std::numeric_limits<float>::max())) {
+            error = "Block B gain produced an out-of-range value.";
+            return false;
+        }
+        value = static_cast<float>(scaled);
+        std::memcpy(data.data() + kBlockBOffset + i * sizeof(float), &value, sizeof(value));
+    }
+
+    const std::uint16_t crc = crc16Modbus(data.data() + 0x0C, 0x2288u - 0x0Cu);
+    data[0x08] = static_cast<std::uint8_t>((crc >> 8) & 0xFFu);
+    data[0x09] = static_cast<std::uint8_t>(crc & 0xFFu);
+
+    return writeFileBytes(cloPath, data.data(), data.size(), error);
+}
+
 } // namespace ntc
