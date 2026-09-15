@@ -1,6 +1,15 @@
-# EngineV2 active research workspace
+# EngineV2 (archived 2026-09-15)
 
-`ENGINE_V2_RESEARCH_NORTH_STAR.md` is the governing research document.
+This entire directory was `src/engine_v2/` until 2026-09-15, when the
+research was concluded (see "Status" below) and everything -- code, tests,
+docs, the V4.2 model/batch/baseline-comparison tooling, and the second
+`gp50_identification_probe_pack_v42/` probe set -- was moved here alongside
+the earlier (V2/V3/V4.1-era) archived material already in this folder. This
+is not partial pruning around an active engine (that's what
+`cleanup_tools/clean_engine_v2_active.py` used to do while EngineV2 was
+still being developed); nothing in `src/engine_v2` remains active as of this
+archive. `ENGINE_V2_RESEARCH_NORTH_STAR.md` is the governing research
+document from that effort.
 
 ## Project rule
 
