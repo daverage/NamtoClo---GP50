@@ -25,9 +25,9 @@ Keep the modern sealed NAM set untouched while the CLO optimiser is being design
 
 ```bash
 python3 build_namtoclo_teacher_dataset.py \
-  --guitar-corpus ~/NamtoCloResearchCorpus \
-  --nam-corpus ~/NamtoCloNAMCorpus \
-  --output ~/NamtoCloTeacherDataset \
+  --guitar-corpus ~/NamtoCloArchive/NamtoCloResearchCorpus \
+  --nam-corpus ~/NamtoCloArchive/NamtoCloNAMCorpus \
+  --output ~/NamtoCloArchive/NamtoCloTeacherDataset \
   --build-namcore \
   --profile full
 ```
@@ -39,9 +39,9 @@ official `render` executable.
 
 ```bash
 python3 build_namtoclo_teacher_dataset.py \
-  --guitar-corpus ~/NamtoCloResearchCorpus \
-  --nam-corpus ~/NamtoCloNAMCorpus \
-  --output ~/NamtoCloTeacherDataset \
+  --guitar-corpus ~/NamtoCloArchive/NamtoCloResearchCorpus \
+  --nam-corpus ~/NamtoCloArchive/NamtoCloNAMCorpus \
+  --output ~/NamtoCloArchive/NamtoCloTeacherDataset \
   --build-namcore \
   --profile full \
   --plan-only
@@ -51,9 +51,9 @@ python3 build_namtoclo_teacher_dataset.py \
 
 ```bash
 python3 build_namtoclo_teacher_dataset.py \
-  --guitar-corpus ~/NamtoCloResearchCorpus \
-  --nam-corpus ~/NamtoCloNAMCorpus \
-  --output ~/NamtoCloTeacherSmoke \
+  --guitar-corpus ~/NamtoCloArchive/NamtoCloResearchCorpus \
+  --nam-corpus ~/NamtoCloArchive/NamtoCloNAMCorpus \
+  --output ~/NamtoCloArchive/NamtoCloTeacherSmoke \
   --build-namcore \
   --profile smoke \
   --limit-tasks 20
@@ -69,9 +69,9 @@ Only after the converter/loss/optimiser is frozen:
 
 ```bash
 python3 build_namtoclo_teacher_dataset.py \
-  --guitar-corpus ~/NamtoCloResearchCorpus \
-  --nam-corpus ~/NamtoCloNAMCorpus \
-  --output ~/NamtoCloTeacherDataset \
+  --guitar-corpus ~/NamtoCloArchive/NamtoCloResearchCorpus \
+  --nam-corpus ~/NamtoCloArchive/NamtoCloNAMCorpus \
+  --output ~/NamtoCloArchive/NamtoCloTeacherDataset \
   --build-namcore \
   --profile full \
   --include-sealed

@@ -36,7 +36,7 @@ Dependencies
 
 Usage
 -----
-    python3 build_namtoclo_research_corpus_hf.py ~/NamtoCloResearchCorpus
+    python3 build_namtoclo_research_corpus_hf.py ~/NamtoCloArchive/NamtoCloResearchCorpus
 
 Useful options
 --------------

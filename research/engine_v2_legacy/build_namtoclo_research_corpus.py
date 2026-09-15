@@ -23,7 +23,7 @@ Dependencies:
     python3 -m pip install requests numpy py7zr
 
 Usage:
-    python3 build_namtoclo_research_corpus.py ~/NamtoCloCorpus
+    python3 build_namtoclo_research_corpus.py ~/NamtoCloArchive/NamtoCloCorpus
 
 Useful options:
     --profile full        Download the full research set (default)

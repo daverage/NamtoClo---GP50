@@ -253,9 +253,9 @@ def main():
             "teacher render. It does not fit A/B and does not create a CLO."
         )
     )
-    ap.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
+    ap.add_argument("--teacher-root", default="~/NamtoCloArchive/NamtoCloTeacherDataset")
     ap.add_argument("--model-regex")
-    ap.add_argument("--output", default="~/NamtoCloTransferAnalysis")
+    ap.add_argument("--output", default="~/NamtoCloArchive/NamtoCloTransferAnalysis")
     ap.add_argument(
         "--self-test", action="store_true",
         help="Run a known-GP50 P/K round-trip control instead of analysing a NAM.",

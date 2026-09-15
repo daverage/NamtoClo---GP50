@@ -253,7 +253,7 @@ def main() -> int:
             "coefficients are changed."
         )
     )
-    parser.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
+    parser.add_argument("--teacher-root", default="~/NamtoCloArchive/NamtoCloTeacherDataset")
     parser.add_argument("--north-star-root", required=True)
     parser.add_argument(
         "--report-root",
@@ -261,7 +261,7 @@ def main() -> int:
         help="Frozen v2 run root containing each model's report.json",
     )
     parser.add_argument("--original-root")
-    parser.add_argument("--output", default="~/NamtoCloNAMCenteredManifestDiagnostics")
+    parser.add_argument("--output", default="~/NamtoCloArchive/NamtoCloNAMCenteredManifestDiagnostics")
     parser.add_argument("--model-regex", required=True)
     parser.add_argument(
         "--slice",

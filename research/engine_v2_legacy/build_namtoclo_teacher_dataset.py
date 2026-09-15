@@ -41,9 +41,9 @@ System build tools for the preferred NAMCore renderer:
 Typical first run
 -----------------
     python3 build_namtoclo_teacher_dataset.py \
-        --guitar-corpus ~/NamtoCloResearchCorpus \
-        --nam-corpus ~/NamtoCloNAMCorpus \
-        --output ~/NamtoCloTeacherDataset \
+        --guitar-corpus ~/NamtoCloArchive/NamtoCloResearchCorpus \
+        --nam-corpus ~/NamtoCloArchive/NamtoCloNAMCorpus \
+        --output ~/NamtoCloArchive/NamtoCloTeacherDataset \
         --build-namcore \
         --profile full
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the V4.2 pipeline (exact same search/objective/DSP as
 train_namtoclo_north_star_v42.py) against a single arbitrary .nam file that
-is NOT part of the pre-built ~/NamtoCloTeacherDataset corpus.
+is NOT part of the pre-built ~/NamtoCloArchive/NamtoCloTeacherDataset corpus.
 
 train_namtoclo_north_star_v42.py's --model-regex path requires the model to
 already exist in a built teacher dataset (for model grouping and for the
@@ -21,7 +21,7 @@ depended on guitar material anyway (see ENGINE_V2_RESEARCH_NORTH_STAR.md).
 
 Usage:
     python3 -u convert_one_nam_v42.py --nam /path/to/model.nam \
-        --output ~/NamtoCloNorthStarV4_2_Adhoc \
+        --output ~/NamtoCloArchive/NamtoCloNorthStarV4_2_Adhoc \
         [--renderer /path/to/NeuralAmpModelerCore/build-namtoclo/tools/render]
 
 Output: <output>/<model_key>__<slug>/report.json + NSV42__<slug>.clo, in the
@@ -94,7 +94,7 @@ def _load_nam_model(nam_path: Path) -> NamModel:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--nam", required=True, help="Path to the .nam file to convert.")
-    p.add_argument("--output", default="~/NamtoCloNorthStarV4_2_Adhoc")
+    p.add_argument("--output", default="~/NamtoCloArchive/NamtoCloNorthStarV4_2_Adhoc")
     p.add_argument("--stimulus", default=DEFAULT_STIMULUS_URL)
     p.add_argument("--stimulus-cache-root")
     p.add_argument(

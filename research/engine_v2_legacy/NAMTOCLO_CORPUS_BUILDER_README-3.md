@@ -4,7 +4,7 @@ Run:
 
 ```bash
 python3 -m pip install requests numpy py7zr
-python3 build_namtoclo_research_corpus.py ~/NamtoCloResearchCorpus
+python3 build_namtoclo_research_corpus.py ~/NamtoCloArchive/NamtoCloResearchCorpus
 ```
 
 The default `full` profile downloads the complete Guitar-TECHS and EGFxSet Zenodo
@@ -21,7 +21,7 @@ python3 build_namtoclo_research_corpus.py --list-zenodo
 For a smaller bring-up run:
 
 ```bash
-python3 build_namtoclo_research_corpus.py ~/NamtoCloResearchCorpus --profile core
+python3 build_namtoclo_research_corpus.py ~/NamtoCloArchive/NamtoCloResearchCorpus --profile core
 ```
 
 Downloads resume using HTTP Range where supported. The builder writes:

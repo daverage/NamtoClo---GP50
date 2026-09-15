@@ -11,13 +11,13 @@ only wall-clock time, not results.
 
 Usage:
     python3 -u run_batch_parallel.py \
-        --teacher-root ~/NamtoCloTeacherDataset \
-        --nam-root ~/NamtoCloNAMCorpus \
-        --output ~/NamtoCloNorthStarV4_2_LineConverged \
-        --stimulus-cache-root ~/NamtoCloNorthStarV4_StimulusOnly/_v4_teacher_cache \
-        --v41-root ~/NamtoCloNorthStarV4_1_Converged \
-        --v4-root ~/NamtoCloNorthStarV4_StimulusOnly \
-        --v3-root ~/NamtoCloNorthStarV3_SearchRobust \
+        --teacher-root ~/NamtoCloArchive/NamtoCloTeacherDataset \
+        --nam-root ~/NamtoCloArchive/NamtoCloNAMCorpus \
+        --output ~/NamtoCloArchive/NamtoCloNorthStarV4_2_LineConverged \
+        --stimulus-cache-root ~/NamtoCloArchive/NamtoCloNorthStarV4_StimulusOnly/_v4_teacher_cache \
+        --v41-root ~/NamtoCloArchive/NamtoCloNorthStarV4_1_Converged \
+        --v4-root ~/NamtoCloArchive/NamtoCloNorthStarV4_StimulusOnly \
+        --v3-root ~/NamtoCloArchive/NamtoCloNorthStarV3_SearchRobust \
         --jobs 6 \
         --models-file models_subset.txt
 
@@ -86,9 +86,9 @@ def _load_models_file(path: Path) -> list[str]:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
-    p.add_argument("--nam-root", default="~/NamtoCloNAMCorpus")
-    p.add_argument("--output", default="~/NamtoCloNorthStarV4_2_LineConverged")
+    p.add_argument("--teacher-root", default="~/NamtoCloArchive/NamtoCloTeacherDataset")
+    p.add_argument("--nam-root", default="~/NamtoCloArchive/NamtoCloNAMCorpus")
+    p.add_argument("--output", default="~/NamtoCloArchive/NamtoCloNorthStarV4_2_LineConverged")
     p.add_argument("--stimulus-cache-root")
     p.add_argument("--v41-root")
     p.add_argument("--v4-root")

@@ -277,8 +277,8 @@ def main():
             "synthetic probes so quiet operating points contribute directly."
         )
     )
-    p.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
-    p.add_argument("--output", default="~/NamtoCloNorthStarV2")
+    p.add_argument("--teacher-root", default="~/NamtoCloArchive/NamtoCloTeacherDataset")
+    p.add_argument("--output", default="~/NamtoCloArchive/NamtoCloNorthStarV2")
     p.add_argument("--model-regex")
     p.add_argument("--list-models", action="store_true")
     p.add_argument("--fit-real", type=int, default=6)

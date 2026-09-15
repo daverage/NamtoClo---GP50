@@ -1242,7 +1242,7 @@ def main() -> int:
             "vs ordinary NamToClo compact GP5/GP50 CLO vs frozen North Star v2 CLO."
         )
     )
-    parser.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
+    parser.add_argument("--teacher-root", default="~/NamtoCloArchive/NamtoCloTeacherDataset")
     parser.add_argument(
         "--original-root",
         required=True,
@@ -1259,7 +1259,7 @@ def main() -> int:
             "(or legacy distilled.clo)."
         ),
     )
-    parser.add_argument("--output", default="~/NamtoCloThreeWayEval")
+    parser.add_argument("--output", default="~/NamtoCloArchive/NamtoCloThreeWayEval")
     parser.add_argument("--model-regex", required=True)
     parser.add_argument("--benchmark-count", type=int, default=3)
     parser.add_argument("--seed", type=int, default=260910)

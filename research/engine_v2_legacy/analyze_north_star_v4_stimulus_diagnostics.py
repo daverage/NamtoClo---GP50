@@ -370,7 +370,7 @@ def main():
             "Reports per-level and short-time T3K residual error without retraining or guitar use."
         )
     )
-    p.add_argument("--v4-root", default="~/NamtoCloNorthStarV4_StimulusOnly")
+    p.add_argument("--v4-root", default="~/NamtoCloArchive/NamtoCloNorthStarV4_StimulusOnly")
     p.add_argument("--model-regex")
     p.add_argument("--window-ms", type=float, default=500.0)
     p.add_argument("--hop-ms", type=float, default=250.0)

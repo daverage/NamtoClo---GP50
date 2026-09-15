@@ -295,8 +295,8 @@ def main():
             "multistart, true coarse-to-fine search and selection-over-checkpoints."
         )
     )
-    p.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
-    p.add_argument("--output", default="~/NamtoCloNorthStarV3")
+    p.add_argument("--teacher-root", default="~/NamtoCloArchive/NamtoCloTeacherDataset")
+    p.add_argument("--output", default="~/NamtoCloArchive/NamtoCloNorthStarV3")
     p.add_argument("--model-regex")
     p.add_argument("--list-models", action="store_true")
     p.add_argument("--fit-real", type=int, default=6)

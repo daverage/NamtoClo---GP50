@@ -33,7 +33,7 @@ Dependencies
 
 Usage
 -----
-    python3 build_namtoclo_nam_corpus.py ~/NamtoCloNAMCorpus
+    python3 build_namtoclo_nam_corpus.py ~/NamtoCloArchive/NamtoCloNAMCorpus
 
 Useful options
 --------------

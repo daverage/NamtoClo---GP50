@@ -17,13 +17,13 @@ python3 build_namtoclo_research_corpus_hf.py --plan
 Build the corpus:
 
 ```bash
-python3 build_namtoclo_research_corpus_hf.py ~/NamtoCloResearchCorpus
+python3 build_namtoclo_research_corpus_hf.py ~/NamtoCloArchive/NamtoCloResearchCorpus
 ```
 
 Optionally try adding full Guitar-TECHS without making it a hard dependency:
 
 ```bash
-python3 build_namtoclo_research_corpus_hf.py ~/NamtoCloResearchCorpus --with-guitar-techs
+python3 build_namtoclo_research_corpus_hf.py ~/NamtoCloArchive/NamtoCloResearchCorpus --with-guitar-techs
 ```
 
 The default build uses GuitarJam, EGFxSet Clean, GuitarSet pickup mix, four CC0

@@ -439,10 +439,10 @@ def main() -> int:
             "original NamToClo is optional baseline only."
         )
     )
-    parser.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
+    parser.add_argument("--teacher-root", default="~/NamtoCloArchive/NamtoCloTeacherDataset")
     parser.add_argument("--north-star-root", required=True)
     parser.add_argument("--original-root")
-    parser.add_argument("--output", default="~/NamtoCloNAMCenteredDiagnostics")
+    parser.add_argument("--output", default="~/NamtoCloArchive/NamtoCloNAMCenteredDiagnostics")
     parser.add_argument("--model-regex", required=True)
     parser.add_argument(
         "--role",

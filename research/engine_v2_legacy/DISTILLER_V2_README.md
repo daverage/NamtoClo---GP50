@@ -56,8 +56,8 @@ Example v1 G5 run:
 
 ```bash
 python3 train_namtoclo_north_star.py \
-  --teacher-root ~/NamtoCloTeacherDataset \
-  --output ~/NamtoCloNorthStar_JCM800_G5 \
+  --teacher-root ~/NamtoCloArchive/NamtoCloTeacherDataset \
+  --output ~/NamtoCloArchive/NamtoCloNorthStar_JCM800_G5 \
   --model-regex "^JCM800 2203 D\.I\. - G5 B5 M5 T5 P5 V5 - STD$" \
   --a-controls 24 \
   --rounds 3 \
@@ -112,8 +112,8 @@ Then run the first v2 G5 comparison:
 
 ```bash
 python3 train_namtoclo_north_star_v2.py \
-  --teacher-root ~/NamtoCloTeacherDataset \
-  --output ~/NamtoCloNorthStarV2_JCM800_G5 \
+  --teacher-root ~/NamtoCloArchive/NamtoCloTeacherDataset \
+  --output ~/NamtoCloArchive/NamtoCloNorthStarV2_JCM800_G5 \
   --model-regex "^JCM800 2203 D\.I\. - G5 B5 M5 T5 P5 V5 - STD$" \
   --a-controls 24 \
   --rounds 3 \
@@ -174,10 +174,10 @@ Example JC / JCM G3 / JCM G10 comparison:
 
 ```bash
 python3 evaluate_north_star_vs_original.py \
-  --teacher-root ~/NamtoCloTeacherDataset \
-  --original-root ~/NamtoCloOriginal_TestTriad \
-  --north-star-root ~/NamtoCloNorthStarV2_TestTriad \
-  --output ~/NamtoCloThreeWayEval \
+  --teacher-root ~/NamtoCloArchive/NamtoCloTeacherDataset \
+  --original-root ~/NamtoCloArchive/NamtoCloOriginal_TestTriad \
+  --north-star-root ~/NamtoCloArchive/NamtoCloNorthStarV2_TestTriad \
+  --output ~/NamtoCloArchive/NamtoCloThreeWayEval \
   --model-regex "^(Roland JC 120B Jazz Chorus: Bright Off, SM57|JCM800 2203 D\.I\. - G(3|10) B5 M5 T5 P5 V5 - STD)$" \
   --benchmark-count 3
 ```
@@ -203,8 +203,8 @@ Example legacy smoke run:
 
 ```bash
 python3 train_namtoclo_distiller.py \
-  --teacher-root ~/NamtoCloTeacherDataset \
-  --output ~/NamtoCloDistillerSmoke \
+  --teacher-root ~/NamtoCloArchive/NamtoCloTeacherDataset \
+  --output ~/NamtoCloArchive/NamtoCloDistillerSmoke \
   --model-regex "JC" \
   --fit-seconds 12 \
   --selection-seconds 8 \
@@ -231,7 +231,7 @@ Validate a generated file with the existing EngineV2 CLI, adjusting the binary p
 build directory:
 
 ```bash
-../../build-macos/namtoclo clo-info ~/NamtoCloNorthStarV2_JCM800_G5/.../NSV2__403887__*.clo
+../../build-macos/namtoclo clo-info ~/NamtoCloArchive/NamtoCloNorthStarV2_JCM800_G5/.../NSV2__403887__*.clo
 ```
 
 The decisive research comparison remains:

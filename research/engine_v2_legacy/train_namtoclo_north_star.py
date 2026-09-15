@@ -388,8 +388,8 @@ def main():
             "selection and benchmark are real-DI only."
         )
     )
-    p.add_argument("--teacher-root", default="~/NamtoCloTeacherDataset")
-    p.add_argument("--output", default="~/NamtoCloNorthStar")
+    p.add_argument("--teacher-root", default="~/NamtoCloArchive/NamtoCloTeacherDataset")
+    p.add_argument("--output", default="~/NamtoCloArchive/NamtoCloNorthStar")
     p.add_argument("--model-regex")
     p.add_argument("--list-models", action="store_true")
     p.add_argument("--fit-real", type=int, default=6)
