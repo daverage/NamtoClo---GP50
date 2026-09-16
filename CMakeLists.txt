@@ -391,7 +391,7 @@ if(WIN32)
     target_compile_features(ntc_gui PRIVATE cxx_std_20)
     target_compile_definitions(ntc_gui PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
     ntc_link_core(ntc_gui)
-    target_link_libraries(ntc_gui PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32 dwmapi)
+    target_link_libraries(ntc_gui PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32 dwmapi uxtheme)
 
     if(MSVC)
         target_compile_options(ntc_gui PRIVATE /W4 /WX- /permissive- /EHsc /utf-8 /fp:precise)

@@ -13,9 +13,11 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cwchar>
 #include <filesystem>
@@ -122,7 +124,7 @@ constexpr COLORREF kColorInfoBorderLight = RGB(210, 223, 247);
 constexpr COLORREF kColorWindowDark = RGB(32, 32, 32);
 constexpr COLORREF kColorCardDark = RGB(44, 44, 46);
 constexpr COLORREF kColorBorderDark = RGB(64, 64, 68);
-constexpr COLORREF kColorAccentDark_ = RGB(88, 150, 255);
+constexpr COLORREF kColorAccentPlainDark = RGB(88, 150, 255);
 constexpr COLORREF kColorAccentDarkDark = RGB(66, 128, 235);
 constexpr COLORREF kColorTextDark = RGB(235, 235, 240);
 constexpr COLORREF kColorSubtleTextDark = RGB(170, 175, 185);
@@ -201,6 +203,12 @@ HWND gT3kPreviewBrowse = nullptr;
 HWND gT3kIrWav = nullptr;
 HWND gT3kIrBrowse = nullptr;
 HWND gT3kIrClear = nullptr;
+// Owner-drawn buttons get no hover notification of their own -- a child
+// window directly under the cursor receives WM_MOUSEMOVE itself, it never
+// bubbles to the parent, so each button is subclassed (see
+// buttonHoverSubclassProc) to track this and drawButton() reads it to
+// render a hover fill/border.
+HWND gHoveredButton = nullptr;
 fs::path gT3kPreviewNam;
 fs::path gT3kPreviewWavPath;
 fs::path gT3kIrWavPath;
@@ -370,7 +378,7 @@ void applyThemeColors() {
     kColorWindow = gDarkMode ? kColorWindowDark : kColorWindowLight;
     kColorCard = gDarkMode ? kColorCardDark : kColorCardLight;
     kColorBorder = gDarkMode ? kColorBorderDark : kColorBorderLight;
-    kColorAccent = gDarkMode ? kColorAccentDark_ : kColorAccentLight;
+    kColorAccent = gDarkMode ? kColorAccentPlainDark : kColorAccentLight;
     kColorAccentDark = gDarkMode ? kColorAccentDarkDark : kColorAccentDarkLight;
     kColorText = gDarkMode ? kColorTextDark : kColorTextLight;
     kColorSubtleText = gDarkMode ? kColorSubtleTextDark : kColorSubtleTextLight;
@@ -390,6 +398,80 @@ void applyDarkTitlebar(HWND hwnd) {
     const BOOL enabled = gDarkMode ? TRUE : FALSE;
     if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled)))) {
         DwmSetWindowAttribute(hwnd, kDwmaUseImmersiveDarkModeOld, &enabled, sizeof(enabled));
+    }
+}
+
+// resources/icons/*.bmp are plain 24bpp BMPs with a solid white background
+// baked in behind the blue line art. Per-pixel-alpha compositing (both
+// TransparentBlt and AlphaBlend were tried) rendered as a fully opaque
+// white square in this environment instead of showing the card underneath
+// -- rather than chase that further, this bakes a plain, fully opaque
+// recolor of the white background to the *current* card color once at
+// startup and again on every theme switch, so drawSectionIcon() can use a
+// plain BitBlt (no blend API, nothing that depends on driver alpha support).
+HBITMAP recolorIconBackground(HBITMAP src, COLORREF bgColor) {
+    if (!src) return nullptr;
+    BITMAP bm{};
+    GetObjectW(src, sizeof(bm), &bm);
+
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = bm.bmWidth;
+    bi.bmiHeader.biHeight = -bm.bmHeight; // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    // GetDIBits requires src not be selected into the DC passed to it, so
+    // use the screen DC directly rather than a DC with src selected.
+    std::vector<uint32_t> srcPixels(static_cast<size_t>(bm.bmWidth) * bm.bmHeight);
+    HDC screenDc = GetDC(nullptr);
+    const int scanLines = GetDIBits(screenDc, src, 0, bm.bmHeight, srcPixels.data(), &bi, DIB_RGB_COLORS);
+    if (scanLines == 0) {
+        ReleaseDC(nullptr, screenDc);
+        return nullptr;
+    }
+
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(screenDc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, screenDc);
+    if (!dib || !bits) return nullptr;
+
+    const BYTE bgR = GetRValue(bgColor);
+    const BYTE bgG = GetGValue(bgColor);
+    const BYTE bgB = GetBValue(bgColor);
+    auto* out = reinterpret_cast<uint32_t*>(bits);
+    for (size_t i = 0; i < srcPixels.size(); ++i) {
+        const uint32_t px = srcPixels[i];
+        const BYTE r = static_cast<BYTE>((px >> 16) & 0xFF);
+        const BYTE g = static_cast<BYTE>((px >> 8) & 0xFF);
+        const BYTE b = static_cast<BYTE>(px & 0xFF);
+        // The icon art's "background" is actually two tones: a pure white
+        // (255,255,255) outer canvas and a light blue-white (244,248,255)
+        // rounded badge fill -- both need recoloring, not just pure white,
+        // so use a generous "light enough to be background" threshold well
+        // clear of the icon glyphs' own blue (e.g. RGB(46,115,233)).
+        if (r > 220 && g > 220 && b > 220) {
+            out[i] = (0xFFu << 24) | (static_cast<uint32_t>(bgR) << 16) | (static_cast<uint32_t>(bgG) << 8) | bgB;
+        } else {
+            out[i] = (0xFFu << 24) | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | b;
+        }
+    }
+    return dib;
+}
+
+// The unmodified icon bitmaps (loaded once, never recolored -- source for
+// recolorIconBackground on every theme switch). gSectionIcons[] holds the
+// current theme's recolored, plain-opaque version that drawSectionIcon()
+// actually draws.
+HBITMAP gSectionIconsRaw[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
+
+void regenerateSectionIcons() {
+    for (int i = 0; i < 5; ++i) {
+        HBITMAP recolored = recolorIconBackground(gSectionIconsRaw[i], kColorCard);
+        if (!recolored) continue;
+        safeDeleteObject(gSectionIcons[i]);
+        gSectionIcons[i] = recolored;
     }
 }
 
@@ -417,11 +499,12 @@ void createResources() {
 
     HINSTANCE instance = GetModuleHandleW(nullptr);
     gLogoBitmap = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_LOGO));
-    gSectionIcons[0] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_INPUT));
-    gSectionIcons[1] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_OUTPUT));
-    gSectionIcons[2] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_STIMULUS));
-    gSectionIcons[3] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_REAMP));
-    gSectionIcons[4] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_RECORDED));
+    gSectionIconsRaw[0] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_INPUT));
+    gSectionIconsRaw[1] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_OUTPUT));
+    gSectionIconsRaw[2] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_STIMULUS));
+    gSectionIconsRaw[3] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_REAMP));
+    gSectionIconsRaw[4] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_RECORDED));
+    regenerateSectionIcons();
 }
 
 void destroyResources() {
@@ -440,6 +523,10 @@ void destroyResources() {
         safeDeleteObject(icon);
         icon = nullptr;
     }
+    for (auto& icon : gSectionIconsRaw) {
+        safeDeleteObject(icon);
+        icon = nullptr;
+    }
     gFont = gTitleFont = gSubtitleFont = gSectionFont = nullptr;
     gWindowBrush = gCardBrush = gFooterBrush = gInfoBrush = gStatusBrush = nullptr;
 }
@@ -449,6 +536,20 @@ void applyFont(HWND h, HFONT font) {
 }
 
 void applyFont(HWND h) { applyFont(h, gFont); }
+
+// Applies (or clears) the "DarkMode_Explorer" visual-style theme to the
+// native comctl32 controls that don't otherwise pick up dark mode: the tab
+// strip's own chrome, and each dropdown's closed-state display area. This is
+// the standard public-API mechanism apps use for partial dark theming of
+// these controls (no owner-draw rewrite); nullptr resets to the default
+// Explorer theme for light mode.
+void applyControlThemes() {
+    const wchar_t* themeName = gDarkMode ? L"DarkMode_Explorer" : nullptr;
+    for (HWND h : { gBackendTabs, gTailCombo, gRefineModeCombo, gUploaderSlotCombo,
+                     gGp5SlotCombo, gT3kSort, gT3kModels }) {
+        if (h) SetWindowTheme(h, themeName, nullptr);
+    }
+}
 
 // Re-reads the OS theme, recomputes the gColor* globals, rebuilds the small
 // set of theme-dependent brushes, and re-syncs the titlebar. Called from
@@ -473,6 +574,8 @@ void refreshThemeColors(HWND hwnd) {
     gStatusBrush = CreateSolidBrush(kColorStatusOk);
 
     applyDarkTitlebar(hwnd);
+    applyControlThemes();
+    regenerateSectionIcons();
     InvalidateRect(hwnd, nullptr, TRUE);
 }
 
@@ -1547,13 +1650,13 @@ void moveCtrl(HWND h, int x, int y, int w, int hgt) {
 }
 
 void computeLayout(int clientW, int clientH) {
-    const int margin = 24;
-    const int gap = 7;
+    const int margin = 28;
+    const int gap = 16;
     const int footerH = 38;
 
     gUi.header = RECT{ margin, 12, clientW - margin, 124 };
 
-    int y = 128;
+    int y = 132;
     gUi.sectionInput = RECT{ margin, y, clientW - margin, y + 76 }; y += 76 + gap;
     gUi.sectionOutput = RECT{ margin, y, clientW - margin, y + 70 }; y += 70 + gap;
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
@@ -1570,8 +1673,8 @@ void computeLayout(int clientW, int clientH) {
 
 // Minimum client size needed so no section, the button row, or the footer
 // ever overlaps — mirrors computeLayout's fixed vertical math.
-constexpr int kMinClientWidth = 960;
-constexpr int kMinClientHeight = 128 + (76 + 70 + 66 + 105 + 86 + 134) + 6 * 7 + 38 + 16 + 38 + 16;
+constexpr int kMinClientWidth = 968;
+constexpr int kMinClientHeight = 132 + (76 + 70 + 66 + 105 + 86 + 134) + 6 * 16 + 38 + 16 + 38 + 16;
 
 void layoutControls(HWND hwnd) {
     RECT rc{};
@@ -1698,6 +1801,54 @@ void createSectionLabel(HWND hwnd, int id, const wchar_t* text) {
     applyFont(h, gSectionFont);
 }
 
+// Subclasses every owner-drawn (BS_OWNERDRAW) BUTTON child so it can track
+// its own hover state directly -- mouse messages go to whichever window is
+// topmost under the cursor, never to the parent, so this can't be done from
+// wndProc alone. Updates gHoveredButton and invalidates just the affected
+// button(s); drawButton() reads gHoveredButton to render the hover state.
+LRESULT CALLBACK buttonHoverSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                          UINT_PTR uIdSubclass, DWORD_PTR) {
+    switch (msg) {
+    case WM_MOUSEMOVE:
+        if (gHoveredButton != hwnd) {
+            HWND old = gHoveredButton;
+            gHoveredButton = hwnd;
+            // UpdateWindow forces the repaint through synchronously instead
+            // of waiting for the next natural WM_PAINT dispatch, for the
+            // most immediate possible hover feedback.
+            if (old) { InvalidateRect(old, nullptr, TRUE); UpdateWindow(old); }
+            InvalidateRect(hwnd, nullptr, TRUE);
+            UpdateWindow(hwnd);
+        }
+        {
+            TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tme);
+        }
+        break;
+    case WM_MOUSELEAVE:
+        if (gHoveredButton == hwnd) {
+            gHoveredButton = nullptr;
+            InvalidateRect(hwnd, nullptr, TRUE);
+            UpdateWindow(hwnd);
+        }
+        break;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, buttonHoverSubclassProc, uIdSubclass);
+        break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+BOOL CALLBACK subclassOwnerDrawButtonsEnumProc(HWND child, LPARAM) {
+    wchar_t className[32]{};
+    GetClassNameW(child, className, static_cast<int>(sizeof(className) / sizeof(className[0])));
+    if (_wcsicmp(className, L"Button") == 0
+        && (GetWindowLongPtrW(child, GWL_STYLE) & 0xF) == BS_OWNERDRAW) {
+        SetWindowSubclass(child, buttonHoverSubclassProc, 1, 0);
+    }
+    return TRUE;
+}
+
 void createUi(HWND hwnd) {
     createResources();
 
@@ -1737,7 +1888,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1009, L"Tone Match");
     createSectionLabel(hwnd, 1010, L"Reference audio (Auto picks by gain; Custom uses your own WAV, first 20 s)");
 
-    gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+    gInputEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
     applyFont(gInputEdit);
     gLoadFileButton = CreateWindowW(L"BUTTON", L"Load NAM...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -1745,7 +1896,7 @@ void createUi(HWND hwnd) {
     gLoadFolderButton = CreateWindowW(L"BUTTON", L"Load Folder...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                       0, 0, 120, 34, hwnd, controlId(IDC_LOAD_FOLDER), nullptr, nullptr);
 
-    gOutEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+    gOutEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                0, 0, 100, 30, hwnd, controlId(IDC_OUTPUT_PATH), nullptr, nullptr);
     applyFont(gOutEdit);
     gBrowseButton = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -1761,7 +1912,7 @@ void createUi(HWND hwnd) {
     }
     SendMessageW(gTailCombo, CB_SETCURSEL, 0, 0);
 
-    gRecordedEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+    gRecordedEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                     0, 0, 100, 30, hwnd, controlId(IDC_RECORDED_PATH), nullptr, nullptr);
     applyFont(gRecordedEdit);
     gBrowseRecordedButton = CreateWindowW(L"BUTTON", L"Browse WAV...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -1771,7 +1922,7 @@ void createUi(HWND hwnd) {
                                      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                      0, 0, 170, 24, hwnd, controlId(IDC_APPLY_CORRECTIVE_IR), nullptr, nullptr);
     applyFont(gCorrectiveCheck);
-    gCorrectiveEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+    gCorrectiveEdit = CreateWindowExW(0, L"EDIT", L"",
                                       WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                       0, 0, 100, 30, hwnd, controlId(IDC_CORRECTIVE_IR_PATH), nullptr, nullptr);
     applyFont(gCorrectiveEdit);
@@ -1793,7 +1944,7 @@ void createUi(HWND hwnd) {
         SendMessageW(gRefineModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
     }
     SendMessageW(gRefineModeCombo, CB_SETCURSEL, 1, 0); // Auto by default
-    gRefineTargetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+    gRefineTargetEdit = CreateWindowExW(0, L"EDIT", L"",
                                         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                         0, 0, 100, 30, hwnd, controlId(IDC_REFINE_TARGET_PATH), nullptr, nullptr);
     applyFont(gRefineTargetEdit);
@@ -1806,7 +1957,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1013, L"USB MIDI device");
     createSectionLabel(hwnd, 1014, L"Transfer progress");
 
-    gUploaderCloEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+    gUploaderCloEdit = CreateWindowExW(0, L"EDIT", L"",
                                        WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
                                        0, 0, 100, 30, hwnd, controlId(IDC_UPLOADER_CLO_PATH), nullptr, nullptr);
     applyFont(gUploaderCloEdit);
@@ -1841,7 +1992,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1017, L"USB MIDI device");
     createSectionLabel(hwnd, 1018, L"Transfer progress");
 
-    gGp5CloEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+    gGp5CloEdit = CreateWindowExW(0, L"EDIT", L"",
                                   WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
                                   0, 0, 100, 30, hwnd, controlId(IDC_GP5_CLO_PATH), nullptr, nullptr);
     applyFont(gGp5CloEdit);
@@ -1870,7 +2021,7 @@ void createUi(HWND hwnd) {
     applyFont(gGp5DeleteButton);
 
     createSectionLabel(hwnd, 1030, L"Publishable API key");
-    gT3kKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
+    gT3kKey = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
                               0, 0, 0, 0, hwnd, controlId(IDC_T3K_KEY), nullptr, nullptr);
     applyFont(gT3kKey);
     gT3kConnect = CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | BS_OWNERDRAW,
@@ -1878,7 +2029,7 @@ void createUi(HWND hwnd) {
     applyFont(gT3kConnect);
 
     createSectionLabel(hwnd, 1031, L"Search NAM captures");
-    gT3kSearch = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
+    gT3kSearch = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
                                  0, 0, 0, 0, hwnd, controlId(IDC_T3K_SEARCH), nullptr, nullptr);
     applyFont(gT3kSearch);
     gT3kSearchButton = CreateWindowW(L"BUTTON", L"Search", WS_CHILD | BS_OWNERDRAW,
@@ -1918,7 +2069,7 @@ void createUi(HWND hwnd) {
     applyFont(gT3kState);
 
     createSectionLabel(hwnd, 1034, L"Cabinet IR");
-    gT3kIrWav = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
+    gT3kIrWav = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
                                 0, 0, 0, 0, hwnd, controlId(IDC_T3K_IR_WAV), nullptr, nullptr);
     applyFont(gT3kIrWav);
     gT3kIrBrowse = CreateWindowW(L"BUTTON", L"Browse IR...", WS_CHILD | BS_OWNERDRAW,
@@ -1930,7 +2081,7 @@ void createUi(HWND hwnd) {
     EnableWindow(gT3kIrClear, FALSE);
 
     createSectionLabel(hwnd, 1035, L"Preview WAV");
-    gT3kPreviewWav = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
+    gT3kPreviewWav = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
                                      0, 0, 0, 0, hwnd, controlId(IDC_T3K_PREVIEW_WAV), nullptr, nullptr);
     applyFont(gT3kPreviewWav);
     gT3kPreviewBrowse = CreateWindowW(L"BUTTON", L"Browse WAV...", WS_CHILD | BS_OWNERDRAW,
@@ -1984,6 +2135,8 @@ void createUi(HWND hwnd) {
     layoutControls(hwnd);
     updateBackendUi();
     updateTailControls();
+    applyControlThemes();
+    EnumChildWindows(hwnd, subclassOwnerDrawButtonsEnumProc, 0);
     DragAcceptFiles(hwnd, TRUE);
 }
 
@@ -2022,7 +2175,14 @@ void drawSectionIcon(HDC hdc, const RECT& rc, int kind) {
     GetObjectW(gSectionIcons[kind], sizeof(bm), &bm);
     const int x = rc.left + ((rc.right - rc.left) - bm.bmWidth) / 2;
     const int y = rc.top + ((rc.bottom - rc.top) - bm.bmHeight) / 2;
-    drawBitmap(hdc, gSectionIcons[kind], x, y);
+    // gSectionIcons[] holds the current theme's recolored, opaque version
+    // (see regenerateSectionIcons) so a plain BitBlt already matches the
+    // section card's own fill -- no transparency API involved.
+    HDC mem = CreateCompatibleDC(hdc);
+    HGDIOBJ old = SelectObject(mem, gSectionIcons[kind]);
+    BitBlt(hdc, x, y, bm.bmWidth, bm.bmHeight, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteDC(mem);
 }
 
 void drawSectionCard(HDC hdc, const RECT& rc, int iconKind) {
@@ -2047,6 +2207,36 @@ void drawInfoBox(HDC hdc) {
     DeleteObject(pen);
 }
 
+// Read-only path/text EDIT controls are created without WS_EX_CLIENTEDGE
+// (see createUi) so they don't get the classic sunken 3D border; this draws
+// a flat 1px outline just outside the control's own rect instead, matching
+// the flat Win11-style look used elsewhere (cards, buttons). Skips controls
+// that are currently hidden (inactive tab) or not yet created.
+void drawEditBorder(HDC hdc, HWND edit) {
+    if (!edit || !IsWindowVisible(edit)) return;
+    RECT rc{};
+    GetWindowRect(edit, &rc);
+    POINT tl{ rc.left, rc.top };
+    POINT br{ rc.right, rc.bottom };
+    HWND parent = GetParent(edit);
+    ScreenToClient(parent, &tl);
+    ScreenToClient(parent, &br);
+    HPEN pen = CreatePen(PS_SOLID, 1, kColorBorder);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    Rectangle(hdc, tl.x - 1, tl.y - 1, br.x + 1, br.y + 1);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+void drawAllEditBorders(HDC hdc) {
+    for (HWND h : { gInputEdit, gOutEdit, gRecordedEdit, gCorrectiveEdit, gRefineTargetEdit,
+                     gUploaderCloEdit, gGp5CloEdit, gT3kKey, gT3kSearch, gT3kIrWav, gT3kPreviewWav }) {
+        drawEditBorder(hdc, h);
+    }
+}
+
 void paintBackground(HWND hwnd, HDC hdc) {
     RECT rc{};
     GetClientRect(hwnd, &rc);
@@ -2065,6 +2255,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
         drawSectionCard(hdc, gUi.sectionRefine, 2);
         drawInfoBox(hdc);
     }
+    drawAllEditBorders(hdc);
     fillRect(hdc, gUi.footer, kColorFooter);
 
     RECT statusDot{ 18, gUi.footer.top + 9, 32, gUi.footer.top + 23 };
@@ -2083,11 +2274,18 @@ void drawButton(DRAWITEMSTRUCT* dis) {
     const int id = static_cast<int>(dis->CtlID);
     const bool primary = id == IDC_CONVERT || id == IDC_UPLOADER_UPLOAD || id == IDC_GP5_UPLOAD;
 
-    // Flat Windows-11-style fill/border/text per state. "selected" here is
-    // ODS_SELECTED, i.e. pressed -- used as the one hover/press color shift
-    // this owner-draw button gets (no separate mouse-hover tracking).
-    COLORREF fill = primary ? (selected ? kColorAccentDark : kColorAccent) : (selected ? kColorFooter : kColorCard);
-    COLORREF border = primary ? kColorAccentDark : (selected ? kColorAccentDark : kColorBorder);
+    const bool hovered = !disabled && dis->hwndItem == gHoveredButton;
+
+    // Flat Windows-11-style fill/border/text per state. "selected" is
+    // ODS_SELECTED (pressed); "hovered" comes from WM_MOUSEMOVE tracking in
+    // wndProc, since owner-draw buttons get no hover notification on their own.
+    COLORREF fill = primary ? (selected ? kColorAccentDark : kColorAccent)
+                             : (selected ? kColorFooter : (hovered ? kColorFooter : kColorCard));
+    // Secondary buttons keep a visible blue outline while enabled (hover
+    // darkens it slightly), and drop to the neutral border color only when
+    // disabled -- restores the enabled/disabled outline distinction that was
+    // lost when this button style was flattened.
+    COLORREF border = primary ? kColorAccentDark : (selected || hovered ? kColorAccentDark : kColorAccent);
     COLORREF text = primary ? RGB(255, 255, 255) : kColorAccentDark;
     if (disabled) {
         fill = primary ? kColorDisabled : kColorCard;
@@ -2138,8 +2336,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     case WM_SETTINGCHANGE: {
-        // Fired (among other things) when the user flips Settings > Personalization
-        // > Colors > "Choose your mode" without restarting the app.
+        // Fired for many unrelated system settings changes, not just a theme
+        // toggle; Windows tags the theme-change broadcast with this specific
+        // string in lParam, so skip the registry read/DWM call otherwise.
+        if (lParam == 0 || _wcsicmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") != 0) {
+            break;
+        }
         refreshThemeColors(hwnd);
         break;
     }
@@ -2192,6 +2394,20 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             || ctrl == GetDlgItem(hwnd, 1033) || ctrl == GetDlgItem(hwnd, 1034) || ctrl == GetDlgItem(hwnd, 1035)
             || ctrl == GetDlgItem(hwnd, 1036) || ctrl == gT3kPageLabel) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
+            return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+        }
+        break;
+    }
+    case WM_CTLCOLORBTN: {
+        // Native BS_AUTOCHECKBOX controls (Corrective IR / Tone Match) aren't
+        // owner-drawn; without this, DefWindowProc paints their label
+        // background with COLOR_BTNFACE, showing as a light box in dark mode.
+        // The small checkbox glyph itself stays OS-themed either way.
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND ctrl = reinterpret_cast<HWND>(lParam);
+        if (ctrl == gCorrectiveCheck || ctrl == gRefineCheck) {
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
         break;
