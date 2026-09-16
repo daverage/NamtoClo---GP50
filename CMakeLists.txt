@@ -344,7 +344,7 @@ if(WIN32)
         src/gui/resources.rc
         src/gui/resource.h
     )
-    target_include_directories(NamToClo PRIVATE src/gui)
+    target_include_directories(NamToClo PRIVATE src/gui src/platform/windows)
     target_compile_features(NamToClo PRIVATE cxx_std_20)
     target_compile_definitions(NamToClo PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
     ntc_link_core(NamToClo)
