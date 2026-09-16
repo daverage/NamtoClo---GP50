@@ -295,21 +295,6 @@ ntc_link_core(namtoclo)
 target_compile_features(namtoclo PRIVATE cxx_std_20)
 install(TARGETS namtoclo RUNTIME DESTINATION .)
 
-# Windows filesystems are case-insensitive, so "namtoclo.exe" and the GUI's
-# "NamToClo.exe" (below) would otherwise collide as the same file in a
-# shared output directory -- whichever target finished building last would
-# silently overwrite the other's executable. Give the CLI its own
-# subdirectory on Windows only (macOS has no GUI target to collide with, so
-# this is a no-op there); each target's own executable directory is still
-# where nam_input_wav.wav/reference_clips get copied (see
-# ntc_copy_runtime_resources above), so this doesn't break resource lookup.
-if(WIN32)
-    set_target_properties(namtoclo PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/cli/Release"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/cli/Debug"
-        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/cli/RelWithDebInfo"
-        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/cli/MinSizeRel")
-endif()
 
 # Both the CLI and the Windows GUI resolve nam_input_wav.wav and
 # resources/reference_clips relative to their own executable path (see
@@ -352,27 +337,38 @@ add_test(NAME gp5_protocol_test COMMAND ntc_gp5_protocol_test)
 
 # --------------------------------------------------------------------------
 # NamToClo.exe: the existing Win32 GUI. Windows-only; unchanged behavior.
+#
+# CMake target name is "ntc_gui", NOT "NamToClo" -- Windows filesystems are
+# case-insensitive, so a target literally named "NamToClo" generates a
+# "NamToClo.vcxproj" that collides with the CLI's "namtoclo.vcxproj" (see the
+# "namtoclo" target above), silently clobbering one project file with the
+# other at CMake-generate time (not just an output-binary collision, which
+# is a much harder bug to spot: the build "succeeds" but produces the wrong
+# executable under whichever name you asked for). OUTPUT_NAME below keeps
+# the actual shipped file "NamToClo.exe", matching all existing docs/CI/
+# release packaging -- only the internal CMake target identity changed.
 # --------------------------------------------------------------------------
 
 if(WIN32)
-    add_executable(NamToClo WIN32
+    add_executable(ntc_gui WIN32
         src/gui/gui.cpp
         src/gui/resources.rc
         src/gui/resource.h
     )
-    target_include_directories(NamToClo PRIVATE src/gui src/platform/windows)
-    target_compile_features(NamToClo PRIVATE cxx_std_20)
-    target_compile_definitions(NamToClo PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-    ntc_link_core(NamToClo)
-    target_link_libraries(NamToClo PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32)
+    set_target_properties(ntc_gui PROPERTIES OUTPUT_NAME "NamToClo")
+    target_include_directories(ntc_gui PRIVATE src/gui src/platform/windows)
+    target_compile_features(ntc_gui PRIVATE cxx_std_20)
+    target_compile_definitions(ntc_gui PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    ntc_link_core(ntc_gui)
+    target_link_libraries(ntc_gui PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32)
 
     if(MSVC)
-        target_compile_options(NamToClo PRIVATE /W4 /WX- /permissive- /EHsc /utf-8 /fp:precise)
-        set_property(TARGET NamToClo PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(ntc_gui PRIVATE /W4 /WX- /permissive- /EHsc /utf-8 /fp:precise)
+        set_property(TARGET ntc_gui PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 
-    install(TARGETS NamToClo RUNTIME DESTINATION .)
-    ntc_copy_runtime_resources(NamToClo)
+    install(TARGETS ntc_gui RUNTIME DESTINATION .)
+    ntc_copy_runtime_resources(ntc_gui)
 endif()
 
 install(FILES README.md LICENSE THIRD_PARTY.md DESTINATION .)
