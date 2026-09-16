@@ -9,10 +9,12 @@
 // Implementation:
 //   src/platform/macos/net_client_mac.mm   (NSURLSession / CommonCrypto /
 //                                            NSWorkspace / BSD sockets /
-//                                            Keychain)
-// There is no Windows implementation yet (see CLAUDE.md "macOS port" /
-// README); the Tone3000 CLI commands that use this seam are gated
-// APPLE-only in CMakeLists.txt until one is added.
+//                                            a private file under
+//                                            Application Support for secret
+//                                            storage -- see saveSecret below)
+//   src/platform/windows/net_client_win.cpp (WinHTTP / BCrypt / Winsock /
+//                                            ShellExecute / registry +
+//                                            CryptProtectData)
 
 #include <cstddef>
 #include <cstdint>
@@ -48,9 +50,12 @@ bool openUrlInSystemBrowser(const std::string& url);
 // timeoutSeconds.
 bool waitForLocalOAuthCallback(std::uint16_t port, int timeoutSeconds, std::string& requestTarget, std::string& error);
 
-// Small named-secret store (macOS Keychain). `name` is an opaque key (e.g.
-// "tone3000.publishableKey", "tone3000.refreshToken"); no value is ever
-// logged or echoed back in --json output by callers.
+// Small named-secret store (a private file under Application Support on
+// macOS, the registry + CryptProtectData on Windows -- see each platform's
+// implementation for why Keychain/DPAPI-alternative tradeoffs were made).
+// `name` is an opaque key (e.g. "tone3000.publishableKey",
+// "tone3000.refreshToken"); no value is ever logged or echoed back in
+// --json output by callers.
 bool saveSecret(const std::string& name, const std::string& value);
 bool loadSecret(const std::string& name, std::string& value);
 bool deleteSecret(const std::string& name);

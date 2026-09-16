@@ -2,30 +2,57 @@
 
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
-#import <Security/Security.h>
+#import <Security/Security.h> // still used for SecRandomCopyBytes (PKCE verifier)
 #include <CommonCrypto/CommonDigest.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <fstream>
 #include <vector>
 
 // macOS implementation of the src/core/net_client.hpp seam used by
 // tone3000_client.cpp -- see the tone3000 integration plan. Uses only
-// system frameworks (Foundation/NSURLSession, Security.framework Keychain
-// and SecRandomCopyBytes, CommonCrypto) plus BSD sockets for the local
-// OAuth callback listener; no new third-party dependency.
+// system frameworks (Foundation/NSURLSession, SecRandomCopyBytes, CommonCrypto)
+// plus BSD sockets for the local OAuth callback listener; no new third-party
+// dependency.
+//
+// Secrets (Tone3000 publishable key / OAuth refresh token) are stored as
+// plain files under ~/Library/Application Support/NamToClo/tone3000, not in
+// the Keychain: an ad-hoc-signed, frequently-rebuilt dev binary gets a new
+// code signature on every build, and macOS treats that as a different app
+// asking for Keychain access each time, triggering a repeated OS prompt.
+// These are OAuth refresh tokens for a third-party tone-sharing site, not
+// system credentials, so a user-only-readable (0600) file is an acceptable
+// tradeoff for not re-prompting on every rebuild.
 
 namespace ntc::net {
 namespace {
 
-constexpr const char* kKeychainService = "com.namtoclo.tone3000";
+NSString* secretsDirectory() {
+    NSArray<NSString*>* paths =
+        NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+    NSString* base = paths.firstObject ?: NSTemporaryDirectory();
+    NSString* dir = [base stringByAppendingPathComponent:@"NamToClo/tone3000"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                               withIntermediateDirectories:YES
+                                                attributes:nil
+                                                     error:nil];
+    return dir;
+}
+
+NSString* secretPath(const std::string& name) {
+    NSString* account = [NSString stringWithUTF8String:name.c_str()];
+    return [secretsDirectory() stringByAppendingPathComponent:account];
+}
 
 std::string base64UrlFromData(NSData* data) {
     NSString* b64 = [data base64EncodedStringWithOptions:0];
@@ -169,50 +196,28 @@ bool waitForLocalOAuthCallback(std::uint16_t port, int timeoutSeconds, std::stri
 }
 
 bool saveSecret(const std::string& name, const std::string& value) {
-    NSString* service = [NSString stringWithUTF8String:kKeychainService];
-    NSString* account = [NSString stringWithUTF8String:name.c_str()];
-    NSData* data = [NSData dataWithBytes:value.data() length:value.size()];
-
-    NSDictionary* query = @{
-        (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService : service,
-        (__bridge id)kSecAttrAccount : account,
-    };
-    SecItemDelete((__bridge CFDictionaryRef)query);
-
-    NSMutableDictionary* item = [query mutableCopy];
-    item[(__bridge id)kSecValueData] = data;
-    item[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
-    return SecItemAdd((__bridge CFDictionaryRef)item, nullptr) == errSecSuccess;
+    NSString* path = secretPath(name);
+    std::ofstream out(path.UTF8String, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(value.data(), static_cast<std::streamsize>(value.size()));
+    if (!out) return false;
+    out.close();
+    chmod(path.UTF8String, S_IRUSR | S_IWUSR);
+    return true;
 }
 
 bool loadSecret(const std::string& name, std::string& value) {
-    NSString* service = [NSString stringWithUTF8String:kKeychainService];
-    NSString* account = [NSString stringWithUTF8String:name.c_str()];
-    NSDictionary* query = @{
-        (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService : service,
-        (__bridge id)kSecAttrAccount : account,
-        (__bridge id)kSecReturnData : @YES,
-        (__bridge id)kSecMatchLimit : (__bridge id)kSecMatchLimitOne,
-    };
-    CFTypeRef result = nullptr;
-    if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &result) != errSecSuccess || !result) return false;
-    NSData* data = (__bridge_transfer NSData*)result;
-    value.assign(static_cast<const char*>(data.bytes), data.length);
+    NSString* path = secretPath(name);
+    std::ifstream in(path.UTF8String, std::ios::binary);
+    if (!in) return false;
+    value.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     return true;
 }
 
 bool deleteSecret(const std::string& name) {
-    NSString* service = [NSString stringWithUTF8String:kKeychainService];
-    NSString* account = [NSString stringWithUTF8String:name.c_str()];
-    NSDictionary* query = @{
-        (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService : service,
-        (__bridge id)kSecAttrAccount : account,
-    };
-    const OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
-    return status == errSecSuccess || status == errSecItemNotFound;
+    NSString* path = secretPath(name);
+    const int result = std::remove(path.UTF8String);
+    return result == 0 || errno == ENOENT;
 }
 
 } // namespace ntc::net

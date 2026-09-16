@@ -61,8 +61,9 @@ final class AppState: ObservableObject {
 
     // Tone3000 (macOS-only -- see net_client.hpp / tone3000_client.cpp).
     // `tone3000Connected == nil` means "not checked yet this launch"; the
-    // publishable key/refresh token themselves live in the macOS Keychain
-    // (namtoclo tone3000 login/status), not here -- this is UI state only.
+    // publishable key/refresh token themselves live in a private file under
+    // Application Support (namtoclo tone3000 login/status), not here -- this
+    // is UI state only.
     @Published var tone3000Connected: Bool?
     @Published var tone3000IsBusy = false // covers status/login/logout
     @Published var tone3000Error: BackendError?
