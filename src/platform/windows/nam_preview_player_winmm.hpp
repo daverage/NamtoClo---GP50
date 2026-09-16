@@ -1,0 +1,58 @@
+#pragma once
+
+// Real-time NAM + cabinet-IR preview playback for the Windows GUI's
+// Tone3000 tab, built directly on WinMM (waveOut*). Ported from upstream
+// NamToClo's nam_preview_player.hpp/.cpp -- see CLAUDE.md's Tone3000
+// integration notes. This is a standalone, Windows-only class the GUI
+// includes directly; it deliberately does NOT implement a platform.hpp-style
+// cross-platform seam since nothing else in this codebase calls into it
+// (macOS instead uses the simpler offline src/core/tone3000_preview.cpp
+// renderer, played back via the OS's own player).
+
+#include <filesystem>
+#include <memory>
+#include <string>
+
+namespace ntc {
+
+class NamPreviewPlayer {
+public:
+    NamPreviewPlayer();
+    ~NamPreviewPlayer();
+
+    NamPreviewPlayer(const NamPreviewPlayer&) = delete;
+    NamPreviewPlayer& operator=(const NamPreviewPlayer&) = delete;
+
+    // Loads the source WAV into RAM, adapts it to the NAM sample rate and loads
+    // the NAM DSP. No processed preview WAV is generated.
+    bool load(const std::filesystem::path& namPath,
+              const std::filesystem::path& sourceWav,
+              const std::filesystem::path& irWav,
+              std::string& error);
+
+    // Backward-compatible overload: preview without a cabinet IR.
+    bool load(const std::filesystem::path& namPath,
+              const std::filesystem::path& sourceWav,
+              std::string& error) {
+        return load(namPath, sourceWav, std::filesystem::path{}, error);
+    }
+
+    // Starts block-by-block realtime playback through the already loaded NAM.
+    bool play(std::string& error);
+    void stop();
+
+    // Linear post-NAM/post-IR preview gain. 0.0 = mute, 1.0 = unity.
+    void setOutputGain(float gain);
+
+    bool ready() const;
+    bool playing() const;
+    int sampleRate() const;
+    bool irLoaded() const;
+    int irOriginalSampleRate() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace ntc

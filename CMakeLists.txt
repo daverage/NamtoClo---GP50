@@ -202,9 +202,26 @@ if(WIN32)
     target_sources(namtoclo_core PRIVATE
         src/platform/windows/platform_win.cpp
         src/platform/windows/midi_transport_winmm.cpp
+        # Tone3000 client (src/core, portable) needs a Windows implementation
+        # of the net_client.hpp seam -- see net_client_win.cpp's header
+        # comment. Only the Windows GUI (NamToClo) currently calls into
+        # ntc::tone3000::Client, but this lives in namtoclo_core rather than
+        # directly in the NamToClo target so it follows the same pattern as
+        # the macOS APPLE branch below.
+        src/platform/windows/net_client_win.cpp
+        src/core/net_client.hpp
+        src/core/tone3000_client.cpp
+        src/core/tone3000_client.hpp
+        # Real-time NAM+cabinet-IR preview player for the Windows GUI's
+        # Tone3000 tab (see CLAUDE.md's Tone3000 integration notes). WinMM-
+        # only, Windows-specific; no platform.hpp-style cross-platform seam
+        # is needed since nothing else calls into it (macOS instead uses the
+        # simpler offline tone3000_preview.cpp renderer).
+        src/platform/windows/nam_preview_player_winmm.cpp
+        src/platform/windows/nam_preview_player_winmm.hpp
     )
     target_compile_definitions(namtoclo_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-    target_link_libraries(namtoclo_core PUBLIC winmm)
+    target_link_libraries(namtoclo_core PUBLIC winmm winhttp bcrypt crypt32 ws2_32)
 elseif(APPLE)
     target_sources(namtoclo_core PRIVATE
         src/platform/macos/platform_mac.cpp
