@@ -4,6 +4,8 @@
 
 Cross-platform application for converting Neural Amp Modeler (`.nam`) models to CLO files and uploading CLO files directly to Valeton GP-200, GP-5 and GP-50 devices over USB MIDI. Ships as a Windows x64 GUI (`NamToClo.exe`) and a native macOS app for Apple Silicon (`NamToClo.app`, wrapping a `namtoclo` CLI) — see [macOS (Apple Silicon)](#macos-apple-silicon) below.
 
+![NamToClo macOS Convert tab](resources/screenshots/macos_convert_tab.png)
+
 The Windows GUI has three tabs:
 
 - **Convert to CLO** — convert one NAM model or every NAM model in a folder.
@@ -535,6 +537,7 @@ The CLI is generated at `build-macos/namtoclo`, with `nam_input_wav.wav` and
 ./build-macos/namtoclo convert amp.nam --output out/          # NAM -> GP-200 and GP-5/GP-50 CLO
 ./build-macos/namtoclo midi-list                               # detect a connected GP-5/GP-50 over CoreMIDI
 ./build-macos/namtoclo slots                                   # read on-device SnapTone catalogue (names)
+./build-macos/namtoclo slots --slot 57 --delete                # clear a SnapTone slot back to "Empty"
 ./build-macos/namtoclo upload out/amp_..._GP5GP50_512.clo --slot 57
 ./build-macos/namtoclo clo-info out/amp_..._GP200_1024.clo     # inspect a CLO's header
 ```
@@ -548,6 +551,8 @@ ctest --test-dir build-macos --output-on-failure
 ```
 
 GP-200 upload is implemented in the portable core but not yet exposed as a CLI subcommand.
+
+SnapTone **delete** (`slots --slot N --delete`) is implemented and confirmed working on real GP-5/GP-50 hardware. SnapTone **rename** is not implemented — an extensive real-hardware investigation (MIDI-level and raw-USB-level, on both macOS and Windows) traced the write command Valeton Suite uses byte-for-byte but could not get the identical bytes to take effect from this codebase; see `CLAUDE.md` for the full writeup if you want to pick this up.
 
 ---
 
@@ -576,6 +581,17 @@ on GP-5/GP-50 conversion quality and confirming GP-50 hardware support end-to-en
 - **GP-5/GP-50 Uploader auto-refreshes SnapTone names after upload.** The slot combo's
   on-device names now update automatically right after a successful upload, instead of
   requiring a manual "Rescan" click to see the new tone reflected.
+- **SnapTone delete**, reverse-engineered from real Valeton Suite traffic and confirmed
+  working on real GP-5/GP-50 hardware: `namtoclo slots --slot N --delete` clears a slot
+  back to its "Empty" placeholder. SnapTone rename was investigated just as thoroughly
+  (down to raw USB packet captures on two OSes) but remains unimplemented — see
+  `CLAUDE.md`.
+- **Windows CLI build fixed.** Three real, previously-undiscovered build bugs meant
+  `namtoclo.exe` (the CLI) could never actually be built and linked standalone on
+  Windows before — a case-insensitive-filesystem collision between the CLI and GUI's
+  generated project files, a matching collision in their output executable names, and a
+  missing MSVC runtime-library setting. All three are fixed; `namtoclo` now builds and
+  runs on Windows too, at `build\cli\Release\namtoclo.exe`.
 - **A2 submodel selection (Full vs. Lite) made explicit and validated**, rather than an
   unexamined assumption.
 - **A held-out validation tool** (`--quality-experiment`, see below) for scoring
