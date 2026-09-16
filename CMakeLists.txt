@@ -295,6 +295,24 @@ ntc_link_core(namtoclo)
 target_compile_features(namtoclo PRIVATE cxx_std_20)
 install(TARGETS namtoclo RUNTIME DESTINATION .)
 
+# The CMake target-name collision between this ("namtoclo") and the GUI
+# ("ntc_gui", shipped as NamToClo.exe -- see that target's own comment for
+# the full explanation) is fixed by their distinct target names, but their
+# OUTPUT executable names ("namtoclo.exe" vs "NamToClo.exe") still differ
+# only by case, and Windows filesystems are case-insensitive -- the two
+# would still collide as the same file if both land in the same output
+# directory. Give the CLI its own subdirectory on Windows only (macOS has
+# no GUI target to collide with, so this is a no-op there); each target's
+# own executable directory is still where nam_input_wav.wav/reference_clips
+# get copied (see ntc_copy_runtime_resources below, which uses
+# $<TARGET_FILE_DIR:...>), so this doesn't break resource lookup.
+if(WIN32)
+    set_target_properties(namtoclo PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/cli/Release"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/cli/Debug"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/cli/RelWithDebInfo"
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/cli/MinSizeRel")
+endif()
 
 # Both the CLI and the Windows GUI resolve nam_input_wav.wav and
 # resources/reference_clips relative to their own executable path (see
