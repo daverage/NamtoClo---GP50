@@ -46,6 +46,7 @@ constexpr UINT WM_APP_T3K_SEARCH_DONE = WM_APP + 11;
 constexpr UINT WM_APP_T3K_MODELS_DONE = WM_APP + 12;
 constexpr UINT WM_APP_T3K_DOWNLOAD_DONE = WM_APP + 13;
 constexpr UINT WM_APP_T3K_PREVIEW_DONE = WM_APP + 14;
+constexpr UINT WM_APP_GP5_DELETE_DONE = WM_APP + 15;
 constexpr int IDC_INPUT_PATH = 101;
 constexpr int IDC_LOAD_FILE = 102;
 constexpr int IDC_LOAD_FOLDER = 103;
@@ -101,6 +102,7 @@ constexpr int IDC_T3K_IR_WAV = 235;
 constexpr int IDC_T3K_IR_BROWSE = 236;
 constexpr int IDC_T3K_IR_CLEAR = 237;
 constexpr int IDC_T3K_PREVIEW_VOLUME = 238;
+constexpr int IDC_GP5_DELETE = 239;
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
 constexpr COLORREF kColorBorder = RGB(220, 226, 235);
@@ -144,6 +146,7 @@ HWND gGp5RescanButton = nullptr;
 HWND gGp5UploadButton = nullptr;
 HWND gGp5Device = nullptr;
 HWND gGp5Progress = nullptr;
+HWND gGp5DeleteButton = nullptr;
 HWND gT3kKey = nullptr;
 HWND gT3kConnect = nullptr;
 HWND gT3kSearch = nullptr;
@@ -215,6 +218,7 @@ InputMode gInputMode = InputMode::None;
 bool gUploadBusy = false;
 bool gGp5UploadBusy = false;
 bool gGp5CatalogueBusy = false;
+bool gGp5DeleteBusy = false;
 
 struct UploadProgressMessage {
     int current = 0;
@@ -226,6 +230,12 @@ struct CatalogueResultMessage {
     bool ok = false;
     std::wstring error;
     std::vector<ntc::gp5::SnapToneCatalogueEntry> entries;
+};
+
+struct DeleteResultMessage {
+    bool ok = false;
+    int slot = 0;
+    std::wstring error;
 };
 
 struct T3kResultMessage { bool ok = false; std::string error; };
@@ -365,7 +375,8 @@ void showUploaderUi(HWND hwnd, bool show) {
 void showGp5UploaderUi(HWND hwnd, bool show) {
     const HWND controls[] = {
         gGp5CloEdit, gGp5BrowseButton, gGp5SlotCombo,
-        gGp5RescanButton, gGp5UploadButton, gGp5Device, gGp5Progress
+        gGp5RescanButton, gGp5UploadButton, gGp5Device, gGp5Progress,
+        gGp5DeleteButton
     };
     for (HWND h : controls) showControl(h, show);
     for (int id : {1015,1016,1017,1018})
@@ -865,6 +876,8 @@ void refreshGp5Detection() {
     setText(gGp5Device, ntc::gp5::describeDetection(d));
     if (!gGp5UploadBusy)
         EnableWindow(gGp5UploadButton, d.inputFound && d.outputFound ? TRUE : FALSE);
+    if (!gGp5UploadBusy && !gGp5DeleteBusy)
+        EnableWindow(gGp5DeleteButton, d.inputFound && d.outputFound ? TRUE : FALSE);
 }
 
 // Repopulates the destination-slot combo. With `named` supplied (a
@@ -1343,6 +1356,50 @@ void startGp5Uploader(HWND hwnd) {
     }).detach();
 }
 
+// Clears the selected SnapTone slot on the device (selector 0x27,
+// ntc::gp5::deleteSnapTone -- confirmed working on real GP-50 hardware, see
+// CLAUDE.md's "GP-5/GP-50 SnapTone delete/rename" section). Destructive and
+// not undoable, so this always confirms with the user first, mirroring the
+// existing async worker-thread pattern used for upload/catalogue refresh.
+void startGp5Delete(HWND hwnd) {
+    if (gGp5UploadBusy || gGp5CatalogueBusy || gGp5DeleteBusy) return;
+    const int selection = static_cast<int>(SendMessageW(gGp5SlotCombo, CB_GETCURSEL, 0, 0));
+    if (selection < 0 || selection >= 30) {
+        MessageBoxW(hwnd, L"Select a SnapTone slot (51-80) to delete.", L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const int visibleSlot = selection + 51; // combo entry 0 -> visible SnapTone 51
+
+    const auto d = ntc::gp5::detectGp5Midi();
+    if (!d.inputFound || !d.outputFound) {
+        const auto msg = ntc::gp5::describeDetection(d);
+        setText(gGp5Device, msg);
+        MessageBoxW(hwnd, msg.c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    const std::wstring confirmMsg = L"This will permanently clear SnapTone " + std::to_wstring(visibleSlot) +
+        L" on the connected device. This cannot be undone.\n\nContinue?";
+    if (MessageBoxW(hwnd, confirmMsg.c_str(), L"Delete SnapTone", MB_YESNO | MB_ICONWARNING) != IDYES)
+        return;
+
+    gGp5DeleteBusy = true;
+    EnableWindow(gBackendTabs, FALSE);
+    EnableWindow(gGp5BrowseButton, FALSE);
+    EnableWindow(gGp5SlotCombo, FALSE);
+    EnableWindow(gGp5RescanButton, FALSE);
+    EnableWindow(gGp5UploadButton, FALSE);
+    EnableWindow(gGp5DeleteButton, FALSE);
+    setText(gStatus, L"Deleting SnapTone " + std::to_wstring(visibleSlot) + L"...");
+
+    std::thread([hwnd, visibleSlot] {
+        auto* m = new DeleteResultMessage{};
+        m->slot = visibleSlot;
+        m->ok = ntc::gp5::deleteSnapTone(visibleSlot, m->error);
+        PostMessageW(hwnd, WM_APP_GP5_DELETE_DONE, 0, reinterpret_cast<LPARAM>(m));
+    }).detach();
+}
+
 void moveCtrl(HWND h, int x, int y, int w, int hgt) {
     if (h) MoveWindow(h, x, y, w, hgt, TRUE);
 }
@@ -1450,6 +1507,7 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gGp5BrowseButton, ur - 124, gUi.uploaderCard.top + 52, 124, 34);
     moveCtrl(GetDlgItem(hwnd, 1016), ux, gUi.uploaderCard.top + 112, 260, 22);
     moveCtrl(gGp5SlotCombo, ux, gUi.uploaderCard.top + 140, 310, 260);
+    moveCtrl(gGp5DeleteButton, ur - 150, gUi.uploaderCard.top + 140, 150, 34);
     moveCtrl(GetDlgItem(hwnd, 1017), ux, gUi.uploaderCard.top + 196, 220, 22);
     moveCtrl(gGp5Device, ux, gUi.uploaderCard.top + 224, ur - ux - 136, 28);
     moveCtrl(gGp5RescanButton, ur - 124, gUi.uploaderCard.top + 220, 124, 34);
@@ -1665,6 +1723,9 @@ void createUi(HWND hwnd) {
     gGp5UploadButton = CreateWindowW(L"BUTTON", L"Upload SnapTone", WS_CHILD | BS_OWNERDRAW,
                                      0, 0, 240, 38, hwnd, controlId(IDC_GP5_UPLOAD), nullptr, nullptr);
     applyFont(gGp5UploadButton);
+    gGp5DeleteButton = CreateWindowW(L"BUTTON", L"Delete SnapTone", WS_CHILD | BS_OWNERDRAW,
+                                     0, 0, 150, 34, hwnd, controlId(IDC_GP5_DELETE), nullptr, nullptr);
+    applyFont(gGp5DeleteButton);
 
     createSectionLabel(hwnd, 1030, L"Publishable API key");
     gT3kKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
@@ -2054,6 +2115,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             refreshGp5CatalogueAsync(hwnd);
             return 0;
         case IDC_GP5_UPLOAD: startGp5Uploader(hwnd); return 0;
+        case IDC_GP5_DELETE: startGp5Delete(hwnd); return 0;
         case IDC_T3K_CONNECT: startT3kAuth(hwnd); return 0;
         case IDC_T3K_SEARCH_BUTTON: startT3kSearch(hwnd); return 0;
         case IDC_T3K_PREVIOUS: startT3kPrevious(hwnd); return 0;
@@ -2160,6 +2222,27 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 refreshGp5CatalogueAsync(hwnd);
             } else {
                 MessageBoxW(hwnd, r->message.c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONERROR);
+            }
+        }
+        return 0;
+    }
+    case WM_APP_GP5_DELETE_DONE: {
+        std::unique_ptr<DeleteResultMessage> m(reinterpret_cast<DeleteResultMessage*>(lParam));
+        gGp5DeleteBusy = false;
+        EnableWindow(gBackendTabs, TRUE);
+        EnableWindow(gGp5BrowseButton, TRUE);
+        EnableWindow(gGp5SlotCombo, TRUE);
+        EnableWindow(gGp5RescanButton, TRUE);
+        refreshGp5Detection();
+        if (m) {
+            if (m->ok) {
+                setText(gStatus, L"Deleted SnapTone " + std::to_wstring(m->slot) + L".");
+                MessageBoxW(hwnd, (L"Deleted SnapTone " + std::to_wstring(m->slot) + L".").c_str(),
+                            L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONINFORMATION);
+                refreshGp5CatalogueAsync(hwnd);
+            } else {
+                setText(gStatus, L"Delete failed: " + m->error);
+                MessageBoxW(hwnd, (L"Delete failed: " + m->error).c_str(), L"GP-5 / GP-50 Uploader", MB_OK | MB_ICONERROR);
             }
         }
         return 0;

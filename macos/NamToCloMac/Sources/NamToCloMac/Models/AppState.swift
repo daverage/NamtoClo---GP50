@@ -40,6 +40,7 @@ final class AppState: ObservableObject {
     @Published var isRefreshingDevices = false
     @Published var slots: [SnapToneSlot] = []
     @Published var isRefreshingSlots = false
+    @Published var isDeletingSlot = false
     @Published var selectedSlot: Int?
     @Published var uploadSourceURL: URL?
     @Published var isUploading = false
@@ -47,6 +48,16 @@ final class AppState: ObservableObject {
     @Published var uploadError: BackendError?
     @Published var lastUploadOutcome: UploadOutcome?
     @AppStorage("debugMidiEnabled") var debugMidiEnabled = false
+
+    // GP-200 screen. GP-200 has no on-device SnapTone catalogue readback
+    // (fixed 10-slot list only -- see Gp200Slot in BackendTypes.swift), so
+    // there's no "slots" list/rescan/delete state to mirror from GP-5/GP-50.
+    @Published var gp200UploadSourceURL: URL?
+    @Published var gp200SelectedSlot: Gp200Slot?
+    @Published var gp200IsUploading = false
+    @Published var gp200UploadProgress: (current: Int, total: Int, message: String)?
+    @Published var gp200UploadError: BackendError?
+    @Published var gp200LastUploadOutcome: UploadOutcome?
 
     // Tone3000 (macOS-only -- see net_client.hpp / tone3000_client.cpp).
     // `tone3000Connected == nil` means "not checked yet this launch"; the
@@ -175,6 +186,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Deletes an on-device SnapTone slot. Destructive -- the view must
+    /// confirm with the user before calling this.
+    func deleteSlot(_ slot: Int) async {
+        isDeletingSlot = true
+        uploadError = nil
+        defer { isDeletingSlot = false }
+        do {
+            try await backend.deleteSlot(slot)
+            appendDiagnostic("[delete] slot \(slot) deleted")
+            if selectedSlot == slot { selectedSlot = nil }
+            await refreshSlots()
+        } catch let error as BackendError {
+            uploadError = error
+            appendDiagnostic("[delete] failed: \(error.summary) -- \(error.technicalDetails)")
+        } catch {
+            uploadError = BackendError(summary: "Delete failed unexpectedly.", technicalDetails: error.localizedDescription)
+            appendDiagnostic("[delete] failed unexpectedly: \(error.localizedDescription)")
+        }
+    }
+
     func runUpload() async {
         guard let uploadSourceURL, let selectedSlot else { return }
         isUploading = true
@@ -200,6 +231,35 @@ final class AppState: ObservableObject {
         } catch {
             uploadError = BackendError(summary: "Upload failed unexpectedly.", technicalDetails: error.localizedDescription)
             appendDiagnostic("[upload] failed unexpectedly: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: GP-200
+
+    func runGp200Upload() async {
+        guard let gp200UploadSourceURL, let gp200SelectedSlot else { return }
+        gp200IsUploading = true
+        gp200UploadError = nil
+        gp200UploadProgress = (0, 0, "Starting upload...")
+        defer { gp200IsUploading = false }
+        do {
+            let outcome = try await backend.gp200Upload(
+                cloFile: gp200UploadSourceURL,
+                slot: gp200SelectedSlot.rawValue,
+                debugMidi: debugMidiEnabled,
+                onProgress: { [weak self] current, total, message in
+                    self?.gp200UploadProgress = (current, total, message)
+                    self?.appendDiagnostic("[gp200-upload] [\(current)/\(total)] " + message)
+                }
+            )
+            gp200LastUploadOutcome = outcome
+            appendDiagnostic("[gp200-upload] complete: ok=\(outcome.ok) slot=\(outcome.slot) message=\(outcome.message)")
+        } catch let error as BackendError {
+            gp200UploadError = error
+            appendDiagnostic("[gp200-upload] failed: \(error.summary) -- \(error.technicalDetails)")
+        } catch {
+            gp200UploadError = BackendError(summary: "Upload failed unexpectedly.", technicalDetails: error.localizedDescription)
+            appendDiagnostic("[gp200-upload] failed unexpectedly: \(error.localizedDescription)")
         }
     }
 

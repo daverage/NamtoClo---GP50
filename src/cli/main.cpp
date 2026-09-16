@@ -21,6 +21,7 @@
 //   slots --slot N --rename <name> [--json]   (not implemented yet -- see CLAUDE.md)
 //   slots --slot N --delete [--json]
 //   upload <file.clo> --slot N [--debug-midi] [--json]
+//   gp200-upload <file.clo> --slot N|AMP1..AMP5|DIST1..DIST5 [--debug-midi] [--json]
 //   clo-info <file.clo> [--json]
 //   tone3000 status [--json]                                  (macOS only)
 //   tone3000 login [--publishable-key t3k_pub_...] [--json]   (macOS only)
@@ -35,6 +36,8 @@
 #include "native_converter.hpp"
 #include "gp5_clo_upload.hpp"
 #include "gp5_midi.hpp"
+#include "gp200_clo_upload.hpp"
+#include "gp200_midi.hpp"
 #include "midi_transport.hpp"
 #include "common.hpp"
 #include "platform.hpp"
@@ -69,6 +72,8 @@ void printUsage() {
         "  namtoclo slots --slot N --rename <name> [--json]  (not implemented yet)\n"
         "  namtoclo slots --slot N --delete [--json]\n"
         "  namtoclo upload <file.clo> --slot N [--debug-midi] [--json]\n"
+        "  namtoclo gp200-upload <file.clo> --slot N|AMP1..AMP5|DIST1..DIST5 [--debug-midi] [--json]\n"
+        "                        (GP-200 fixed 10-slot upload: AMP1-5 -> slot 0-4, DIST1-5 -> slot 5-9)\n"
         "  namtoclo clo-info <file.clo> [--json]\n"
         "  namtoclo eq-match-batch <corpusDir> <outputDir> [--clips-dir <dir>]\n"
         "                          (research tool -- see ntc::runEqMatchExperiment; corpusDir must\n"
@@ -99,6 +104,7 @@ struct Args {
     std::string correctiveIr;
     std::string device; // accepted; see midi-list for why device selection is limited today
     int slot = -1;
+    std::string slotStr;
     std::string rename;
     std::string renameExperimental;
     bool deleteSlot = false;
@@ -132,7 +138,10 @@ Args parseArgs(int argc, char** argv, int startAt) {
         else if (arg == "--reference-audio") a.referenceAudio = next("--reference-audio");
         else if (arg == "--recorded-audio") a.recordedAudio = next("--recorded-audio");
         else if (arg == "--corrective-ir") a.correctiveIr = next("--corrective-ir");
-        else if (arg == "--slot") a.slot = std::stoi(next("--slot"));
+        else if (arg == "--slot") {
+            a.slotStr = next("--slot");
+            try { a.slot = std::stoi(a.slotStr); } catch (...) { a.slot = -1; }
+        }
         else if (arg == "--rename") a.rename = next("--rename");
         else if (arg == "--delete") a.deleteSlot = true;
         else if (arg == "--rename-experimental") a.renameExperimental = next("--rename-experimental");
@@ -476,6 +485,64 @@ int cmdUpload(const Args& a) {
         o.boolean("ok", result.ok)
          .str("device", "Valeton GP-5/GP-50")
          .num("slot", a.slot)
+         .str("message", ntc::toUtf8(result.message));
+        emitEventFields("complete", o.build().substr(1, o.build().size() - 2));
+    } else {
+        std::wcout << result.message << L"\n";
+    }
+    return result.ok ? 0 : 1;
+}
+
+// Resolves --slot for gp200-upload: accepts a raw global slot number (0-9)
+// or the fixed 10-entry naming from the Windows GUI's GP-200 combo
+// (AMP1..AMP5 -> 0..4, DIST1..5 -> 5..9; see CLAUDE.md's GP-200 upload
+// section). Returns -1 on an unrecognized value.
+int parseGp200Slot(const Args& a) {
+    if (!a.slotStr.empty()) {
+        std::string s = a.slotStr;
+        std::transform(s.begin(), s.end(), s.begin(), ::toupper);
+        static const std::vector<std::string> names = {
+            "AMP1", "AMP2", "AMP3", "AMP4", "AMP5",
+            "DIST1", "DIST2", "DIST3", "DIST4", "DIST5",
+        };
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            if (s == names[i]) return static_cast<int>(i);
+        }
+    }
+    return a.slot;
+}
+
+int cmdGp200Upload(const Args& a) {
+    if (a.positional.empty()) {
+        std::cerr << "gp200-upload: missing <file.clo>\n";
+        return 2;
+    }
+    const int slot = parseGp200Slot(a);
+    if (slot < 0 || slot > 9) {
+        std::cerr << "gp200-upload: --slot N is required (global slot 0..9, or AMP1..AMP5/DIST1..DIST5)\n";
+        return 2;
+    }
+    const fs::path cloFile = a.positional.front();
+
+    if (a.json) emitEventFields("start", "\"operation\":\"gp200-upload\"");
+
+    const auto result = ntc::gp200::uploadCloToGp200(cloFile, slot,
+        [&](int cur, int total, const std::wstring& status) {
+            if (a.debugMidi) std::wcerr << L"[debug] " << status << L"\n";
+            if (a.json) {
+                JsonObj o;
+                o.num("current", cur).num("total", total).str("message", ntc::toUtf8(status));
+                emitEventFields("progress", o.build().substr(1, o.build().size() - 2));
+            } else {
+                std::wcout << L"[" << cur << L"/" << total << L"] " << status << L"\n";
+            }
+        });
+
+    if (a.json) {
+        JsonObj o;
+        o.boolean("ok", result.ok)
+         .str("device", "Valeton GP-200")
+         .num("slot", slot)
          .str("message", ntc::toUtf8(result.message));
         emitEventFields("complete", o.build().substr(1, o.build().size() - 2));
     } else {
@@ -925,6 +992,7 @@ int main(int argc, char** argv) {
     if (command == "midi-list") return cmdMidiList(a);
     if (command == "slots") return cmdSlots(a);
     if (command == "upload") return cmdUpload(a);
+    if (command == "gp200-upload") return cmdGp200Upload(a);
     if (command == "clo-info") return cmdCloInfo(a);
     if (command == "eq-match-batch") return cmdEqMatchBatch(a);
     if (command == "--help" || command == "-h" || command == "help") {

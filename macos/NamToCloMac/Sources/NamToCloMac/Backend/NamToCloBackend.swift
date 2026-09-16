@@ -7,6 +7,10 @@ import Foundation
 protocol NamToCloBackend: AnyObject {
     func listMidiDevices() async throws -> MidiListResult
     func readSlots() async throws -> [SnapToneSlot]
+    /// Clears an on-device SnapTone slot (`namtoclo slots --slot N --delete`).
+    /// Destructive and not undoable -- callers must confirm with the user
+    /// before invoking this.
+    func deleteSlot(_ slot: Int) async throws
 
     func convert(
         inputNam: URL,
@@ -20,6 +24,18 @@ protocol NamToCloBackend: AnyObject {
     ) async throws -> ConvertOutcome
 
     func upload(
+        cloFile: URL,
+        slot: Int,
+        debugMidi: Bool,
+        onProgress: @escaping (Int, Int, String) -> Void
+    ) async throws -> UploadOutcome
+
+    /// GP-200 upload (`namtoclo gp200-upload`). `slot` is the fixed global
+    /// slot 0-9 (AMP1-5 -> 0-4, DIST1-5 -> 5-9) -- see Gp200Slot in
+    /// BackendTypes.swift for the named mapping this mirrors from the
+    /// Windows GUI's fixed 10-entry combo (no on-device name readback for
+    /// GP-200, unlike GP-5/GP-50's SnapTone catalogue).
+    func gp200Upload(
         cloFile: URL,
         slot: Int,
         debugMidi: Bool,
@@ -166,6 +182,16 @@ final class CLIBackend: NamToCloBackend {
         }.sorted { $0.slot < $1.slot }
     }
 
+    func deleteSlot(_ slot: Int) async throws {
+        let (lines, exitCode) = try await run(["slots", "--slot", String(slot), "--delete", "--json"])
+        guard let obj = lines.first else {
+            throw BackendError(summary: "No response deleting the SnapTone slot.", technicalDetails: "namtoclo slots --delete produced no output (exit \(exitCode)).")
+        }
+        guard obj["ok"] as? Bool == true else {
+            throw slotReadError(for: obj["error"] as? String ?? "Unknown error")
+        }
+    }
+
     private func slotReadError(for raw: String) -> BackendError {
         if raw.localizedCaseInsensitiveContains("not found") || raw.localizedCaseInsensitiveContains("no gp") {
             return BackendError(summary: "No GP-5/GP-50 is connected.", technicalDetails: raw)
@@ -277,6 +303,56 @@ final class CLIBackend: NamToCloBackend {
         }
         if lower.contains("not found") || lower.contains("no gp") {
             return BackendError(summary: "No GP-5/GP-50 is connected.", technicalDetails: raw)
+        }
+        if raw.isEmpty {
+            return BackendError(summary: "Upload failed for an unknown reason.", technicalDetails: "namtoclo reported ok=false with no message.")
+        }
+        return BackendError(summary: "Upload failed.", technicalDetails: raw)
+    }
+
+    func gp200Upload(
+        cloFile: URL,
+        slot: Int,
+        debugMidi: Bool,
+        onProgress: @escaping (Int, Int, String) -> Void
+    ) async throws -> UploadOutcome {
+        var args = ["gp200-upload", cloFile.path, "--slot", String(slot), "--json"]
+        if debugMidi { args.append("--debug-midi") }
+
+        // See convert()'s comment above about reading "complete" out of the
+        // synchronously-returned `lines`.
+        let (lines, exitCode) = try await run(args) { line in
+            if line["event"] as? String == "progress" {
+                onProgress(line["current"] as? Int ?? 0, line["total"] as? Int ?? 0, line["message"] as? String ?? "")
+            }
+        }
+        guard let completeLine = lines.last(where: { ($0["event"] as? String) == "complete" }) else {
+            throw BackendError(summary: "Upload did not complete.", technicalDetails: "namtoclo gp200-upload exited (code \(exitCode)) without a completion event.")
+        }
+        let ok = completeLine["ok"] as? Bool ?? false
+        let message = completeLine["message"] as? String ?? ""
+        if !ok {
+            throw gp200UploadError(for: message)
+        }
+        return UploadOutcome(ok: ok, slot: slot, message: message)
+    }
+
+    private func gp200UploadError(for raw: String) -> BackendError {
+        let lower = raw.lowercased()
+        if lower.contains("timeout") {
+            return BackendError(summary: "The GP-200 stopped responding during upload (timeout).", technicalDetails: raw)
+        }
+        if lower.contains("ack") {
+            return BackendError(summary: "The GP-200 rejected a data block (no ACK).", technicalDetails: raw)
+        }
+        if lower.contains("retr") {
+            return BackendError(summary: "Upload failed after exhausting retries.", technicalDetails: raw)
+        }
+        if lower.contains("not found") || lower.contains("no gp") {
+            return BackendError(summary: "No GP-200 is connected.", technicalDetails: raw)
+        }
+        if lower.contains("does not exist") {
+            return BackendError(summary: "The selected .clo file does not exist.", technicalDetails: raw)
         }
         if raw.isEmpty {
             return BackendError(summary: "Upload failed for an unknown reason.", technicalDetails: "namtoclo reported ok=false with no message.")

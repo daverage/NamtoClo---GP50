@@ -6,6 +6,7 @@ private let cloType = UTType(filenameExtension: "clo") ?? .data
 struct Gp5UploadView: View {
     @EnvironmentObject var appState: AppState
     @State private var showingCloPicker = false
+    @State private var showingDeleteConfirm = false
 
     var body: some View {
         ScrollView {
@@ -28,6 +29,24 @@ struct Gp5UploadView: View {
                 }
             }
         }
+        .confirmationDialog(
+            deleteConfirmTitle,
+            isPresented: $showingDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Slot \(appState.selectedSlot ?? 0)", role: .destructive) {
+                if let slot = appState.selectedSlot {
+                    Task { await appState.deleteSlot(slot) }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently clears the SnapTone in slot \(appState.selectedSlot ?? 0) on the connected device. This cannot be undone.")
+        }
+    }
+
+    private var deleteConfirmTitle: String {
+        "Delete SnapTone Slot?"
     }
 
     private var errorBinding: Binding<Bool> {
@@ -74,9 +93,11 @@ struct Gp5UploadView: View {
                 HStack {
                     Text("Destination slot (51-80)")
                     Spacer()
-                    if appState.isRefreshingSlots {
+                    if appState.isRefreshingSlots || appState.isDeletingSlot {
                         ProgressView().controlSize(.small)
                     }
+                    Button("Delete", role: .destructive) { showingDeleteConfirm = true }
+                        .disabled(!canDeleteSelectedSlot)
                     Button("Rescan") { Task { await appState.refreshSlots() } }
                 }
                 if appState.slots.isEmpty {
@@ -155,6 +176,20 @@ struct Gp5UploadView: View {
                     .font(.caption)
             }
         }
+    }
+
+    /// Only occupied slots in the supported 51-80 SnapTone range can be
+    /// deleted (matches gp5_clo_upload.cpp's own `slot < 50 || slot >= 80`
+    /// bound, and there's nothing useful to clear on an already-empty slot).
+    private var canDeleteSelectedSlot: Bool {
+        guard !appState.isDeletingSlot, !appState.isUploading,
+              let selectedSlot = appState.selectedSlot,
+              selectedSlot >= 51, selectedSlot <= 80,
+              (appState.midiList?.gp5Gp50Ready ?? false) else { return false }
+        if let slot = appState.slots.first(where: { $0.slot == selectedSlot }) {
+            return !slot.isEmpty
+        }
+        return false
     }
 
     private var canUpload: Bool {

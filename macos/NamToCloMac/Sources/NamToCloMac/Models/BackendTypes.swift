@@ -55,6 +55,32 @@ struct UploadOutcome {
     let message: String
 }
 
+/// GP-200's fixed 10-slot SnapTone list (no on-device catalogue readback,
+/// unlike GP-5/GP-50's 30 named slots -- see CLAUDE.md). Mirrors the
+/// Windows GUI's fixed AMP1-5/DIST1-5 combo and `namtoclo gp200-upload`'s
+/// global-slot numbering (AMP1-5 -> 0-4, DIST1-5 -> 5-9).
+enum Gp200Slot: Int, CaseIterable, Identifiable {
+    case amp1 = 0, amp2, amp3, amp4, amp5
+    case dist1, dist2, dist3, dist4, dist5
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .amp1: return "AMP 1"
+        case .amp2: return "AMP 2"
+        case .amp3: return "AMP 3"
+        case .amp4: return "AMP 4"
+        case .amp5: return "AMP 5"
+        case .dist1: return "DIST 1"
+        case .dist2: return "DIST 2"
+        case .dist3: return "DIST 3"
+        case .dist4: return "DIST 4"
+        case .dist5: return "DIST 5"
+        }
+    }
+}
+
 struct CloInfoResult {
     let ok: Bool
     let path: String
