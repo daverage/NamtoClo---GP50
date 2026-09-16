@@ -6,11 +6,20 @@ Cross-platform application for converting Neural Amp Modeler (`.nam`) models to 
 
 ![NamToClo macOS Convert tab](resources/screenshots/macos_convert_tab.png)
 
-The Windows GUI has three tabs:
+The Windows GUI has four tabs:
 
 - **Convert to CLO** — convert one NAM model or every NAM model in a folder.
+- **Tone3000** — browse and load NAM captures directly from [Tone3000](https://www.tone3000.com/) into the converter.
 - **GP-200 Uploader** — upload an existing `.clo` file to one of the 10 GP-200 SnapTone slots.
 - **GP-5 / GP-50 Uploader** — adapt a compatible CLO in memory to the GP-5/GP-50 runtime format and upload it to **SnapTone 51-80**.
+
+| Convert to CLO | Tone3000 |
+|---|---|
+| ![Windows Convert to CLO tab](resources/screenshots/windows_convert_tab.png) | ![Windows Tone3000 tab](resources/screenshots/windows_tone3000_tab.png) |
+
+| GP-200 Uploader | GP-5 / GP-50 Uploader |
+|---|---|
+| ![Windows GP-200 Uploader tab](resources/screenshots/windows_gp200_tab.png) | ![Windows GP-5 / GP-50 Uploader tab](resources/screenshots/windows_gp5_gp50_tab.png) |
 
 ### GP-5 / GP-50 support in this release
 
