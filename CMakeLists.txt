@@ -295,6 +295,19 @@ ntc_link_core(namtoclo)
 target_compile_features(namtoclo PRIVATE cxx_std_20)
 install(TARGETS namtoclo RUNTIME DESTINATION .)
 
+if(MSVC)
+    # namtoclo_core/ntc_namcore/ntc_r8brain_base are built against the
+    # static MSVC runtime (see the MSVC_RUNTIME_LIBRARY property near their
+    # own target definitions above); this executable links those object
+    # libraries directly (ntc_link_core), so it must match or every std
+    # symbol they pull in (iostream, locale, ...) gets defined twice --
+    # once from the static CRT those objects were compiled against, once
+    # from this target's own default dynamic CRT -- and the link fails with
+    # LNK2038/LNK2005. ntc_gui (below) already does the same for the same
+    # reason.
+    set_property(TARGET namtoclo PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # The CMake target-name collision between this ("namtoclo") and the GUI
 # ("ntc_gui", shipped as NamToClo.exe -- see that target's own comment for
 # the full explanation) is fixed by their distinct target names, but their
