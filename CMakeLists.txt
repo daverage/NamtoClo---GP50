@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
 if(WIN32)
-    project(NamToClo VERSION 2.8.0 LANGUAGES C CXX RC)
+    project(NamToClo VERSION 2.9.0 LANGUAGES C CXX RC)
 else()
-    project(NamToClo VERSION 2.8.0 LANGUAGES C CXX)
+    project(NamToClo VERSION 2.9.0 LANGUAGES C CXX)
 endif()
 
 if(NOT WIN32 AND NOT APPLE)

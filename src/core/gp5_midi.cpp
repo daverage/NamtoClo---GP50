@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <iomanip>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -86,6 +87,13 @@ std::wstring latin1ToWide(const std::string& s) {
     w.reserve(s.size());
     for (unsigned char c : s) w.push_back(static_cast<wchar_t>(c));
     return w;
+}
+
+std::vector<std::uint8_t> wideToLatin1(const std::wstring& s) {
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(s.size());
+    for (wchar_t c : s) bytes.push_back(static_cast<std::uint8_t>(c & 0xFF));
+    return bytes;
 }
 
 // Finds the (first) MIDI input/output pair whose name looks like a GP-5 or
@@ -259,6 +267,122 @@ private:
     std::vector<std::vector<std::uint8_t>> capturedMessages_;
     bool capturing_ = false;
 };
+
+// Builds and sends the SnapTone delete (selector 0x27) write command,
+// reverse-engineered from a real USB-MIDI capture of Valeton Suite on macOS
+// against a GP-50 (2026-09-15). Decoded (post nibble-decode) layout:
+//   [CRC][0x01][0x00][LEN][0x11][0x27][SLOT][0x00][0x00][0x0F]
+// SLOT is the zero-based global slot index (0..79), same addressing as
+// uploadCloToGp5/readSnapToneCatalogue. LEN is the count of decoded bytes
+// following the LEN byte itself. Confirmed against real hardware: the
+// target slot reverts to its "Empty N" placeholder name in a subsequent
+// readSnapToneCatalogue call.
+//
+// The equivalent-looking selector 0x26 "rename" write (same shape, with a
+// name payload appended) was also captured and initially assumed to be a
+// working rename command, but real-hardware testing showed it does NOT
+// change the name table readSnapToneCatalogue reads -- it appears to write
+// to a separate, still-unidentified data structure. Renaming a SnapTone slot
+// for real requires reading back the slot's live patch body and rewriting
+// the whole patch with an edited name field; see renameSnapTone below, which
+// ports the approach (and the 0x1D patch-write opcode) from the independent,
+// hardware-verified github.com/drewmerc302/valeton-gp50 project rather than
+// this selector-0x26 dead end.
+bool sendSnapToneDelete(Session& session, int visibleSlot, std::wstring& error) {
+    if (visibleSlot < 51 || visibleSlot > 80) {
+        error = L"SnapTone slot must be in range 51-80.";
+        return false;
+    }
+    const auto slotByte = static_cast<std::uint8_t>(visibleSlot - 1);
+
+    std::array<std::uint8_t, 10> body{ 0x00, 0x01, 0x00, 0x00, 0x11, 0x27, slotByte, 0x00, 0x00, 0x0F };
+    body[3] = static_cast<std::uint8_t>(body.size() - 4);
+    body[0] = crc8Poly07(body.data() + 1, body.size() - 1);
+
+    const auto request = nibbleEncodeSysEx(body.data(), body.size());
+    return session.sendSysEx(request, error);
+}
+
+// -- Rename, via live-patch read + edit + full rewrite ----------------------
+//
+// Ported from github.com/drewmerc302/valeton-gp50 (webmidi_device.js /
+// webmidi_write.js / prst.js), an independent project whose GP-50 write
+// protocol is described there as verified against real Suite captures.
+// Constants below are named the same as that project's for easy
+// cross-reference. GP-50 only -- that project explicitly leaves the GP-5
+// patch-write protocol unverified, and this port hasn't been tested against
+// a GP-5 either, so it refuses on anything that doesn't look like a GP-50.
+constexpr std::uint8_t kCatSel = 0x12;      // read-request command byte
+constexpr std::uint8_t kSelBody = 0x41;     // selector: currently active patch body
+constexpr std::uint8_t kPatchWriteCmd = 0x1D;
+constexpr std::size_t kPatchBlockSize = 19; // payload bytes per write block
+constexpr std::array<std::uint8_t, 2> kPatchHdr{ 0x11, 0x4F };
+constexpr std::size_t kNameLen = 16;        // patch name field length
+// GP-50 .prst layout constants (prst.js): name starts right after the fixed
+// header+sentinel preamble, body right after the name.
+constexpr std::size_t kPrstLen = 552;
+constexpr std::size_t kBodyOff = 0x29;
+constexpr std::size_t kBodyLen = kPrstLen - kBodyOff; // 511
+
+std::vector<std::uint8_t> buildReadRequest(std::uint8_t selector) {
+    std::array<std::uint8_t, 6> body{ 0x00, 0x01, 0x00, 0x02, kCatSel, selector };
+    body[0] = crc8Poly07(body.data() + 1, body.size() - 1);
+    return nibbleEncodeSysEx(body.data(), body.size());
+}
+
+// Sends `request`, collects every decoded reply until the stream goes idle,
+// groups replies by their own decoded[1] ("cmd") byte, and returns the
+// longest reassembled [4:]-payload concatenation (sorted by decoded[2],
+// "index") -- port of webmidi_device.js's exchange()+reassemble(), which
+// picks the longest bank rather than assuming a specific response cmd byte.
+std::vector<std::uint8_t> exchangeAndReassembleLongest(Session& session,
+                                                        const std::vector<std::uint8_t>& request,
+                                                        std::wstring& error) {
+    session.beginCapture();
+    if (!session.sendSysEx(request, error)) {
+        session.endCapture();
+        return {};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto lastGrowth = start;
+    std::size_t lastCount = 0;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const auto now = std::chrono::steady_clock::now();
+        const std::size_t count = session.capturedCountSnapshot();
+        if (count > lastCount) { lastCount = count; lastGrowth = now; }
+        if (count > 0 && now - lastGrowth > std::chrono::milliseconds(400)) break;
+        if (now - start > std::chrono::seconds(3)) break;
+    }
+    const auto messages = session.endCapture();
+
+    std::map<std::uint8_t, std::vector<std::pair<std::uint8_t, std::vector<std::uint8_t>>>> byCmd;
+    for (const auto& m : messages) {
+        if (m.size() < 4) continue;
+        byCmd[m[1]].emplace_back(m[2], std::vector<std::uint8_t>(m.begin() + 4, m.end()));
+    }
+    std::vector<std::uint8_t> best;
+    for (auto& [cmd, chunks] : byCmd) {
+        std::sort(chunks.begin(), chunks.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::vector<std::uint8_t> blob;
+        for (const auto& [index, payload] : chunks) blob.insert(blob.end(), payload.begin(), payload.end());
+        if (blob.size() > best.size()) best = std::move(blob);
+    }
+    return best;
+}
+
+std::vector<std::uint8_t> buildPatchWritePacket(std::uint8_t index, const std::uint8_t* payload, std::size_t len) {
+    std::vector<std::uint8_t> buf;
+    buf.reserve(4 + len);
+    buf.push_back(0x00); // CRC placeholder
+    buf.push_back(kPatchWriteCmd);
+    buf.push_back(index);
+    buf.push_back(static_cast<std::uint8_t>(len));
+    buf.insert(buf.end(), payload, payload + len);
+    buf[0] = crc8Poly07(buf.data() + 1, buf.size() - 1);
+    return nibbleEncodeSysEx(buf.data(), buf.size());
+}
 
 } // namespace
 
@@ -454,6 +578,253 @@ bool readSnapToneCatalogue(std::vector<SnapToneCatalogueEntry>& entries, std::ws
         entries.push_back(entry);
     }
 
+    return true;
+}
+
+// -- EXPERIMENTAL: selector 0x26 write + a suspected commit/flush companion -
+//
+// Every captured selector-0x26 "rename" write (both Suite's own automatic
+// ones and manual tests) is immediately followed by this exact 16-byte
+// message, which prior analysis dismissed as an unrelated reconnect
+// handshake -- it never appears after a plain catalogue read, only after a
+// 0x26 write:
+//   F0 00 0A 00 02 00 01 00 03 00 00 00 00 00 00 F7
+// Decoded: [CRC=0x0A][0x02][0x01][LEN=0x03][0x00,0x00,0x00] -- a distinct
+// shape from both the read-request envelope and the write envelope used
+// elsewhere in this file, with famByte 0x02 matching the rename write's own
+// famByte. Worth testing as a possible commit/flush step the 0x26 write
+// needs before the device applies it to the table readSnapToneCatalogue
+// reads. UNCONFIRMED -- test on an unused slot before trusting this.
+bool sendSnapToneRenameWithCommitAttempt(int visibleSlot, const std::wstring& newName, std::wstring& error) {
+    error.clear();
+    if (newName.empty() || newName.size() > 13) {
+        error = L"SnapTone name must be 1-13 characters for this experimental path.";
+        return false;
+    }
+    if (visibleSlot < 51 || visibleSlot > 80) {
+        error = L"SnapTone slot must be in range 51-80.";
+        return false;
+    }
+    const auto slotByte = static_cast<std::uint8_t>(visibleSlot - 1);
+
+    auto transport = createMidiTransport();
+    const auto ports = detectPorts(*transport);
+    if (!ports.inputFound || !ports.outputFound) {
+        MidiDetection detection;
+        detection.inputFound = ports.inputFound;
+        detection.outputFound = ports.outputFound;
+        detection.inputName = ntc::fromUtf8(ports.input.name);
+        detection.outputName = ntc::fromUtf8(ports.output.name);
+        error = describeDetection(detection);
+        return false;
+    }
+
+    Session session;
+    if (!session.open(*transport, ports, error)) return false;
+
+    // Replay the exact read-request sequence Suite always does before a
+    // rename write, in case the device needs this context established
+    // first: selectors 0x30, 0x40, 0x41, 0x20, 0x24, 0x1A, 0x1C, captured
+    // verbatim from a real Suite session (2026-09-15/16). An isolated
+    // write+commit pair (no preceding reads) was tested and confirmed NOT
+    // to change the catalogue, even read back within the same session --
+    // this sequence is the next thing to rule in or out.
+    for (std::uint8_t selector : { 0x30u, 0x40u, 0x41u, 0x20u, 0x24u, 0x1Au, 0x1Cu }) {
+        std::wstring ignoredError;
+        session.sendSysEx(buildReadRequest(selector), ignoredError);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+
+    // The 0x26 write itself -- same shape as sendSnapToneDelete's 0x27, with
+    // a fixed 13-byte name field (confirmed via two real captures of
+    // different name lengths that both totaled exactly 13 name-field bytes).
+    auto nameBytes = wideToLatin1(newName);
+    nameBytes.resize(13, 0x00);
+
+    std::vector<std::uint8_t> body{ 0x00, 0x02, 0x00, 0x00, 0x11, 0x26, slotByte, 0x00, 0x00, 0x0F };
+    body.insert(body.end(), nameBytes.begin(), nameBytes.end());
+    body[3] = static_cast<std::uint8_t>(body.size() - 4);
+    body[0] = crc8Poly07(body.data() + 1, body.size() - 1);
+    if (!session.sendSysEx(nibbleEncodeSysEx(body.data(), body.size()), error)) return false;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // The suspected commit/flush companion.
+    std::array<std::uint8_t, 7> commit{ 0x00, 0x02, 0x01, 0x03, 0x00, 0x00, 0x00 };
+    commit[0] = crc8Poly07(commit.data() + 1, commit.size() - 1);
+    if (!session.sendSysEx(nibbleEncodeSysEx(commit.data(), commit.size()), error)) return false;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // Diagnostic: re-read the catalogue in this SAME session (matching how
+    // Suite's own write+read happen in one continuous connection) rather
+    // than a fresh reconnect, to isolate whether the earlier "no change"
+    // result was a same-session-vs-reconnect timing issue.
+    const auto catalogueRequest = buildReadRequest(0x24);
+    const auto blob = exchangeAndReassembleLongest(session, catalogueRequest, error);
+    constexpr std::size_t nameStart = 82;
+    constexpr std::size_t recordSize = 16;
+    const std::size_t off = nameStart + static_cast<std::size_t>(slotByte) * recordSize;
+    if (blob.size() >= off + recordSize) {
+        std::string raw(blob.begin() + static_cast<std::ptrdiff_t>(off),
+                        blob.begin() + static_cast<std::ptrdiff_t>(off + recordSize));
+        const auto nul = raw.find('\0');
+        if (nul != std::string::npos) raw.resize(nul);
+        error = L"[diagnostic] same-session catalogue re-read for this slot: \"" + latin1ToWide(raw) + L"\"";
+    } else {
+        error = L"[diagnostic] same-session catalogue re-read came back too short to check.";
+    }
+    return true;
+}
+
+bool renameSnapTone(int visibleSlot, const std::wstring& newName, std::wstring& error) {
+    error.clear();
+    // DISABLED (2026-09-15): real-hardware testing traced this all the way
+    // through -- Program Change addressing fixed, slot-byte addressing fixed
+    // (see writeSlotByte below) -- and confirmed the 0x1D command writes to a
+    // SEPARATE "Patch" storage area (1-80), NOT the SnapTone storage (51-80)
+    // that readSnapToneCatalogue/uploadCloToGp5 (0x92) read and write. A
+    // corrected-addressing test wrote "SafeTest" to Patch slot 80
+    // successfully (visible on-device), while SnapTone slot 80's own name
+    // was completely unaffected. So this whole 0x41-read + 0x1D-write
+    // mechanism, ported from github.com/drewmerc302/valeton-gp50, can only
+    // ever rename Patches, not SnapTones, on this hardware -- it is not a
+    // dead end from a bug, it is the wrong target entirely.
+    //
+    // A real SnapTone rename needs one of:
+    //  (a) a dedicated SnapTone name-write opcode, still unidentified (0x26
+    //      was an early guess, also confirmed wrong -- see sendSnapToneDelete
+    //      above for what *is* confirmed: 0x27 deletes a SnapTone correctly);
+    //  (b) a "read SnapTone tone binary" command (readSnapToneCatalogue only
+    //      reads names/occupancy, not tone data) paired with the
+    //      already-working uploadCloToGp5 (0x92) to re-upload the same tone
+    //      under a new name.
+    // Needs a fresh, SnapTone-specific capture (not a Patch-list capture) to
+    // find either. Do not re-enable by repurposing the code below -- it is
+    // kept only as a reference for the (functioning, just wrong-target)
+    // Patch-write mechanism, in case that's useful for a future Patch-list
+    // feature.
+    error = L"SnapTone rename is not implemented yet -- see the comment on "
+             L"this function for what's confirmed and what's still needed.";
+    return false;
+    if (newName.empty() || newName.size() > kNameLen) {
+        error = L"SnapTone name must be 1-16 characters.";
+        return false;
+    }
+    if (visibleSlot < 51 || visibleSlot > 80) {
+        error = L"SnapTone slot must be in range 51-80.";
+        return false;
+    }
+    // Program Change follows ordinary 0-based MIDI addressing (confirmed
+    // against the catalogue/0x92-upload convention used elsewhere in this
+    // file). The 0x1D write's own slot field is a DIFFERENT, direct 1:1
+    // mapping to the on-screen patch/slot number -- confirmed the hard way
+    // on 2026-09-15: visibleSlot-1 (matching every other command here) put
+    // "diagtest" on the device's actual displayed patch 50, not SnapTone 51,
+    // when 51-1=50 was sent as the write's slot byte. So the write's slot
+    // byte must be visibleSlot itself, not visibleSlot-1.
+    const auto programChangeSlot = static_cast<std::uint8_t>(visibleSlot - 1);
+    const auto writeSlotByte = static_cast<std::uint8_t>(visibleSlot);
+
+    auto transport = createMidiTransport();
+    const auto ports = detectPorts(*transport);
+    if (!ports.inputFound || !ports.outputFound) {
+        MidiDetection detection;
+        detection.inputFound = ports.inputFound;
+        detection.outputFound = ports.outputFound;
+        detection.inputName = ntc::fromUtf8(ports.input.name);
+        detection.outputName = ntc::fromUtf8(ports.output.name);
+        error = describeDetection(detection);
+        return false;
+    }
+    // Only GP-50's patch-write protocol is verified (by the ported project);
+    // refuse on anything else rather than risk wedging an unverified device.
+    if (lower(ports.output.name).find("50") == std::string::npos) {
+        error = L"Rename requires a GP-50 -- the live patch read/rewrite this "
+                 L"uses is only verified for GP-50, not GP-5.";
+        return false;
+    }
+
+    Session session;
+    if (!session.open(*transport, ports, error)) return false;
+
+    // 1. Select the slot with a plain Program Change so the device's "active
+    // patch" (what selector 0x41 reads) is the one we're about to rename.
+    if (!session.sendSysEx({ 0xC0, static_cast<std::uint8_t>(programChangeSlot & 0x7F) }, error)) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // 2. Read the live patch body back so the rewrite carries the slot's
+    // actual current tone data -- this command only edits the name field.
+    const auto bodyRequest = buildReadRequest(kSelBody);
+    auto body = exchangeAndReassembleLongest(session, bodyRequest, error);
+    // The reassembled blob leads with a 2-byte [CATSEL, selector] echo before
+    // the actual body bytes; strip it, mirroring webmidi_device.js's strip().
+    if (body.size() >= 2 && body[0] == kCatSel && body[1] == kSelBody) {
+        body.erase(body.begin(), body.begin() + 2);
+    }
+    if (body.size() != kBodyLen) {
+        std::wstringstream ss;
+        ss << L"Could not read the slot's current patch body (" << body.size()
+           << L" of " << kBodyLen << L" bytes) -- refusing to rewrite it blind.";
+        error = ss.str();
+        return false;
+    }
+
+    // 3. Rebuild [name(16, edited) + body] and send it back as a patch write
+    // (cmd 0x1D), 19 payload bytes per block, same CRC-8/nibble framing as
+    // the rest of this file.
+    std::vector<std::uint8_t> nameBytes = wideToLatin1(newName);
+    nameBytes.resize(kNameLen, 0x00);
+
+    std::vector<std::uint8_t> payload;
+    payload.reserve(kPatchHdr.size() + 4 + nameBytes.size() + body.size());
+    payload.insert(payload.end(), kPatchHdr.begin(), kPatchHdr.end());
+    payload.push_back(writeSlotByte);
+    payload.push_back(0x00);
+    payload.push_back(0x00);
+    payload.push_back(0x00);
+    payload.insert(payload.end(), nameBytes.begin(), nameBytes.end());
+    payload.insert(payload.end(), body.begin(), body.end());
+
+    const int totalBlocks = static_cast<int>((payload.size() + kPatchBlockSize - 1) / kPatchBlockSize);
+    for (int i = 0; i < totalBlocks; ++i) {
+        const std::size_t offset = static_cast<std::size_t>(i) * kPatchBlockSize;
+        const std::size_t len = std::min(kPatchBlockSize, payload.size() - offset);
+        const auto packet = buildPatchWritePacket(static_cast<std::uint8_t>(i), payload.data() + offset, len);
+
+        if (!session.sendSysEx(packet, error)) return false;
+        // No confirmed ACK byte pattern for this command family (unlike the
+        // 0x92 CLO-transfer path's ack/completion bytes) -- a fixed pacing
+        // delay per block, mirroring the ported project's own best-effort
+        // approach, rather than a real ack wait.
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    return true;
+}
+
+bool deleteSnapTone(int visibleSlot, std::wstring& error) {
+    error.clear();
+
+    auto transport = createMidiTransport();
+    const auto ports = detectPorts(*transport);
+    if (!ports.inputFound || !ports.outputFound) {
+        MidiDetection detection;
+        detection.inputFound = ports.inputFound;
+        detection.outputFound = ports.outputFound;
+        detection.inputName = ntc::fromUtf8(ports.input.name);
+        detection.outputName = ntc::fromUtf8(ports.output.name);
+        error = describeDetection(detection);
+        return false;
+    }
+
+    Session session;
+    if (!session.open(*transport, ports, error)) return false;
+
+    if (!sendSnapToneDelete(session, visibleSlot, error)) return false;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     return true;
 }
 

@@ -18,6 +18,8 @@
 //                        [--no-gp5-direct-fit] [--slot N] [--json]
 //   midi-list [--json]
 //   slots [--json]
+//   slots --slot N --rename <name> [--json]   (not implemented yet -- see CLAUDE.md)
+//   slots --slot N --delete [--json]
 //   upload <file.clo> --slot N [--debug-midi] [--json]
 //   clo-info <file.clo> [--json]
 //   tone3000 status [--json]                                  (macOS only)
@@ -36,6 +38,7 @@
 #include "midi_transport.hpp"
 #include "common.hpp"
 #include "platform.hpp"
+#include <fstream>
 #if defined(__APPLE__)
 #include "net_client.hpp"
 #include "tone3000_client.hpp"
@@ -63,8 +66,14 @@ void printUsage() {
         "                              [--no-gp5-direct-fit] [--slot N] [--json]\n"
         "  namtoclo midi-list [--json]\n"
         "  namtoclo slots [--json]\n"
+        "  namtoclo slots --slot N --rename <name> [--json]  (not implemented yet)\n"
+        "  namtoclo slots --slot N --delete [--json]\n"
         "  namtoclo upload <file.clo> --slot N [--debug-midi] [--json]\n"
         "  namtoclo clo-info <file.clo> [--json]\n"
+        "  namtoclo eq-match-batch <corpusDir> <outputDir> [--clips-dir <dir>]\n"
+        "                          (research tool -- see ntc::runEqMatchExperiment; corpusDir must\n"
+        "                          contain development/ and selection/ subfolders of *.nam files,\n"
+        "                          e.g. the NamtoCloNAMCorpus layout)\n"
 #if defined(__APPLE__)
         "  namtoclo tone3000 status [--json]\n"
         "  namtoclo tone3000 login [--publishable-key t3k_pub_...] [--json]\n"
@@ -90,6 +99,9 @@ struct Args {
     std::string correctiveIr;
     std::string device; // accepted; see midi-list for why device selection is limited today
     int slot = -1;
+    std::string rename;
+    std::string renameExperimental;
+    bool deleteSlot = false;
     // tone3000 (macOS only -- see net_client.hpp)
     std::string publishableKey;
     std::string input;
@@ -97,6 +109,7 @@ struct Args {
     int page = 1;
     std::string sort;
     bool noPlay = false;
+    std::string clipsDir;
 };
 
 Args parseArgs(int argc, char** argv, int startAt) {
@@ -120,6 +133,9 @@ Args parseArgs(int argc, char** argv, int startAt) {
         else if (arg == "--recorded-audio") a.recordedAudio = next("--recorded-audio");
         else if (arg == "--corrective-ir") a.correctiveIr = next("--corrective-ir");
         else if (arg == "--slot") a.slot = std::stoi(next("--slot"));
+        else if (arg == "--rename") a.rename = next("--rename");
+        else if (arg == "--delete") a.deleteSlot = true;
+        else if (arg == "--rename-experimental") a.renameExperimental = next("--rename-experimental");
         else if (arg == "--device") a.device = next("--device");
         else if (arg == "--publishable-key") a.publishableKey = next("--publishable-key");
         else if (arg == "--input") a.input = next("--input");
@@ -127,6 +143,7 @@ Args parseArgs(int argc, char** argv, int startAt) {
         else if (arg == "--page") a.page = std::stoi(next("--page"));
         else if (arg == "--sort") a.sort = next("--sort");
         else if (arg == "--no-play") a.noPlay = true;
+        else if (arg == "--clips-dir") a.clipsDir = next("--clips-dir");
         else a.positional.push_back(arg);
     }
     return a;
@@ -351,6 +368,53 @@ int cmdMidiList(const Args& a) {
 }
 
 int cmdSlots(const Args& a) {
+    if (!a.renameExperimental.empty()) {
+        if (a.slot < 0) {
+            std::cerr << "slots: --slot N is required (visible SnapTone slot 51..80)\n";
+            return 2;
+        }
+        std::wstring error;
+        const bool ok = ntc::gp5::sendSnapToneRenameWithCommitAttempt(a.slot, ntc::fromUtf8(a.renameExperimental), error);
+        if (a.json) {
+            JsonObj o;
+            o.boolean("ok", ok).str("operation", "slots-rename-experimental").num("slot", a.slot).str("diagnostic", ntc::toUtf8(error));
+            std::cout << o.build() << "\n";
+        } else if (!ok) {
+            std::wcerr << L"Experimental rename failed: " << error << L"\n";
+        } else {
+            std::wcout << L"Sent experimental rename+commit for slot " << a.slot << L". " << error << L"\n";
+        }
+        return ok ? 0 : 1;
+    }
+    if (!a.rename.empty() || a.deleteSlot) {
+        if (a.slot < 0) {
+            std::cerr << "slots: --slot N is required (visible SnapTone slot 51..80)\n";
+            return 2;
+        }
+        if (!a.rename.empty() && a.deleteSlot) {
+            std::cerr << "slots: --rename and --delete are mutually exclusive\n";
+            return 2;
+        }
+
+        std::wstring error;
+        const bool ok = a.deleteSlot
+            ? ntc::gp5::deleteSnapTone(a.slot, error)
+            : ntc::gp5::renameSnapTone(a.slot, ntc::fromUtf8(a.rename), error);
+        const std::string op = a.deleteSlot ? "slots-delete" : "slots-rename";
+
+        if (a.json) {
+            JsonObj o;
+            o.boolean("ok", ok).str("operation", op).num("slot", a.slot);
+            if (!ok) o.str("error", ntc::toUtf8(error));
+            std::cout << o.build() << "\n";
+        } else if (!ok) {
+            std::wcerr << (a.deleteSlot ? L"Delete failed: " : L"Rename failed: ") << error << L"\n";
+        } else {
+            std::wcout << (a.deleteSlot ? L"Deleted slot " : L"Renamed slot ") << a.slot << L".\n";
+        }
+        return ok ? 0 : 1;
+    }
+
     std::vector<ntc::gp5::SnapToneCatalogueEntry> entries;
     std::wstring error;
     if (!ntc::gp5::readSnapToneCatalogue(entries, error)) {
@@ -442,6 +506,152 @@ int cmdCloInfo(const Args& a) {
         ntc::printCloInfo(path, info);
     }
     return info.exists ? 0 : 1;
+}
+
+// Writes the same per-candidate CSV pair the Windows GUI's headless
+// experiment dispatchers write (see writeValetonComparisonResults in
+// gui.cpp) -- narrow-string port so it works identically on macOS.
+void writeValetonComparisonResultsNarrow(const fs::path& outputDir, const std::string& baseName,
+                                          const std::vector<ntc::ValetonComparisonResult>& results) {
+    std::error_code ec;
+    fs::create_directories(outputDir, ec);
+    const fs::path levelCsvPath = outputDir / (baseName + "_valeton_comparison.csv");
+    std::ofstream csv(levelCsvPath);
+    csv << "candidate,level_db,full_a2_abs_rms_db,candidate_abs_rms_db,absolute_gain_error_db,"
+           "relative_error_db,normalized_spectral_loss,aligned_esr,correlation\n";
+    const fs::path bandCsvPath = outputDir / (baseName + "_valeton_comparison_eq.csv");
+    std::ofstream bandCsv(bandCsvPath);
+    bandCsv << "candidate,source,sub_bass_lt120hz_pct,low_mid_120_500hz_pct,mid_500_2000hz_pct,"
+               "presence_2000_5000hz_pct,high_5000_12000hz_pct,air_gt12000hz_pct\n";
+    for (const auto& r : results) {
+        const std::string label = ntc::toUtf8(r.label);
+        std::cout << "  candidate \"" << label << "\": ";
+        if (!r.ok) {
+            std::cout << "FAILED (" << r.error << ")\n";
+            csv << label << ",,,,,,,\n";
+            continue;
+        }
+        std::cout << "mean spectral loss=" << r.meanNormalizedSpectralLoss
+                   << " mean ESR=" << r.meanAlignedEsr << " mean correlation=" << r.meanCorrelation
+                   << " mean held-out ESR=" << r.meanHeldOutEsr << "\n";
+        const auto& cb = r.meanBandEnergyPercent;
+        const auto& fb = r.fullA2MeanBandEnergyPercent;
+        for (const auto& p : r.levels) {
+            csv << label << "," << p.levelDb << "," << p.fullA2AbsoluteRmsDb << "," << p.candidateAbsoluteRmsDb << ","
+                << p.absoluteGainErrorDb << "," << p.relativeErrorDb << "," << p.normalizedSpectralLoss << ","
+                << p.alignedEsr << "," << p.correlation << "\n";
+        }
+        bandCsv << label << ",candidate," << cb.subBassPercent << "," << cb.lowMidPercent << ","
+                << cb.midPercent << "," << cb.presencePercent << "," << cb.highPercent << "," << cb.airPercent << "\n";
+        bandCsv << label << ",full_a2," << fb.subBassPercent << "," << fb.lowMidPercent << ","
+                << fb.midPercent << "," << fb.presencePercent << "," << fb.highPercent << "," << fb.airPercent << "\n";
+    }
+}
+
+// Research tool: re-runs the 2026-09-02 single-amp (Meshuggah) "EQ Match"
+// experiment (see EqMatchConfig's doc comment in native_converter.hpp)
+// across every .nam in <corpusDir>/development and <corpusDir>/selection --
+// the NamtoCloNAMCorpus layout's non-held-out splits (~15 amp families) --
+// instead of the single amp it was originally validated against. Uses the
+// same fixed generic reference-clip assignment for every amp (not
+// amp-specific clips) so results are comparable across the corpus:
+// fitClip=moderate_hotrod, diClip=high_metalcore, heldOut={clean_mayer,
+// moderate_brit, high_thrash, bass_downtown} -- resources/reference_clips's
+// existing Auto Tone Match set, kept disjoint per EqMatchConfig's contract.
+//
+// Runs each amp TWICE, Tone Match on (Auto -- resolveNamedReferenceClip picks
+// clean/moderate/high from the amp's own fitted PK gain bucket exactly like a
+// real conversion, not a hand-picked clip) and Tone Match off (plain B, no
+// reference at all), so EQ Match's effect is measured against a fair
+// baseline in both regimes rather than only the Tone-Match-on case the
+// original single-amp test used.
+int cmdEqMatchBatch(const Args& a) {
+    if (a.positional.size() < 2) {
+        std::cerr << "eq-match-batch: missing <corpusDir> <outputDir>\n";
+        return 2;
+    }
+    const fs::path corpusDir = a.positional[0];
+    const fs::path outputDir = a.positional[1];
+
+    fs::path clipsDir = a.clipsDir.empty() ? fs::path{} : fs::path(a.clipsDir);
+    if (clipsDir.empty()) {
+        const fs::path exe = ntc::executablePath();
+        if (!exe.empty()) clipsDir = exe.parent_path() / L"reference_clips";
+    }
+    const fs::path fitClip = clipsDir / L"moderate_hotrod.wav";
+    const fs::path diClip = clipsDir / L"high_metalcore.wav";
+    const std::vector<fs::path> heldOut = {
+        clipsDir / L"clean_mayer.wav",
+        clipsDir / L"moderate_brit.wav",
+        clipsDir / L"high_thrash.wav",
+        clipsDir / L"bass_downtown.wav",
+    };
+    for (const fs::path& p : { fitClip, diClip, heldOut[0], heldOut[1], heldOut[2], heldOut[3] }) {
+        if (!fs::exists(p)) {
+            std::cerr << "eq-match-batch: reference clip not found: " << p.string()
+                      << " (pass --clips-dir, or build next to reference_clips/)\n";
+            return 2;
+        }
+    }
+
+    std::vector<fs::path> nams;
+    for (const char* split : { "development", "selection" }) {
+        const fs::path splitDir = corpusDir / split;
+        if (!fs::exists(splitDir)) continue;
+        for (auto it = fs::recursive_directory_iterator(splitDir); it != fs::recursive_directory_iterator(); ++it) {
+            if (it->is_regular_file() && it->path().extension() == ".nam") nams.push_back(it->path());
+        }
+    }
+    if (nams.empty()) {
+        std::cerr << "eq-match-batch: no .nam files found under " << corpusDir.string()
+                  << "/development or /selection\n";
+        return 2;
+    }
+    std::sort(nams.begin(), nams.end());
+    std::cout << "eq-match-batch: " << nams.size() << " amp(s) found\n";
+
+    std::error_code ec;
+    fs::create_directories(outputDir, ec);
+    const fs::path summaryPath = outputDir / "eq_match_batch_summary.csv";
+    std::ofstream summary(summaryPath);
+    summary << "nam,candidate,mean_normalized_spectral_loss,mean_aligned_esr,mean_correlation,mean_held_out_esr,"
+               "presence_pct_candidate,presence_pct_full_a2,high_pct_candidate,high_pct_full_a2\n";
+
+    int failures = 0;
+    const int totalRuns = static_cast<int>(nams.size()) * 2;
+    for (const fs::path& nam : nams) {
+        const std::string namLabel = nam.stem().string();
+        for (bool toneMatchOn : { true, false }) {
+            const std::string runLabel = namLabel + (toneMatchOn ? "_tm_on" : "_tm_off");
+            std::cout << "\n=== " << runLabel << " (" << nam.string() << ") ===\n";
+            std::vector<ntc::ValetonComparisonResult> results;
+            std::string error;
+            const bool ok = ntc::runEqMatchExperiment(nam, fitClip, ntc::EqMatchConfig{}, diClip, heldOut, results,
+                                                       error,
+                                                       [](const std::wstring& s) { std::cout << ntc::toUtf8(s) << "\n"; },
+                                                       toneMatchOn);
+            if (!ok) {
+                std::cout << "FAILED: " << error << "\n";
+                summary << runLabel << ",FAILED,,,,,,,,\n";
+                ++failures;
+                continue;
+            }
+            writeValetonComparisonResultsNarrow(outputDir, runLabel + "_eqmatch", results);
+            for (const auto& r : results) {
+                if (!r.ok) continue;
+                const std::string label = ntc::toUtf8(r.label);
+                const auto& cb = r.meanBandEnergyPercent;
+                const auto& fb = r.fullA2MeanBandEnergyPercent;
+                summary << runLabel << "," << label << "," << r.meanNormalizedSpectralLoss << ","
+                        << r.meanAlignedEsr << "," << r.meanCorrelation << "," << r.meanHeldOutEsr << ","
+                        << cb.presencePercent << "," << fb.presencePercent << ","
+                        << cb.highPercent << "," << fb.highPercent << "\n";
+            }
+        }
+    }
+    std::cout << "\nWrote " << summaryPath.string() << " (" << totalRuns - failures << "/" << totalRuns
+              << " runs succeeded)\n";
+    return failures == totalRuns ? 1 : 0;
 }
 
 #if defined(__APPLE__)
@@ -716,6 +926,7 @@ int main(int argc, char** argv) {
     if (command == "slots") return cmdSlots(a);
     if (command == "upload") return cmdUpload(a);
     if (command == "clo-info") return cmdCloInfo(a);
+    if (command == "eq-match-batch") return cmdEqMatchBatch(a);
     if (command == "--help" || command == "-h" || command == "help") {
         printUsage();
         return 0;

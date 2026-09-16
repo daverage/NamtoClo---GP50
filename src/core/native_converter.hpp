@@ -107,6 +107,17 @@ struct NativeConverterConfig {
     // extreme-high-gain djent) found direct-fit never meaningfully worse than
     // truncation and sometimes a large win (~22% lower loss on the highest-gain model
     // tested) -- see test_assets/quality_results/*/quality_experiment_results.csv.
+    // 2026-09-16: disassembly of the real GP-5/GP-50 companion app's native conversion
+    // engine (HTKPA::startClone in /Applications/Valeton Suite.app's 5868USB.dylib --
+    // see CLAUDE.md's "How this compares to the official algorithm" section) found a
+    // device-mode flag selecting a 512- vs 2048-tap analysis-window size at the very
+    // start of the SAME fitting routine, before any of the actual A/B optimization
+    // runs -- i.e. the official algorithm very likely also fits GP-5/GP-50 directly at
+    // 512 taps, natively, rather than truncating a 2048-tap fit. This flag defaulting
+    // to true is therefore probably matching official behavior, not just outperforming
+    // it; the truncation fallback (false) is the path more likely to diverge from what
+    // real hardware actually ships. Kept as a runtime option regardless, since the
+    // held-out-validation win above is real and independent of which framing is right.
     bool gp5DirectFit = true;
 
     // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2" --
@@ -805,6 +816,15 @@ struct EqMatchConfig {
 // Builds "production" and one "eqmatch" candidate (production's own B512 plus the gentle
 // correction above, derived from fitClip) and scores both via scoreGp5CandidateAgainstFullA2
 // against diClipWav (7-level sweep) and heldOutClips (spectral/EQ fidelity).
+// toneMatchEnabled controls the "production" baseline EQ Match corrects: true (the
+// default, and the only mode originally tested) builds it with Tone Match on, Auto
+// reference mode -- i.e. exactly convertNamToClo's normal default GP-5/GP-50 output,
+// auto-picking a reference clip (clean/moderate/high) from the amp's own fitted PK
+// gain bucket, same as any real conversion. false builds it with Tone Match off
+// entirely (CloRefineConfig::enabled=false, plain unrefined direct-fit B), to test
+// whether EQ Match helps more/less/differently on a candidate that hasn't already had
+// its own Tone Match fit -- a fair on/off comparison of the SAME correction mechanism,
+// not a comparison of two different reference-selection strategies.
 bool runEqMatchExperiment(const fs::path& inputNam,
                           const fs::path& fitClip,
                           const EqMatchConfig& eqMatch,
@@ -812,7 +832,8 @@ bool runEqMatchExperiment(const fs::path& inputNam,
                           const std::vector<fs::path>& heldOutClips,
                           std::vector<ValetonComparisonResult>& out,
                           std::string& error,
-                          const StatusCallback& status = {});
+                          const StatusCallback& status = {},
+                          bool toneMatchEnabled = true);
 
 // Harmonic-content diagnostic (2026-09-01, see CLAUDE.md's CoreRevert follow-up): three
 // different linear corrections to Block B (a multi-clip solve, reduced regularization in

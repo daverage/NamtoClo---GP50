@@ -1,10 +1,10 @@
-# NAM to CLO v2.8.0
+# NAM to CLO v2.9.0
 
 > **This is a fork** of [Goaltoday/NamtoClo](https://github.com/Goaltoday/NamtoClo), focused on GP-5/GP-50 support and conversion quality improvements. See [Changes in this fork](#changes-in-this-fork) below for what's different from upstream.
 
-Windows x64 application for converting Neural Amp Modeler (`.nam`) models to CLO files and uploading CLO files directly to Valeton GP-200, GP-5 and GP-50 devices over USB MIDI.
+Cross-platform application for converting Neural Amp Modeler (`.nam`) models to CLO files and uploading CLO files directly to Valeton GP-200, GP-5 and GP-50 devices over USB MIDI. Ships as a Windows x64 GUI (`NamToClo.exe`) and a native macOS app for Apple Silicon (`NamToClo.app`, wrapping a `namtoclo` CLI) — see [macOS (Apple Silicon)](#macos-apple-silicon) below.
 
-The application has three tabs:
+The Windows GUI has three tabs:
 
 - **Convert to CLO** — convert one NAM model or every NAM model in a folder.
 - **GP-200 Uploader** — upload an existing `.clo` file to one of the 10 GP-200 SnapTone slots.
@@ -498,12 +498,20 @@ Copy-Item nam_input_wav.wav dist/NamToClo/
 
 ### macOS (Apple Silicon)
 
-A native macOS build is available as a command-line tool, `namtoclo`, built from the same
-portable conversion/protocol core as the Windows GUI (see `CLAUDE.md`'s "Cross-platform
-architecture" for how the codebase is split). It supports NAM→CLO conversion (GP-200 and
-GP-5/GP-50), CoreMIDI device discovery, SnapTone catalogue reading, and GP-5/GP-50 upload
-with the same ACK/retry protocol as Windows. A native macOS GUI is planned but not yet
-built; the CLI is the current macOS entry point.
+macOS ships as a native SwiftUI app, `NamToClo.app`, wrapping a `namtoclo` command-line
+tool built from the same portable conversion/protocol core as the Windows GUI (see
+`CLAUDE.md`'s "Cross-platform architecture" for how the codebase is split). Both support
+NAM→CLO conversion (GP-200 and GP-5/GP-50), CoreMIDI device discovery, SnapTone catalogue
+reading, and GP-5/GP-50 upload with the same ACK/retry protocol as Windows, plus optional
+Tone3000 integration (search/download NAM models, and preview one against a WAV, without
+leaving the app). GP-200 upload is not yet available on macOS (GUI or CLI).
+
+Build the whole app (CLI + SwiftUI frontend + signed `.app` bundle) with one script:
+
+```bash
+scripts/build_macos_app.sh
+open build-macos-app/NamToClo.app
+```
 
 Requirements:
 
@@ -512,7 +520,7 @@ Requirements:
 - Xcode Command Line Tools (Clang)
 - [Ninja](https://ninja-build.org/) (`brew install ninja`)
 
-Build with:
+To build just the CLI (no app bundle):
 
 ```bash
 cmake --preset macos-arm64
@@ -532,8 +540,8 @@ The CLI is generated at `build-macos/namtoclo`, with `nam_input_wav.wav` and
 ```
 
 Every subcommand accepts `--json` for machine-readable output (`{"ok":..., "operation":...}`),
-intended for scripting or a future SwiftUI front end. Hardware-free protocol tests run via
-`ctest`:
+which is exactly the contract `NamToCloMac`'s SwiftUI frontend consumes to drive the CLI as
+its process backend. Hardware-free protocol tests run via `ctest`:
 
 ```bash
 ctest --test-dir build-macos --output-on-failure
@@ -577,6 +585,30 @@ on GP-5/GP-50 conversion quality and confirming GP-50 hardware support end-to-en
 - Uploader tabs and the Convert tab now clearly label which output is for GP-200
   (1024-tap) vs. GP-5/GP-50 (512-tap), and completing a conversion pre-fills both
   Uploader tabs' file fields.
+- **Native macOS app.** A SwiftUI app (`NamToClo.app`, Apple Silicon) wraps the same
+  `namtoclo` CLI as its process backend — Convert and GP-5/GP-50 upload workflows, plus
+  Tone3000 search/download/preview integration, without touching Terminal. Built and
+  signed by a single script (`scripts/build_macos_app.sh`). GP-200 upload is not yet
+  available on macOS.
+- **A real, user-reported Tone Match loudness bug fixed.** Tone Match output was
+  measurably (10-19dB) quieter than a plain conversion of the same NAM, traced to the
+  final level-match step comparing against the raw NAM render instead of against the
+  plain conversion's own output level. Both the GP-200 and GP-5/GP-50 paths now match
+  Tone Match's level to the plain conversion, so this step only ever corrects tone, never
+  overall loudness.
+- **A previously-experimental dynamics-aware P/K search was permanently disabled.** It
+  looked like a win on this project's own automated metrics but made converted patches
+  audibly quieter without cleaning up distortion the way a real amp does, confirmed by
+  real hardware listening. Removed as a default; the direct/multi-level Block B solve
+  (the two real, verified wins) ship unchanged.
+- **Confirmed against the real device firmware, not just inferred.** Disassembly of the
+  official macOS companion app's native conversion engine confirmed this project's
+  reconstruction of the oversampled amp-shaper nonlinearity (allpass filter coefficients
+  and up/down-sampling stage order) is bit-for-bit identical to the real algorithm, and
+  that the GP-5/GP-50 512-tap fit is natively fit at that budget on real hardware too,
+  not derived by truncating a larger fit. Tone Match and Corrective IR remain this
+  project's own additions on top of that faithful core — the official converter has no
+  equivalent mechanism for either. See `CLAUDE.md` for the full writeup.
 
 ### `--quality-experiment` (headless CLI)
 

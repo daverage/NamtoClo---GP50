@@ -4185,7 +4185,8 @@ bool runEqMatchExperiment(const fs::path& inputNam,
                           const std::vector<fs::path>& heldOutClips,
                           std::vector<ValetonComparisonResult>& out,
                           std::string& error,
-                          const StatusCallback& status){
+                          const StatusCallback& status,
+                          bool toneMatchEnabled){
     out.clear();
     std::error_code ec;
     const fs::path work=fs::temp_directory_path(ec)/(L"ntc_eqmatch_"+inputNam.stem().wstring());
@@ -4198,9 +4199,10 @@ bool runEqMatchExperiment(const fs::path& inputNam,
     std::vector<float> dry;
     if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
 
-    report(status,L"EQ Match: converting production candidate...");
+    report(status,toneMatchEnabled?L"EQ Match: converting production candidate (Tone Match on, Auto)...":
+                                    L"EQ Match: converting baseline candidate (Tone Match off)...");
     NativeConverterConfig converter; // gp5DirectFit=true, dynamicsAwareFitting=false (defaults)
-    CloRefineConfig refine;refine.enabled=true;refine.referenceMode=ToneMatchReferenceMode::Auto;
+    CloRefineConfig refine;refine.enabled=toneMatchEnabled;refine.referenceMode=ToneMatchReferenceMode::Auto;
     auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
     if(!conversion.ok||conversion.gp5gp50Compact.empty()){
         error=conversion.error.empty()?"Production conversion did not produce a GP-5/GP-50 output.":conversion.error;
@@ -4209,7 +4211,7 @@ bool runEqMatchExperiment(const fs::path& inputNam,
     const fs::path productionClo=conversion.gp5gp50Compact;
     const float pp=conversion.pkPp,pn=conversion.pkPn,kp=conversion.pkKp,kn=conversion.pkKn;
 
-    ValetonComparisonResult prodResult;prodResult.label=L"production";
+    ValetonComparisonResult prodResult;prodResult.label=toneMatchEnabled?L"production_tm_on":L"production_tm_off";
     prodResult.pkPp=pp;prodResult.pkPn=pn;prodResult.pkKp=kp;prodResult.pkKn=kn;
     CandidateRenderFn prodRenderFn=[productionClo](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
         return renderCloOnSignal(productionClo,in,outv,err);
@@ -4233,7 +4235,7 @@ bool runEqMatchExperiment(const fs::path& inputNam,
         fs::remove_all(work,ec);return false;
     }
 
-    ValetonComparisonResult eqResult;eqResult.label=L"eqmatch";
+    ValetonComparisonResult eqResult;eqResult.label=toneMatchEnabled?L"eqmatch_tm_on":L"eqmatch_tm_off";
     eqResult.pkPp=pp;eqResult.pkPn=pn;eqResult.pkKp=kp;eqResult.pkKn=kn;
     CandidateRenderFn eqRenderFn=[productionClo,pp,pn,kp,kn,newB](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
         return renderCloWithOverrideOnSignal(productionClo,pp,pn,kp,kn,newB,in,outv,err);
