@@ -12,6 +12,7 @@
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <dwmapi.h>
 
 #include <algorithm>
 #include <array>
@@ -103,17 +104,51 @@ constexpr int IDC_T3K_IR_BROWSE = 236;
 constexpr int IDC_T3K_IR_CLEAR = 237;
 constexpr int IDC_T3K_PREVIEW_VOLUME = 238;
 constexpr int IDC_GP5_DELETE = 239;
-constexpr COLORREF kColorWindow = RGB(246, 248, 252);
-constexpr COLORREF kColorCard = RGB(255, 255, 255);
-constexpr COLORREF kColorBorder = RGB(220, 226, 235);
-constexpr COLORREF kColorAccent = RGB(46, 115, 233);
-constexpr COLORREF kColorAccentDark = RGB(33, 95, 204);
-constexpr COLORREF kColorText = RGB(26, 31, 41);
-constexpr COLORREF kColorSubtleText = RGB(88, 97, 112);
-constexpr COLORREF kColorFooter = RGB(239, 243, 249);
-constexpr COLORREF kColorInfo = RGB(244, 248, 255);
-constexpr COLORREF kColorStatusOk = RGB(73, 193, 89);
-constexpr COLORREF kColorDisabled = RGB(203, 210, 220);
+// Light-theme palette (original values, unchanged).
+constexpr COLORREF kColorWindowLight = RGB(246, 248, 252);
+constexpr COLORREF kColorCardLight = RGB(255, 255, 255);
+constexpr COLORREF kColorBorderLight = RGB(220, 226, 235);
+constexpr COLORREF kColorAccentLight = RGB(46, 115, 233);
+constexpr COLORREF kColorAccentDarkLight = RGB(33, 95, 204);
+constexpr COLORREF kColorTextLight = RGB(26, 31, 41);
+constexpr COLORREF kColorSubtleTextLight = RGB(88, 97, 112);
+constexpr COLORREF kColorFooterLight = RGB(239, 243, 249);
+constexpr COLORREF kColorInfoLight = RGB(244, 248, 255);
+constexpr COLORREF kColorStatusOkLight = RGB(73, 193, 89);
+constexpr COLORREF kColorDisabledLight = RGB(203, 210, 220);
+constexpr COLORREF kColorInfoBorderLight = RGB(210, 223, 247);
+
+// Dark-theme palette, used when the OS is set to dark mode (see applyThemeColors()).
+constexpr COLORREF kColorWindowDark = RGB(32, 32, 32);
+constexpr COLORREF kColorCardDark = RGB(44, 44, 46);
+constexpr COLORREF kColorBorderDark = RGB(64, 64, 68);
+constexpr COLORREF kColorAccentDark_ = RGB(88, 150, 255);
+constexpr COLORREF kColorAccentDarkDark = RGB(66, 128, 235);
+constexpr COLORREF kColorTextDark = RGB(235, 235, 240);
+constexpr COLORREF kColorSubtleTextDark = RGB(170, 175, 185);
+constexpr COLORREF kColorFooterDark = RGB(24, 24, 26);
+constexpr COLORREF kColorInfoDark = RGB(38, 44, 56);
+constexpr COLORREF kColorStatusOkDark = RGB(73, 193, 89);
+constexpr COLORREF kColorDisabledDark = RGB(70, 70, 74);
+constexpr COLORREF kColorInfoBorderDark = RGB(58, 72, 100);
+
+// Active palette; recomputed by applyThemeColors() at startup (WM_CREATE)
+// and again on WM_SETTINGCHANGE so a live OS theme switch is picked up
+// without a restart. Every draw/color routine below reads these globals
+// instead of the constants above, so the theme switch is one central place.
+bool gDarkMode = false;
+COLORREF kColorWindow = kColorWindowLight;
+COLORREF kColorCard = kColorCardLight;
+COLORREF kColorBorder = kColorBorderLight;
+COLORREF kColorAccent = kColorAccentLight;
+COLORREF kColorAccentDark = kColorAccentDarkLight;
+COLORREF kColorText = kColorTextLight;
+COLORREF kColorSubtleText = kColorSubtleTextLight;
+COLORREF kColorFooter = kColorFooterLight;
+COLORREF kColorInfo = kColorInfoLight;
+COLORREF kColorStatusOk = kColorStatusOkLight;
+COLORREF kColorDisabled = kColorDisabledLight;
+COLORREF kColorInfoBorder = kColorInfoBorderLight;
 
 enum class InputMode { None, SingleNam, Folder };
 
@@ -279,19 +314,100 @@ void safeDeleteObject(HGDIOBJ obj) {
     if (obj) DeleteObject(obj);
 }
 
+// Decided once at startup: does this Windows install actually have the
+// "Segoe UI Variable Text" family installed (Windows 11+)? Checked via
+// EnumFontFamiliesExW rather than a Windows-version check, since that's the
+// only reliable way to know a font family exists without just trying to
+// create it and hoping GDI didn't silently substitute something else.
+bool systemHasFontFamily(const wchar_t* faceName) {
+    HDC hdc = GetDC(nullptr);
+    if (!hdc) return false;
+    LOGFONTW lf{};
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcsncpy_s(lf.lfFaceName, LF_FACESIZE, faceName, _TRUNCATE);
+    bool found = false;
+    EnumFontFamiliesExW(hdc, &lf,
+        [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM lParam) -> int {
+            *reinterpret_cast<bool*>(lParam) = true;
+            return 0; // stop after first match
+        },
+        reinterpret_cast<LPARAM>(&found), 0);
+    ReleaseDC(nullptr, hdc);
+    return found;
+}
+
+// The one place that decides which face name every CreateFontW call below
+// uses, so the "Segoe UI Variable Text" / "Segoe UI" fallback decision is
+// made exactly once rather than re-checked per font.
+const wchar_t* uiFontFaceName() {
+    static const wchar_t* face = systemHasFontFamily(L"Segoe UI Variable Text") ? L"Segoe UI Variable Text" : L"Segoe UI";
+    return face;
+}
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+constexpr DWORD kDwmaUseImmersiveDarkModeOld = 19; // pre-20H1 Windows 10 builds
+
+// Reads HKCU\...\Personalize!AppsUseLightTheme; missing/unreadable defaults
+// to light (matches the historical, pre-dark-mode look of this app).
+bool isSystemDarkModeEnabled() {
+    DWORD value = 1;
+    DWORD size = sizeof(value);
+    const LSTATUS status = RegGetValueW(HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+    if (status != ERROR_SUCCESS) return false;
+    return value == 0;
+}
+
+// Recomputes gDarkMode and every gColor* global from it. Called once from
+// WM_CREATE and again on WM_SETTINGCHANGE so a live theme switch takes
+// effect without restarting the app; every paint/color routine in this file
+// reads these globals rather than duplicating the registry read.
+void applyThemeColors() {
+    gDarkMode = isSystemDarkModeEnabled();
+    kColorWindow = gDarkMode ? kColorWindowDark : kColorWindowLight;
+    kColorCard = gDarkMode ? kColorCardDark : kColorCardLight;
+    kColorBorder = gDarkMode ? kColorBorderDark : kColorBorderLight;
+    kColorAccent = gDarkMode ? kColorAccentDark_ : kColorAccentLight;
+    kColorAccentDark = gDarkMode ? kColorAccentDarkDark : kColorAccentDarkLight;
+    kColorText = gDarkMode ? kColorTextDark : kColorTextLight;
+    kColorSubtleText = gDarkMode ? kColorSubtleTextDark : kColorSubtleTextLight;
+    kColorFooter = gDarkMode ? kColorFooterDark : kColorFooterLight;
+    kColorInfo = gDarkMode ? kColorInfoDark : kColorInfoLight;
+    kColorStatusOk = gDarkMode ? kColorStatusOkDark : kColorStatusOkLight;
+    kColorDisabled = gDarkMode ? kColorDisabledDark : kColorDisabledLight;
+    kColorInfoBorder = gDarkMode ? kColorInfoBorderDark : kColorInfoBorderLight;
+}
+
+// Makes the window titlebar follow the OS dark/light setting. Tries the
+// modern attribute (20, Windows 10 20H1+/Windows 11) and falls back to the
+// pre-20H1 value (19) if that call fails -- both are standard, documented
+// DWM attributes; failure on very old Windows 10 builds is silently ignored
+// since the titlebar simply stays the default light chrome there.
+void applyDarkTitlebar(HWND hwnd) {
+    const BOOL enabled = gDarkMode ? TRUE : FALSE;
+    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled)))) {
+        DwmSetWindowAttribute(hwnd, kDwmaUseImmersiveDarkModeOld, &enabled, sizeof(enabled));
+    }
+}
+
 void createResources() {
+    applyThemeColors();
+    const wchar_t* face = uiFontFaceName();
     gFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                        DEFAULT_PITCH | FF_DONTCARE, face);
     gTitleFont = CreateFontW(-40, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                             DEFAULT_PITCH | FF_DONTCARE, face);
     gSubtitleFont = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                                DEFAULT_PITCH | FF_DONTCARE, face);
     gSectionFont = CreateFontW(-17, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                               DEFAULT_PITCH | FF_DONTCARE, face);
 
     gWindowBrush = CreateSolidBrush(kColorWindow);
     gCardBrush = CreateSolidBrush(kColorCard);
@@ -333,6 +449,32 @@ void applyFont(HWND h, HFONT font) {
 }
 
 void applyFont(HWND h) { applyFont(h, gFont); }
+
+// Re-reads the OS theme, recomputes the gColor* globals, rebuilds the small
+// set of theme-dependent brushes, and re-syncs the titlebar. Called from
+// WM_CREATE (after createResources() has made the brushes once) and again
+// from WM_SETTINGCHANGE so a live dark/light toggle applies without a
+// restart. Fonts are theme-independent so they're left alone here.
+void refreshThemeColors(HWND hwnd) {
+    const bool wasDark = gDarkMode;
+    applyThemeColors();
+    if (gWindowBrush == nullptr) return; // resources not created yet
+    if (wasDark == gDarkMode) { applyDarkTitlebar(hwnd); return; }
+
+    safeDeleteObject(gWindowBrush);
+    safeDeleteObject(gCardBrush);
+    safeDeleteObject(gFooterBrush);
+    safeDeleteObject(gInfoBrush);
+    safeDeleteObject(gStatusBrush);
+    gWindowBrush = CreateSolidBrush(kColorWindow);
+    gCardBrush = CreateSolidBrush(kColorCard);
+    gFooterBrush = CreateSolidBrush(kColorFooter);
+    gInfoBrush = CreateSolidBrush(kColorInfo);
+    gStatusBrush = CreateSolidBrush(kColorStatusOk);
+
+    applyDarkTitlebar(hwnd);
+    InvalidateRect(hwnd, nullptr, TRUE);
+}
 
 bool tone3000TabSelected() {
     return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 1;
@@ -1890,7 +2032,7 @@ void drawSectionCard(HDC hdc, const RECT& rc, int iconKind) {
 }
 
 void drawInfoBox(HDC hdc) {
-    drawRoundedRect(hdc, gUi.infoBox, kColorInfo, RGB(210, 223, 247), 12);
+    drawRoundedRect(hdc, gUi.infoBox, kColorInfo, kColorInfoBorder, 12);
     RECT iconRc{ gUi.infoBox.left + 14, gUi.infoBox.top + 12, gUi.infoBox.left + 34, gUi.infoBox.top + 32 };
     HPEN pen = CreatePen(PS_SOLID, 2, kColorAccent);
     HGDIOBJ oldPen = SelectObject(hdc, pen);
@@ -1941,17 +2083,21 @@ void drawButton(DRAWITEMSTRUCT* dis) {
     const int id = static_cast<int>(dis->CtlID);
     const bool primary = id == IDC_CONVERT || id == IDC_UPLOADER_UPLOAD || id == IDC_GP5_UPLOAD;
 
-    COLORREF fill = primary ? (selected ? kColorAccentDark : kColorAccent) : kColorCard;
-    COLORREF border = primary ? (selected ? kColorAccentDark : kColorAccentDark) : kColorAccent;
+    // Flat Windows-11-style fill/border/text per state. "selected" here is
+    // ODS_SELECTED, i.e. pressed -- used as the one hover/press color shift
+    // this owner-draw button gets (no separate mouse-hover tracking).
+    COLORREF fill = primary ? (selected ? kColorAccentDark : kColorAccent) : (selected ? kColorFooter : kColorCard);
+    COLORREF border = primary ? kColorAccentDark : (selected ? kColorAccentDark : kColorBorder);
     COLORREF text = primary ? RGB(255, 255, 255) : kColorAccentDark;
     if (disabled) {
-        fill = primary ? kColorDisabled : RGB(247, 248, 250);
-        border = RGB(208, 214, 224);
-        text = RGB(145, 152, 164);
+        fill = primary ? kColorDisabled : kColorCard;
+        border = kColorBorder;
+        text = kColorSubtleText;
     }
 
     RECT rc = dis->rcItem;
-    drawRoundedRect(dis->hDC, rc, fill, border, 16);
+    // Flatter, more Win11-like corner radius than the previous, heavier 16px.
+    drawRoundedRect(dis->hDC, rc, fill, border, 8);
 
     std::wstring label = getText(dis->hwndItem);
     SetBkMode(dis->hDC, TRANSPARENT);
@@ -1987,8 +2133,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         createUi(hwnd);
+        applyDarkTitlebar(hwnd);
         setText(gStatus, L"Ready to convert.");
         return 0;
+    }
+    case WM_SETTINGCHANGE: {
+        // Fired (among other things) when the user flips Settings > Personalization
+        // > Colors > "Choose your mode" without restarting the app.
+        refreshThemeColors(hwnd);
+        break;
     }
     case WM_SIZE:
         layoutControls(hwnd);
@@ -2042,6 +2195,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
         break;
+    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
+        // Native edit/listbox/combobox-edit controls don't pick up dark mode
+        // on their own; in light mode this intentionally falls through to
+        // DefWindowProc's normal white background (unchanged behavior).
+        if (!gDarkMode) break;
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(hdc, OPAQUE);
+        SetBkColor(hdc, kColorCard);
+        SetTextColor(hdc, kColorText);
+        return reinterpret_cast<LRESULT>(gCardBrush);
     }
     case WM_DRAWITEM:
         drawButton(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
