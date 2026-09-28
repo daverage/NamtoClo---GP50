@@ -2427,24 +2427,16 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     report(status,L"GP-5/GP-50: no separate selection reference available; using fitting reference for candidate selection.");
                 }
 
-                // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2"):
-                // optional and gated, per NativeConverterConfig::dynamicsAwareFitting's
-                // doc comment -- only runs the expensive P/K coordinate-descent search
-                // (~120s measured) when the already-chosen candidate's OWN measured
-                // dynamics-tracking error against Full A2 exceeds
-                // dynamicsSearchThresholdDb, using the six-level sweep already built
-                // above (gp5LevelClips) so this costs one more render pass, not a
-                // fresh Full A2 render. Needs a second bundled reference clip from the
-                // same gain bucket as a disjoint selection clip for the search's
-                // round-acceptance gate -- skipped (no search) if the reference clip
-                // wasn't a bundled one (Custom mode) or its bucket has only one clip.
+                // Priority 3 Phase 3: Dynamics-aware fitting with compression-error gating
+                // (CLAUDE.md's "Dynamics-aware fitting, Step 2"):
+                // Re-enabled with better gating based on multi-level compression error,
+                // instead of the original zero-anchored RMS metrics that made amps quieter.
+                // Only runs P/K search if base candidate has >1.5 dB compression error,
+                // and only accepts improvement if: error improves >50%, spectral <10%
+                // regress, and output level within ±2 dB. Using six-level sweep
+                // (gp5LevelClips) already built above for efficiency.
                 if(trainer.dynamicsAwareFitting&&!gp5LevelClips.empty()){
                     const std::vector<float>& winningB44=gp5DirectSolveWon?gp5DirectSolveB44:B44Pre;
-                    std::size_t zeroIdx=0;double bestDist=std::numeric_limits<double>::max();
-                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
-                        const double d=std::abs(gp5LevelClips[i].levelDb);
-                        if(d<bestDist){bestDist=d;zeroIdx=i;}
-                    }
                     std::vector<double> renderedDb(gp5LevelClips.size()),targetDb(gp5LevelClips.size());
                     for(std::size_t i=0;i<gp5LevelClips.size();++i){
                         std::vector<float> rendered;std::string stepErr;
@@ -2453,16 +2445,12 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                             renderedDb[i]=rmsDb(rendered);
                         targetDb[i]=rmsDb(gp5LevelClips[i].target44100);
                     }
-                    double sumSq=0.0;
-                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
-                        const double err=(renderedDb[i]-renderedDb[zeroIdx])-(targetDb[i]-targetDb[zeroIdx]);
-                        sumSq+=err*err;
-                    }
-                    const double measuredDynamicsRmsDb=std::sqrt(sumSq/static_cast<double>(gp5LevelClips.size()));
-                    r.gp5MeasuredDynamicsRmsDb=measuredDynamicsRmsDb;
-                    report(status,L"GP-5/GP-50: measured dynamics-tracking RMS error "+std::to_wstring(measuredDynamicsRmsDb)+L"dB (threshold "+std::to_wstring(trainer.dynamicsSearchThresholdDb)+L"dB).");
 
-                    if(measuredDynamicsRmsDb>trainer.dynamicsSearchThresholdDb){
+                    // Priority 3 Phase 3 Gate 1: Compression error measurement
+                    double baselineCompressionError=computeCompressionError(targetDb,renderedDb);
+                    report(status,L"GP-5/GP-50: measured compression error "+std::to_wstring(baselineCompressionError)+L"dB (gate: >1.5dB to enable P/K search).");
+
+                    if(baselineCompressionError>1.5){
                         std::wstring bucketPrefix;
                         switch(refine.referenceMode){
                             case ToneMatchReferenceMode::Bass: bucketPrefix=L"bass_"; break;
@@ -2486,27 +2474,56 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                         if(selectionClipPath.empty()){
                             report(status,L"GP-5/GP-50: dynamics error exceeds threshold, but no second bundled reference clip is available for the search's selection gate -- skipping the P/K search.");
                         }else{
-                            report(status,L"GP-5/GP-50: dynamics error exceeds threshold -- running Step 2 P/K search...");
+                            report(status,L"GP-5/GP-50: compression error >1.5dB -- running Phase 3 P/K search...");
                             std::vector<MultiLevelClip> selectionClips;std::string selError;
                             if(buildLevelClips(modelPath,selectionClipPath,selectionClips,selError,status,L"GP-5/GP-50 dynamics search (selection)")){
                                 std::string searchError;
                                 auto search=ntc::searchPkForDynamics(gp5PreToneMatchClo,gp5LevelClips,selectionClips,gp5LevelClips,0.3,searchError,status);
-                                os<<L", P/K search: selection dynamics rms "<<search.initialRmsDynamicsErrorDb<<L" -> "<<search.optimizedRmsDynamicsErrorDb;
-                                // Accept using the search's OWN acceptance signal (a genuine,
-                                // already-verified improvement in dynamics tracking on the
-                                // disjoint selection clip -- searchPkForDynamics only keeps a
-                                // round that clears both this AND its internal ESR/safety-floor
-                                // checks), NOT evaluateModelLoss's single-level spectral-
-                                // magnitude Tone Match loss -- that metric is blind to dynamics
-                                // improvements by design (CLAUDE.md's "22.7 CLOSED as a
-                                // selection method" -- an earlier version of this gate made
-                                // exactly this mistake and silently discarded every search win).
-                                if(search.ok&&search.optimizedRmsDynamicsErrorDb<search.initialRmsDynamicsErrorDb){
-                                    Model searchM=preM;searchM.pk.pp=search.pp;searchM.pk.pn=search.pn;searchM.pk.kp=search.kp;searchM.pk.kn=search.kn;searchM.B=search.b;
-                                    bestLoss=evaluateModelLoss(searchM,analysisInput,analysisTarget,44100.0);
-                                    gp5DirectSolveB44=search.b;
-                                    gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;gp5DynamicsSearchWon=true;
-                                    gp5Chosen->pk.pp=search.pp;gp5Chosen->pk.pn=search.pn;gp5Chosen->pk.kp=search.kp;gp5Chosen->pk.kn=search.kn;
+
+                                if(search.ok){
+                                    // Priority 3 Phase 3 Gates 2-4: Acceptance criteria
+                                    // Measure P/K result's compression error
+                                    std::vector<double> pkRenderedDb(gp5LevelClips.size()),pkTargetDb(gp5LevelClips.size());
+                                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
+                                        std::vector<float> pkRendered;std::string pkErr;
+                                        if(renderCloWithOverrideOnSignal(gp5PreToneMatchClo,search.pp,search.pn,search.kp,search.kn,
+                                                                         search.b,gp5LevelClips[i].input44100,pkRendered,pkErr))
+                                            pkRenderedDb[i]=rmsDb(pkRendered);
+                                        pkTargetDb[i]=rmsDb(gp5LevelClips[i].target44100);
+                                    }
+                                    double pkCompressionError=computeCompressionError(pkTargetDb,pkRenderedDb);
+
+                                    // Gate 2: >50% compression error improvement
+                                    double compressionImprovement=(baselineCompressionError>0)?((baselineCompressionError-pkCompressionError)/baselineCompressionError):0.0;
+
+                                    // Gate 3: spectral loss doesn't regress >10%
+                                    Model pkM=preM;pkM.pk.pp=search.pp;pkM.pk.pn=search.pn;pkM.pk.kp=search.kp;pkM.pk.kn=search.kn;pkM.B=search.b;
+                                    double pkLoss=evaluateModelLoss(pkM,analysisInput,analysisTarget,44100.0);
+                                    double spectralRegression=(bestLoss>0)?((pkLoss-bestLoss)/bestLoss):0.0;
+
+                                    // Gate 4: output level within ±2 dB
+                                    double baseline0dBRms=(renderedDb.size()>0)?renderedDb[0]:1.0;
+                                    double pk0dBRms=(pkRenderedDb.size()>0)?pkRenderedDb[0]:1.0;
+                                    double levelDiffDb=20.0*std::log10((pk0dBRms>1e-10)?pk0dBRms:1e-10)-20.0*std::log10((baseline0dBRms>1e-10)?baseline0dBRms:1e-10);
+                                    bool levelOk=std::abs(levelDiffDb)<2.0;
+
+                                    os<<L", P/K search: compression "<<baselineCompressionError<<L"dB -> "<<pkCompressionError<<L"dB ("<<(compressionImprovement*100.0)<<L"% improvement)";
+                                    os<<L", spectral "<<bestLoss<<L" -> "<<pkLoss<<L" ("<<(spectralRegression*100.0)<<L"% regress)";
+                                    os<<L", level "<<levelDiffDb<<L"dB";
+
+                                    if(compressionImprovement>0.5&&spectralRegression<0.1&&levelOk){
+                                        report(status,L"GP-5/GP-50: P/K search accepted (compression improved, spectral stable, level ok).");
+                                        bestLoss=pkLoss;
+                                        gp5DirectSolveB44=search.b;
+                                        gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;gp5DynamicsSearchWon=true;
+                                        gp5Chosen->pk.pp=search.pp;gp5Chosen->pk.pn=search.pn;gp5Chosen->pk.kp=search.kp;gp5Chosen->pk.kn=search.kn;
+                                    }else{
+                                        std::wstring reason=L"";
+                                        if(compressionImprovement<=0.5)reason+=L"compression <50% improvement; ";
+                                        if(spectralRegression>=0.1)reason+=L"spectral regressed >10%; ";
+                                        if(!levelOk)reason+=L"level change >2dB";
+                                        report(status,L"GP-5/GP-50: P/K search rejected ("+reason+L").");
+                                    }
                                 }else if(!search.ok){
                                     report(status,L"GP-5/GP-50: P/K search failed ("+std::wstring(searchError.begin(),searchError.end())+L").");
                                 }
