@@ -2280,7 +2280,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     Model directM=preM;directM.B=directB;
                     const double lossDirect=evaluateModelLoss(directM,analysisInput,analysisTarget,44100.0);
                     os<<L", direct B solve="<<lossDirect;
-                    if(lossDirect<bestLoss){bestLoss=lossDirect;gp5ToneMatchIr.clear();gp5DirectSolveB44=directB;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;}
+                    if(lossDirect<bestLoss){bestLoss=lossDirect;gp5DirectSolveB44=directB;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;}
                 }
 
                 std::vector<MultiLevelClip> gp5LevelClips;
@@ -2302,7 +2302,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                             Model mlM=preM;mlM.B=mlCandidates.front().b;
                             const double lossMultiLevel=evaluateModelLoss(mlM,analysisInput,analysisTarget,44100.0);
                             os<<L", multi-level B solve="<<lossMultiLevel;
-                            if(lossMultiLevel<bestLoss){bestLoss=lossMultiLevel;gp5ToneMatchIr.clear();gp5DirectSolveB44=mlCandidates.front().b;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=true;}
+                            if(lossMultiLevel<bestLoss){bestLoss=lossMultiLevel;gp5DirectSolveB44=mlCandidates.front().b;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=true;}
                         }
                     }
                 }
@@ -2351,7 +2351,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                         std::vector<float> selS44;std::uint32_t selSr44=0;
                         if(readPcm16Mono(selectionStimulusPath,selS44,selSr44,selErr)){
                             std::vector<float> unused,selRendered;double selRate=sr;
-                            if(renderNam(modelPath,selS44,trainer.blockSize,0.31f,unused,selRendered,selRate,selErr)){
+                            if(renderNam(modelPath,selS44,trainer.blockSize,0.31f,unused,selRendered,selRate,selErr,status)){
                                 selectionTarget=prepareToneTarget44100(selRendered,selRate);
                                 if(loadClipAsMono44100(selectionStimulusPath,selectionInput,selErr)){
                                     // Re-evaluate candidates against selection reference
@@ -2364,7 +2364,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                                         os<<L", direct B solve="<<lossDirectSel;
                                         if(lossDirectSel>=selectionBestLoss){
                                             // Direct solve no longer wins; revert to no-correction
-                                            gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5ToneMatchIr.clear();gp5DirectSolveB44.clear();
+                                            gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5DirectSolveB44.clear();
                                             report(status,L"GP-5/GP-50: direct B solve did not win on selection reference; using no correction.");
                                         }
                                     }else if(gp5MultiLevelSolveWon){
@@ -2373,7 +2373,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                                         os<<L", multi-level B solve="<<lossMLSel;
                                         if(lossMLSel>=selectionBestLoss){
                                             // Multi-level solve no longer wins; revert
-                                            gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5ToneMatchIr.clear();gp5DirectSolveB44.clear();
+                                            gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5DirectSolveB44.clear();
                                             report(status,L"GP-5/GP-50: multi-level B solve did not win on selection reference; using no correction.");
                                         }
                                     }
@@ -2462,7 +2462,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                                 if(search.ok&&search.optimizedRmsDynamicsErrorDb<search.initialRmsDynamicsErrorDb){
                                     Model searchM=preM;searchM.pk.pp=search.pp;searchM.pk.pn=search.pn;searchM.pk.kp=search.kp;searchM.pk.kn=search.kn;searchM.B=search.b;
                                     bestLoss=evaluateModelLoss(searchM,analysisInput,analysisTarget,44100.0);
-                                    gp5ToneMatchIr.clear();gp5DirectSolveB44=search.b;
+                                    gp5DirectSolveB44=search.b;
                                     gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;gp5DynamicsSearchWon=true;
                                     gp5Chosen->pk.pp=search.pp;gp5Chosen->pk.pn=search.pn;gp5Chosen->pk.kp=search.kp;gp5Chosen->pk.kn=search.kn;
                                 }else if(!search.ok){
