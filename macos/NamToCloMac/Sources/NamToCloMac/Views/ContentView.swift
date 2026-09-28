@@ -8,29 +8,37 @@ struct ContentView: View {
     @State private var selectedTab: AppTab = .convert
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            ConvertView()
-                .tabItem { Label("Convert", systemImage: "waveform") }
-                .tag(AppTab.convert)
-            Tone3000View()
-                .tabItem { Label("Tone3000", systemImage: "magnifyingglass") }
-                .tag(AppTab.tone3000)
-            Gp5UploadView()
-                .tabItem { Label("GP-5 / GP-50", systemImage: "cable.connector") }
-                .tag(AppTab.gp5)
-            Gp200UploadView()
-                .tabItem { Label("GP-200", systemImage: "cable.connector.horizontal") }
-                .tag(AppTab.gp200)
-            DebugView()
-                .tabItem { Label("Debug", systemImage: "ladybug") }
-                .tag(AppTab.debug)
-        }
-        .padding()
-        .onReceive(NotificationCenter.default.publisher(for: .switchToUploadTab)) { _ in
-            selectedTab = .gp5
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .switchToConvertTab)) { _ in
-            selectedTab = .convert
+        VStack(spacing: 0) {
+            TabView(selection: $selectedTab) {
+                ConvertView()
+                    .tabItem { Label("Convert", systemImage: "waveform") }
+                    .tag(AppTab.convert)
+                Tone3000View()
+                    .tabItem { Label("Tone3000", systemImage: "magnifyingglass") }
+                    .tag(AppTab.tone3000)
+                Gp5UploadView()
+                    .tabItem { Label("GP-5 / GP-50", systemImage: "cable.connector") }
+                    .tag(AppTab.gp5)
+                Gp200UploadView()
+                    .tabItem { Label("GP-200", systemImage: "cable.connector.horizontal") }
+                    .tag(AppTab.gp200)
+                DebugView()
+                    .tabItem { Label("Debug", systemImage: "ladybug") }
+                    .tag(AppTab.debug)
+            }
+            .padding()
+            .onReceive(NotificationCenter.default.publisher(for: .switchToUploadTab)) { _ in
+                selectedTab = .gp5
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .switchToConvertTab)) { _ in
+                selectedTab = .convert
+            }
+
+            Divider()
+            Text("Version: \(AppState.appVersion)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(8)
         }
     }
 }
