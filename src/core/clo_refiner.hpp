@@ -28,12 +28,24 @@ enum class ToneMatchReferenceMode { Default, Auto, Clean, Moderate, High, Bass, 
 struct CloRefineConfig {
     bool enabled = false;
     ToneMatchReferenceMode referenceMode = ToneMatchReferenceMode::Default;
-    // Optional refinement test audio, used only when referenceMode == Custom. Its
-    // FIRST 20 seconds are adapted to mono PCM16 44.1 kHz and inserted as the
-    // 20-second tail of a second, otherwise-identical conversion stimulus. That exact
-    // stimulus is rendered through both the verified NAM Full path and the original
-    // CLO, so Tone Match compares the same performance through both models.
+    // FITTING reference audio (used to optimize each Tone Match candidate).
+    // Optional, used only when referenceMode == Custom. Its FIRST 20 seconds
+    // are adapted to mono PCM16 44.1 kHz and inserted as the 20-second tail of
+    // a second, otherwise-identical conversion stimulus. That exact stimulus is
+    // rendered through both the verified NAM Full path and the original CLO so
+    // Tone Match optimizes candidates against the same performance through both.
     fs::path referenceWav;
+    // SELECTION reference audio (used to choose the winning candidate).
+    // Optional, separate from referenceWav. When empty and referenceMode is
+    // Auto/Clean/Moderate/High/Bass, a second bundled clip from the same gain
+    // bucket is automatically selected. When both referenceWav and
+    // selectionReferenceWav are populated (referenceMode == Custom), fitting
+    // uses referenceWav and candidate selection uses selectionReferenceWav,
+    // preventing any candidate from winning merely because it fits the fitting
+    // clip particularly well. When empty and referenceMode == Default/Custom
+    // (no bundled second clip available), candidate selection falls back to
+    // referenceWav == fitting and selection use the same clip.
+    fs::path selectionReferenceWav;
 };
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
