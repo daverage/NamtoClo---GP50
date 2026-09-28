@@ -2232,28 +2232,19 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
     // GP-5/GP-50 device-specific Tone Match: measure and correct the ACTUAL chosen
     // 512-tap model's own response against the same target, instead of reusing the
-    // correction derived from the GP-200 2048-tap model above. Three candidate
-    // corrections are tried -- the correction-IR approach (computeToneMatchCorrectionIr,
-    // sized for a different tap budget and convolved+truncated into B), a direct
-    // least-squares solve for B against the single-level Tone Match target
-    // (solveBlockBLeastSquares, no tap-budget mismatch), and a direct solve of B
-    // jointly across a six-level ({-24,-18,-12,-6,0,+6} dB) gain sweep of the SAME
-    // Tone Match reference clip (sweepKAndSolveSharedB with kMultiplier=1.0 --
-    // P/K frozen at the fitted shaper, this is a closed-form solve, not the
-    // Step 2 P/K search). Held-out testing (see CLAUDE.md's "GP-5/GP-50 direct
-    // Block B least-squares solve" and "Definitive official-vs-ours benchmark"
-    // sections) found: the direct solve beats correction-IR by a wide margin
-    // across every case tested; and the multi-level solve, isolated from any P/K
-    // change, reproduces almost the entire held-out fidelity win the P/K-search
-    // candidate showed in that benchmark (sometimes fractionally better than the
-    // single-level solve, never meaningfully worse) -- so it's included here as a
-    // fourth, still-cheap (single closed-form solve, no search) candidate. This
-    // always compares all three against doing nothing and keeps whichever scores
-    // lowest on the existing single-level Tone Match evaluation target, so a
-    // multi-level candidate can only ship if it's ALSO at least as good on that
-    // held-out-style yardstick, not merely because it was fit against more data.
-    std::vector<float> gp5ToneMatchIr;
-    std::vector<float> gp5CorrectionB44;
+    // correction derived from the GP-200 2048-tap model above. Two candidate
+    // corrections are tried: a direct least-squares solve for B against the single-level
+    // Tone Match target (solveBlockBLeastSquares, no tap-budget mismatch), and a direct
+    // solve of B jointly across a six-level ({-24,-18,-12,-6,0,+6} dB) gain sweep
+    // (sweepKAndSolveSharedB with kMultiplier=1.0 -- P/K frozen at the fitted shaper).
+    // Candidates are SELECTED based on a separate selection reference clip (Priority 2,
+    // when available from the same gain bucket), preventing overfitting to the fitting
+    // stimulus. Held-out testing (see CLAUDE.md's "GP-5/GP-50 direct Block B
+    // least-squares solve" and "Definitive official-vs-ours benchmark" sections) found:
+    // the direct solve beats the older correction-IR approach by a wide margin, and the
+    // multi-level solve reproduces nearly the entire fidelity win (sometimes slightly
+    // better, never meaningfully worse). Both candidates are compared against no-correction
+    // and a multi-level candidate ships only if at least as good on the selection reference.
     std::vector<float> gp5DirectSolveB44;
     bool gp5DirectSolveWon=false;
     bool gp5MultiLevelSolveWon=false;
@@ -2283,16 +2274,6 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                 Model preM;preM.pre=gp5Chosen->pre;preM.post=gp5Chosen->post;preM.pk=gp5Chosen->pk;preM.A=A44;preM.B=B44Pre;
                 double bestLoss=evaluateModelLoss(preM,analysisInput,analysisTarget,44100.0);
                 std::wostringstream os;os<<L"GP-5/GP-50 Tone Match: loss before="<<bestLoss;
-
-                std::vector<float> candidateIr;
-                if(computeToneMatchCorrectionIr(gp5PreToneMatchClo,refineStimulusPath,refineTargetWavPath,candidateIr,gp5Error,status)){
-                    Model postM=preM;
-                    if(applyCorrectiveIrToB44(postM.B,candidateIr,0.0,applyErr)){
-                        const double lossPost=evaluateModelLoss(postM,analysisInput,analysisTarget,44100.0);
-                        os<<L", correction-IR="<<lossPost;
-                        if(lossPost<bestLoss){bestLoss=lossPost;gp5ToneMatchIr=candidateIr;gp5CorrectionB44=postM.B;gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;}
-                    }
-                }
 
                 std::vector<float> directB;std::string solveError;
                 if(solveBlockBLeastSquares(gp5PreToneMatchClo,refineStimulusPath,refineTargetWavPath,directB,solveError,status)){
@@ -2326,6 +2307,84 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     }
                 }
 
+                // Priority 2: Candidate selection based on separate reference clip.
+                // If a second bundled clip is available from the same gain bucket, use it
+                // to select the winner (prevents overfitting to the fitting stimulus).
+                // When no second clip is available, fall back to fitting reference for selection.
+                fs::path selectionReferencePath;
+                if(!refine.selectionReferenceWav.empty()){
+                    selectionReferencePath=refine.selectionReferenceWav;
+                }else if(refine.referenceMode==ToneMatchReferenceMode::Auto||
+                         refine.referenceMode==ToneMatchReferenceMode::Clean||
+                         refine.referenceMode==ToneMatchReferenceMode::Moderate||
+                         refine.referenceMode==ToneMatchReferenceMode::High||
+                         refine.referenceMode==ToneMatchReferenceMode::Bass){
+                    std::wstring bucketPrefix;
+                    switch(refine.referenceMode){
+                        case ToneMatchReferenceMode::Bass: bucketPrefix=L"bass_"; break;
+                        case ToneMatchReferenceMode::Clean: bucketPrefix=L"clean_"; break;
+                        case ToneMatchReferenceMode::Moderate: bucketPrefix=L"moderate_"; break;
+                        case ToneMatchReferenceMode::High: bucketPrefix=L"high_"; break;
+                        case ToneMatchReferenceMode::Auto:
+                            switch(classifyGainBucket(gp5Chosen->pk.kp,gp5Chosen->pk.kn)){
+                                case AmpGainBucket::Clean: bucketPrefix=L"clean_"; break;
+                                case AmpGainBucket::Moderate: bucketPrefix=L"moderate_"; break;
+                                case AmpGainBucket::High: bucketPrefix=L"high_"; break;
+                            }
+                            break;
+                        default: break;
+                    }
+                    if(!bucketPrefix.empty()){
+                        const fs::path clipsDir=resolveReferenceClipsDir();
+                        if(!clipsDir.empty())selectionReferencePath=secondClipWithPrefix(clipsDir,bucketPrefix);
+                    }
+                }
+
+                // If selection clip differs from fitting clip, re-evaluate candidates against it
+                if(!selectionReferencePath.empty()&&selectionReferencePath!=refine.referenceWav){
+                    std::vector<float> selectionInput,selectionTarget;std::string selErr;
+                    StimulusConfig selectionStimulusConfig=stimulus;
+                    selectionStimulusConfig.tailMode=TailMode::RecordedAudio;
+                    selectionStimulusConfig.recordedAudio=selectionReferencePath;
+                    fs::path selectionStimulusPath=work/L"selection_input_wav.wav";
+                    if(buildStimulus(originalStimulus,selectionStimulusConfig,selectionStimulusPath,selErr)){
+                        std::vector<float> selS44;std::uint32_t selSr44=0;
+                        if(readPcm16Mono(selectionStimulusPath,selS44,selSr44,selErr)){
+                            std::vector<float> unused,selRendered;double selRate=sr;
+                            if(renderNam(modelPath,selS44,trainer.blockSize,0.31f,unused,selRendered,selRate,selErr)){
+                                selectionTarget=prepareToneTarget44100(selRendered,selRate);
+                                if(loadClipAsMono44100(selectionStimulusPath,selectionInput,selErr)){
+                                    // Re-evaluate candidates against selection reference
+                                    double selectionBestLoss=evaluateModelLoss(preM,selectionInput,selectionTarget,44100.0);
+                                    os<<L"; selection reference: no-correction="<<selectionBestLoss;
+
+                                    if(gp5DirectSolveWon){
+                                        Model directM=preM;directM.B=gp5DirectSolveB44;
+                                        const double lossDirectSel=evaluateModelLoss(directM,selectionInput,selectionTarget,44100.0);
+                                        os<<L", direct B solve="<<lossDirectSel;
+                                        if(lossDirectSel>=selectionBestLoss){
+                                            // Direct solve no longer wins; revert to no-correction
+                                            gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5ToneMatchIr.clear();gp5DirectSolveB44.clear();
+                                            report(status,L"GP-5/GP-50: direct B solve did not win on selection reference; using no correction.");
+                                        }
+                                    }else if(gp5MultiLevelSolveWon){
+                                        Model mlM=preM;mlM.B=gp5DirectSolveB44;
+                                        const double lossMLSel=evaluateModelLoss(mlM,selectionInput,selectionTarget,44100.0);
+                                        os<<L", multi-level B solve="<<lossMLSel;
+                                        if(lossMLSel>=selectionBestLoss){
+                                            // Multi-level solve no longer wins; revert
+                                            gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5ToneMatchIr.clear();gp5DirectSolveB44.clear();
+                                            report(status,L"GP-5/GP-50: multi-level B solve did not win on selection reference; using no correction.");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }else if(selectionReferencePath.empty()){
+                    report(status,L"GP-5/GP-50: no separate selection reference available; using fitting reference for candidate selection.");
+                }
+
                 // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2"):
                 // optional and gated, per NativeConverterConfig::dynamicsAwareFitting's
                 // doc comment -- only runs the expensive P/K coordinate-descent search
@@ -2338,8 +2397,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                 // round-acceptance gate -- skipped (no search) if the reference clip
                 // wasn't a bundled one (Custom mode) or its bucket has only one clip.
                 if(trainer.dynamicsAwareFitting&&!gp5LevelClips.empty()){
-                    const std::vector<float>& winningB44=gp5DirectSolveWon?gp5DirectSolveB44:
-                        (!gp5ToneMatchIr.empty()?gp5CorrectionB44:B44Pre);
+                    const std::vector<float>& winningB44=gp5DirectSolveWon?gp5DirectSolveB44:B44Pre;
                     std::size_t zeroIdx=0;double bestDist=std::numeric_limits<double>::max();
                     for(std::size_t i=0;i<gp5LevelClips.size();++i){
                         const double d=std::abs(gp5LevelClips[i].levelDb);
@@ -2433,8 +2491,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                 // instead: this step then only ever corrects TONE, never overall
                 // loudness relative to what a non-Tone-Match conversion already sounds
                 // like -- exactly what a "Tone Match" feature should do.
-                gp5FinalB44=gp5DirectSolveWon?gp5DirectSolveB44:
-                    (!gp5ToneMatchIr.empty()?gp5CorrectionB44:B44Pre);
+                gp5FinalB44=gp5DirectSolveWon?gp5DirectSolveB44:B44Pre;
                 {
                     Model finalM=preM;finalM.pk=gp5Chosen->pk;finalM.B=gp5FinalB44;
                     std::vector<float> finalRendered,plainRendered;
@@ -2455,7 +2512,6 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                 if(gp5DynamicsSearchWon){os<<L" -- using Step 2 P/K search.";r.gp5ToneMatchMethod=L"Step 2 P/K search";}
                 else if(gp5MultiLevelSolveWon){os<<L" -- using multi-level B solve.";r.gp5ToneMatchMethod=L"multi-level B solve";}
                 else if(gp5DirectSolveWon){os<<L" -- using direct B solve.";r.gp5ToneMatchMethod=L"direct B solve";}
-                else if(!gp5ToneMatchIr.empty()){os<<L" -- using correction-IR.";r.gp5ToneMatchMethod=L"correction-IR";}
                 else{os<<L" -- not applying (baseline wins).";r.gp5ToneMatchMethod=L"none";}
                 report(status,os.str());
             }
@@ -2463,7 +2519,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     }
 
     if(gp5Chosen){
-        const bool gp5ToneMatchApplied=gp5DirectSolveWon||!gp5ToneMatchIr.empty();
+        const bool gp5ToneMatchApplied=gp5DirectSolveWon||gp5MultiLevelSolveWon||gp5DynamicsSearchWon;
         r.gp5gp50Compact=uniqueOutput(outputDirectory,inputNam.stem().wstring(),
             gp5ToneMatchApplied?L"_NATIVE_GP5GP50_512_TONEMATCH.clo":L"_NATIVE_GP5GP50_512.clo");
         // Corrective IR still layers onto this Block B as before (unless the direct
@@ -2479,8 +2535,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
             :(gp5DirectSolveWon
                 ?serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,{},0.0,{},0.0,&gp5DirectSolveB44)
                 :serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,
-                                     correction.enabled?correctiveStats.postGainDb:-6.0,
-                                     gp5ToneMatchIr,0.0));
+                                     correction.enabled?correctiveStats.postGainDb:-6.0));
         if(!serializeOk){
             r.error=error;fs::remove_all(work,ec);return r;
         }
@@ -2489,7 +2544,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
             <<(gp5DynamicsSearchWon?L", device-specific Tone Match applied (Step 2 P/K search)":
                (gp5MultiLevelSolveWon?L", device-specific Tone Match applied (multi-level B solve)":
                (gp5DirectSolveWon?L", device-specific Tone Match applied (direct B solve)":
-               (!gp5ToneMatchIr.empty()?L", device-specific Tone Match applied (correction-IR)":(refine.enabled?L", Tone Match not applied":L"")))))
+               (refine.enabled?L", Tone Match not applied":L""))))
             <<L".";report(status,os.str());}
     }
 
