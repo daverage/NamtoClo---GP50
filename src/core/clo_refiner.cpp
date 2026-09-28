@@ -1120,4 +1120,17 @@ bool writeMono44100Wav(const fs::path& path, const std::vector<float>& samples, 
     return true;
 }
 
+double computeCompressionError(const std::vector<double>& referenceOutputLevels,
+                                const std::vector<double>& modelOutputLevels) {
+    if (referenceOutputLevels.size() != modelOutputLevels.size() || referenceOutputLevels.empty()) {
+        return std::numeric_limits<double>::max();
+    }
+    double sumSqError = 0.0;
+    for (std::size_t i = 0; i < referenceOutputLevels.size(); ++i) {
+        const double error = referenceOutputLevels[i] - modelOutputLevels[i];
+        sumSqError += error * error;
+    }
+    return std::sqrt(sumSqError / referenceOutputLevels.size());
+}
+
 } // namespace ntc

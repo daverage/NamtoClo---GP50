@@ -2283,11 +2283,15 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     if(lossDirect<bestLoss){bestLoss=lossDirect;gp5DirectSolveB44=directB;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;}
                 }
 
-                std::vector<MultiLevelClip> gp5LevelClips;
-                if(!refine.referenceWav.empty()){
-                    std::string levelError;
-                    if(buildLevelClips(modelPath,refine.referenceWav,gp5LevelClips,levelError,status,L"GP-5/GP-50 multi-level Tone Match")){
-                        std::vector<KSweepCandidate> mlCandidates;std::string mlError;
+                std::vector<MultiLevelClip> gp5LevelClips;std::vector<KSweepCandidate> mlCandidates;
+                // Build multi-level clips for Priority 3 Phase 1 evaluation.
+                // Use selection reference if available, otherwise use the fitting reference or default stimulus.
+                fs::path levelClipsSource=!refine.referenceWav.empty()?refine.referenceWav:refineStimulusPath;
+                std::string levelError;
+                if(buildLevelClips(modelPath,levelClipsSource,gp5LevelClips,levelError,status,L"GP-5/GP-50 multi-level Tone Match")){
+                    // Create multi-level candidate from sweepKAndSolveSharedB (only if we have referenceWav)
+                    if(!refine.referenceWav.empty()){
+                        std::string mlError;
                         // A small {0.85,1.0,1.15} K-multiplier grid was tried here (2026-09-15)
                         // instead of the fixed 1.0 below -- sweepKAndSolveSharedB already supports
                         // it, and the full research grid remains diagnostic-only via
@@ -2305,6 +2309,44 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                             if(lossMultiLevel<bestLoss){bestLoss=lossMultiLevel;gp5DirectSolveB44=mlCandidates.front().b;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=true;}
                         }
                     }
+
+                    // Priority 3 Phase 1: Multi-level candidate evaluation
+                    // Evaluate all three candidates (no-correction, direct B solve, multi-level B solve)
+                    // across the 6-level sweep, not just at the fitting stimulus level.
+                    // Pick the candidate that wins majority of levels.
+                    std::vector<std::vector<float>> noCorrRendered(gp5LevelClips.size()),directRendered(gp5LevelClips.size()),mlRendered(gp5LevelClips.size());
+                    std::vector<double> noCorrLosses(gp5LevelClips.size()),directLosses(gp5LevelClips.size()),mlLosses(gp5LevelClips.size());
+                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
+                        if(renderCloWithOverrideOnSignal(gp5PreToneMatchClo,preM.pk.pp,preM.pk.pn,preM.pk.kp,preM.pk.kn,
+                                                         B44Pre,gp5LevelClips[i].input44100,noCorrRendered[i],levelError)){
+                            noCorrLosses[i]=evaluateModelLoss(preM,gp5LevelClips[i].input44100,gp5LevelClips[i].target44100,44100.0);
+                        }else noCorrLosses[i]=std::numeric_limits<double>::max();
+                        if(gp5DirectSolveWon&&renderCloWithOverrideOnSignal(gp5PreToneMatchClo,preM.pk.pp,preM.pk.pn,preM.pk.kp,preM.pk.kn,
+                                                         gp5DirectSolveB44,gp5LevelClips[i].input44100,directRendered[i],levelError)){
+                            Model directM=preM;directM.B=gp5DirectSolveB44;
+                            directLosses[i]=evaluateModelLoss(directM,gp5LevelClips[i].input44100,gp5LevelClips[i].target44100,44100.0);
+                        }else directLosses[i]=std::numeric_limits<double>::max();
+                        if(gp5MultiLevelSolveWon&&mlCandidates.size()>0&&renderCloWithOverrideOnSignal(gp5PreToneMatchClo,preM.pk.pp,preM.pk.pn,preM.pk.kp,preM.pk.kn,
+                                                         mlCandidates.front().b,gp5LevelClips[i].input44100,mlRendered[i],levelError)){
+                            Model mlM=preM;mlM.B=mlCandidates.front().b;
+                            mlLosses[i]=evaluateModelLoss(mlM,gp5LevelClips[i].input44100,gp5LevelClips[i].target44100,44100.0);
+                        }else mlLosses[i]=std::numeric_limits<double>::max();
+                    }
+                    int noCorrWins=0,directWins=0,mlWins=0;
+                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
+                        double minLoss=std::min({noCorrLosses[i],directLosses[i],mlLosses[i]});
+                        if(noCorrLosses[i]==minLoss)++noCorrWins;
+                        if(directLosses[i]==minLoss)++directWins;
+                        if(mlLosses[i]==minLoss)++mlWins;
+                    }
+                    if(directWins>noCorrWins){
+                        gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;
+                    }else if(mlWins>noCorrWins&&mlWins>directWins){
+                        gp5DirectSolveWon=true;gp5MultiLevelSolveWon=true;
+                    }else{
+                        gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5DirectSolveB44.clear();
+                    }
+                    os<<L" [multi-level: no-correction="<<noCorrWins<<", direct="<<directWins<<", ml="<<mlWins<<" wins]";
                 }
 
                 // Priority 2: Candidate selection based on separate reference clip.

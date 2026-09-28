@@ -337,6 +337,12 @@ bool renderPreBOnSignal(const fs::path& sourceClo,
 // EXISTING shipped B rather than solve a new one from scratch.
 bool readB44FromClo(const fs::path& sourceClo, std::vector<float>& outB, std::string& error);
 
+// Compression error metric (Priority 3 Phase 1): measures how well a model preserves the
+// compression curve of a reference across multiple input levels. Inputs are output levels
+// (in dB) at each test point; returns RMS error in dB.
+double computeCompressionError(const std::vector<double>& referenceOutputLevels,
+                                const std::vector<double>& modelOutputLevels);
+
 // Writes samples as mono PCM16 44.1kHz WAV -- for exporting comparison
 // renders (e.g. runPkDynamicsAudition below) to listen to directly, not
 // used by any conversion or refinement path.
