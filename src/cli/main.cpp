@@ -76,6 +76,7 @@ void printUsage() {
         "                        (GP-200 fixed 10-slot upload: AMP1-5 -> slot 0-4, DIST1-5 -> slot 5-9)\n"
         "  namtoclo clo-info <file.clo> [--json]\n"
         "  namtoclo eq-match-batch <corpusDir> <outputDir> [--clips-dir <dir>]\n"
+        "  namtoclo pk-compare <a.nam> [b.nam ...] [--clips-dir <dir>] [--output <csv>]\n"
         "                          (research tool -- see ntc::runEqMatchExperiment; corpusDir must\n"
         "                          contain development/ and selection/ subfolders of *.nam files,\n"
         "                          e.g. the NamtoCloNAMCorpus layout)\n"
@@ -721,6 +722,100 @@ int cmdEqMatchBatch(const Args& a) {
     return failures == totalRuns ? 1 : 0;
 }
 
+// Automated Phase 3 quality check: converts each NAM with the dynamics-aware P/K search
+// off ("production") and on ("experimental"), renders both against Full A2 at 7 levels,
+// and fails if P/K-on is quieter or spectrally worse than P/K-off.
+int cmdPkCompare(const Args& a) {
+    if (a.positional.empty()) {
+        std::cerr << "pk-compare: missing <nam> file(s)\n";
+        return 2;
+    }
+    fs::path clipsDir = a.clipsDir.empty() ? fs::path{} : fs::path(a.clipsDir);
+    if (clipsDir.empty()) {
+        const fs::path exe = ntc::executablePath();
+        if (!exe.empty()) clipsDir = exe.parent_path() / L"reference_clips";
+    }
+    const fs::path diClip = clipsDir / L"high_metalcore.wav";
+    const std::vector<fs::path> heldOut = {
+        clipsDir / L"clean_mayer.wav", clipsDir / L"moderate_brit.wav",
+        clipsDir / L"high_thrash.wav", clipsDir / L"bass_downtown.wav",
+    };
+    for (const fs::path& p : { diClip, heldOut[0], heldOut[1], heldOut[2], heldOut[3] }) {
+        if (!fs::exists(p)) {
+            std::cerr << "pk-compare: reference clip not found: " << p.string() << "\n";
+            return 2;
+        }
+    }
+
+    std::ofstream csv;
+    if (!a.output.empty()) {
+        csv.open(a.output);
+        csv << "nam,pk_moved,mean_gain_err_off,mean_gain_err_on,worst_level_delta_db,spectral_off,spectral_on,"
+               "rms_rel_err_off,rms_rel_err_on,heldout_esr_off,heldout_esr_on,verdict\n";
+    }
+
+    int fails = 0, errors = 0, applied = 0;
+    for (const std::string& namStr : a.positional) {
+        const fs::path nam = namStr;
+        std::cout << "\n=== " << nam.filename().string() << " ===\n";
+        std::vector<ntc::ValetonComparisonResult> results;
+        std::string error;
+        const bool ok = ntc::runValetonComparisonExperiment(nam, diClip, heldOut, results, error,
+                                                             [](const std::wstring& s) { std::cout << ntc::toUtf8(s) << "\n"; });
+        const ntc::ValetonComparisonResult *off = nullptr, *on = nullptr;
+        for (const auto& r : results) {
+            if (r.label == L"production") off = &r;
+            if (r.label == L"experimental") on = &r;
+        }
+        if (!ok || !off || !on || !off->ok || !on->ok) {
+            std::cout << "ERROR: " << (error.empty() ? "candidate conversion failed" : error) << "\n";
+            if (csv) csv << nam.filename().string() << ",,,,,,,,,,,ERROR\n";
+            ++errors;
+            continue;
+        }
+
+        const bool pkMoved = off->pkPp != on->pkPp || off->pkPn != on->pkPn || off->pkKp != on->pkKp || off->pkKn != on->pkKn;
+        if (pkMoved) ++applied;
+        std::cout << "P/K search result: " << (pkMoved ? "ACCEPTED (P/K changed)" : "not applied (output identical to P/K off)") << "\n";
+        std::printf("%8s %10s %10s %10s %10s %10s\n", "level", "fullA2", "off_err", "on_err", "delta", "rel_on-off");
+        double worstDelta = 0.0;
+        for (std::size_t i = 0; i < off->levels.size() && i < on->levels.size(); ++i) {
+            const auto& lo = off->levels[i];
+            const auto& ln = on->levels[i];
+            const double delta = ln.absoluteGainErrorDb - lo.absoluteGainErrorDb; // negative = P/K-on is quieter
+            if (delta < worstDelta) worstDelta = delta;
+            std::printf("%8.0f %10.2f %10.2f %10.2f %+10.2f %+10.2f\n", ln.levelDb, lo.fullA2AbsoluteRmsDb,
+                        lo.absoluteGainErrorDb, ln.absoluteGainErrorDb, delta, ln.relativeErrorDb - lo.relativeErrorDb);
+        }
+        std::printf("mean gain error  off=%.2f  on=%.2f dB | rms relative-dynamics error  off=%.2f  on=%.2f dB\n",
+                    off->meanAbsoluteGainErrorDb, on->meanAbsoluteGainErrorDb, off->rmsRelativeErrorDb, on->rmsRelativeErrorDb);
+        std::printf("normalized spectral loss  off=%.4f  on=%.4f | held-out ESR  off=%.4f  on=%.4f\n",
+                    off->meanNormalizedSpectralLoss, on->meanNormalizedSpectralLoss, off->meanHeldOutEsr, on->meanHeldOutEsr);
+
+        std::vector<std::string> reasons;
+        if (worstDelta < -2.0) reasons.push_back("quieter than P/K-off by >2 dB at some level");
+        if (on->meanAbsoluteGainErrorDb < off->meanAbsoluteGainErrorDb - 1.0) reasons.push_back("mean level >1 dB quieter");
+        if (on->meanNormalizedSpectralLoss > off->meanNormalizedSpectralLoss * 1.10) reasons.push_back("spectral loss >10% worse");
+        if (on->meanHeldOutEsr > off->meanHeldOutEsr * 1.10) reasons.push_back("held-out ESR >10% worse");
+        if (pkMoved && on->rmsRelativeErrorDb > off->rmsRelativeErrorDb) reasons.push_back("P/K applied but dynamics error did not improve");
+
+        std::string verdict = reasons.empty() ? (pkMoved ? "PASS (improved/neutral)" : "PASS (P/K skipped)") : "FAIL";
+        std::cout << "VERDICT: " << verdict;
+        for (const auto& r : reasons) std::cout << "\n  - " << r;
+        std::cout << "\n";
+        if (!reasons.empty()) ++fails;
+        if (csv) {
+            csv << nam.filename().string() << "," << pkMoved << "," << off->meanAbsoluteGainErrorDb << ","
+                << on->meanAbsoluteGainErrorDb << "," << worstDelta << "," << off->meanNormalizedSpectralLoss << ","
+                << on->meanNormalizedSpectralLoss << "," << off->rmsRelativeErrorDb << "," << on->rmsRelativeErrorDb << ","
+                << off->meanHeldOutEsr << "," << on->meanHeldOutEsr << "," << (reasons.empty() ? "PASS" : "FAIL") << "\n";
+        }
+    }
+    std::cout << "\npk-compare: " << a.positional.size() << " amp(s), " << fails << " fail, " << errors << " error; P/K applied on " << applied
+              << " (a pass with 0 applied only shows the gates rejected P/K, not that P/K is good)\n";
+    return (fails || errors) ? 1 : 0;
+}
+
 #if defined(__APPLE__)
 
 constexpr const char* kT3kPublishableKeySecret = "tone3000.publishableKey";
@@ -995,6 +1090,7 @@ int main(int argc, char** argv) {
     if (command == "gp200-upload") return cmdGp200Upload(a);
     if (command == "clo-info") return cmdCloInfo(a);
     if (command == "eq-match-batch") return cmdEqMatchBatch(a);
+    if (command == "pk-compare") return cmdPkCompare(a);
     if (command == "--help" || command == "-h" || command == "help") {
         printUsage();
         return 0;

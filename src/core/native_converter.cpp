@@ -2501,10 +2501,11 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                                     double pkLoss=evaluateModelLoss(pkM,analysisInput,analysisTarget,44100.0);
                                     double spectralRegression=(bestLoss>0)?((pkLoss-bestLoss)/bestLoss):0.0;
 
-                                    // Gate 4: output level within ±2 dB
-                                    double baseline0dBRms=(renderedDb.size()>0)?renderedDb[0]:1.0;
-                                    double pk0dBRms=(pkRenderedDb.size()>0)?pkRenderedDb[0]:1.0;
-                                    double levelDiffDb=20.0*std::log10((pk0dBRms>1e-10)?pk0dBRms:1e-10)-20.0*std::log10((baseline0dBRms>1e-10)?baseline0dBRms:1e-10);
+                                    // Gate 4: output level within ±2 dB at the 0 dB level clip (rmsDb already returns dB)
+                                    std::size_t zeroIdx=0;
+                                    for(std::size_t i=1;i<gp5LevelClips.size();++i)
+                                        if(std::abs(gp5LevelClips[i].levelDb)<std::abs(gp5LevelClips[zeroIdx].levelDb))zeroIdx=i;
+                                    double levelDiffDb=pkRenderedDb[zeroIdx]-renderedDb[zeroIdx];
                                     bool levelOk=std::abs(levelDiffDb)<2.0;
 
                                     os<<L", P/K search: compression "<<baselineCompressionError<<L"dB -> "<<pkCompressionError<<L"dB ("<<(compressionImprovement*100.0)<<L"% improvement)";
