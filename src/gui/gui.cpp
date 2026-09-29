@@ -1023,11 +1023,11 @@ void chooseT3kIrWav(HWND owner) {
     setText(gT3kIrWav, gT3kIrWavPath.wstring());
     updateT3kIrAvailability();
 
-    // Keep the Tone3000 preview IR and the converter's own Corrective IR
-    // selection in sync, but deliberately do NOT tick "Apply corrective IR".
+    // Keep the Tone3000 preview IR and the converter's own Cab IR
+    // selection in sync, but deliberately do NOT tick "Embed cab IR".
     if (gCorrectiveEdit) setText(gCorrectiveEdit, gT3kIrWavPath.wstring());
 
-    setText(gT3kState, L"Cabinet IR selected and assigned to Corrective IR (not activated). Press Play to preview.");
+    setText(gT3kState, L"Cabinet IR selected and assigned to the cab IR field (not activated; tick Embed cab IR to use it). Press Play to preview.");
     if (!gT3kPreviewNam.empty() && !gT3kPreviewWavPath.empty()) startT3kPreview(owner, true);
 }
 
@@ -1193,7 +1193,7 @@ void updateBackendUi() {
             L"Convert one NAM or batch-convert a folder. Produces a GP-200 (1024-tap) and a GP-5 / GP-50 (512-tap) CLO.");
         setText(gInfo,
             L"Place nam_input_wav.wav next to NamToClo.exe. The original stimulus is always used.\r\n"
-            L"Tail / Reamp, Corrective IR and Tone Match are optional.");
+            L"Tail / Reamp, Cab IR and Tone Match are optional.");
         if (!gBusy) setText(gStatus, L"Ready to convert.");
     }
     if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
@@ -1416,7 +1416,7 @@ void startConversion(HWND hwnd) {
     correction.enabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     correction.wav = fs::path(getText(gCorrectiveEdit));
     if (correction.enabled && correction.wav.empty()) {
-        MessageBoxW(hwnd, L"Select a Corrective IR WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        MessageBoxW(hwnd, L"Select a Cab IR WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         return;
     }
 
@@ -1442,12 +1442,6 @@ void startConversion(HWND hwnd) {
     }
 
     enableControls(false);
-    // dynamicsAwareFitting stays at its default (false) -- see CLAUDE.md's "CoreRevert"
-    // pass: hardware listening + the --valeton-comparison tooling found this experimental
-    // P/K search regresses fidelity on at least one amp for no measured benefit elsewhere,
-    // so the GUI no longer exposes a control for it. searchPkForDynamics() itself and the
-    // --pk-dynamics-search/--pk-dynamics-audition headless flags remain available for
-    // research.
     ntc::NativeConverterConfig nativeConfig;
     if (gInputMode == InputMode::SingleNam) {
         setText(gStatus, L"Starting conversion...");
@@ -1884,7 +1878,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1003, L"Output folder");
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
-    createSectionLabel(hwnd, 1008, L"Corrective IR");
+    createSectionLabel(hwnd, 1008, L"Cab IR");
     createSectionLabel(hwnd, 1009, L"Tone Match");
     createSectionLabel(hwnd, 1010, L"Reference audio (Auto picks by gain; Custom uses your own WAV, first 20 s)");
 
@@ -1918,7 +1912,7 @@ void createUi(HWND hwnd) {
     gBrowseRecordedButton = CreateWindowW(L"BUTTON", L"Browse WAV...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                           0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_RECORDED), nullptr, nullptr);
 
-    gCorrectiveCheck = CreateWindowW(L"BUTTON", L"Apply corrective IR",
+    gCorrectiveCheck = CreateWindowW(L"BUTTON", L"Embed cab IR",
                                      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                      0, 0, 170, 24, hwnd, controlId(IDC_APPLY_CORRECTIVE_IR), nullptr, nullptr);
     applyFont(gCorrectiveCheck);
@@ -2399,7 +2393,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     }
     case WM_CTLCOLORBTN: {
-        // Native BS_AUTOCHECKBOX controls (Corrective IR / Tone Match) aren't
+        // Native BS_AUTOCHECKBOX controls (Cab IR / Tone Match) aren't
         // owner-drawn; without this, DefWindowProc paints their label
         // background with COLOR_BTNFACE, showing as a light box in dark mode.
         // The small checkbox glyph itself stays OS-themed either way.
@@ -2788,14 +2782,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (!r->gp5ToneMatchMethod.empty() && r->gp5ToneMatchMethod != L"none") {
                 resultMessage += L"\r\nGP-5/GP-50 Tone Match applied: " + r->gp5ToneMatchMethod;
             }
-            if (r->gp5MeasuredDynamicsRmsDb >= 0.0) {
-                wchar_t buf[128];
-                swprintf_s(buf, L"\r\nMeasured dynamics-tracking error: %.2f dB", r->gp5MeasuredDynamicsRmsDb);
-                resultMessage += buf;
-                resultMessage += (r->gp5ToneMatchMethod == L"Step 2 P/K search")
-                    ? L" (above threshold -- ran the extra dynamics-aware fitting pass)"
-                    : L" (within normal range -- skipped the extra dynamics-aware fitting pass)";
-            }
             resultMessage += L"\r\n\r\nBoth Uploader tabs have been pre-filled with the right file -- "
                               L"just switch tabs and press Upload.";
             setText(gStatus, L"Done. CLO file generated successfully.");
@@ -2988,10 +2974,6 @@ bool runHeadlessConvertIfRequested(int& exitCode) {
             }
         }
         ntc::NativeConverterConfig converter;
-        if (argc >= 6) {
-            converter.dynamicsSearchThresholdDb = std::wcstod(argv[5], nullptr);
-            std::wcout << L"Dynamics search threshold override: " << converter.dynamicsSearchThresholdDb << L"dB\n";
-        }
         std::wcout << L"Converting " << inputNam.wstring() << L" -> " << outputDir.wstring() << L"\n";
         std::error_code logEc;
         fs::create_directories(outputDir, logEc);
@@ -3112,110 +3094,6 @@ bool runHeadlessKSweepIfRequested(int& exitCode) {
     return handled;
 }
 
-// Headless entry point: NamToClo.exe --pk-dynamics-search <nam> <trainClip.wav>
-//   <selectionClip.wav> <benchmarkClip.wav> <lambda> <outputCsv>
-// Dynamics-aware fitting, Step 2: full P/K unlock (coordinate descent over
-// Pp/Pn/Kp/Kn, fresh shared Block B solve per candidate), gated on a
-// selection clip disjoint from the training clip, with a final benchmark
-// clip (disjoint from both) scored only once for honest reporting. See
-// ntc::runPkDynamicsSearchExperiment's doc comment and CLAUDE.md.
-bool runHeadlessPkDynamicsSearchIfRequested(int& exitCode) {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return false;
-    bool handled = false;
-    if (argc >= 8 && std::wstring(argv[1]) == L"--pk-dynamics-search") {
-        handled = true;
-        AllocConsole();
-        FILE* dummy = nullptr;
-        freopen_s(&dummy, "CONOUT$", "w", stdout);
-        const fs::path inputNam = argv[2];
-        const fs::path trainClip = argv[3];
-        const fs::path selectionClip = argv[4];
-        const fs::path benchmarkClip = argv[5];
-        const double lambda = std::wcstod(argv[6], nullptr);
-        const fs::path outputCsv = argv[7];
-        std::wcout << L"P/K dynamics search: " << inputNam.wstring() << L" lambda=" << lambda << L"\n";
-        ntc::PkDynamicsResult result;
-        std::string error;
-        if (ntc::runPkDynamicsSearchExperiment(inputNam, trainClip, selectionClip, benchmarkClip, lambda, result, error,
-                                                [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
-            std::wofstream csv(outputCsv);
-            csv << L"metric,initial_pp,initial_pn,initial_kp,initial_kn,pp,pn,kp,kn,"
-                   L"initial_max_err_db,initial_rms_err_db,initial_esr,"
-                   L"optimized_max_err_db,optimized_rms_err_db,optimized_esr,"
-                   L"benchmark_initial_max_err_db,benchmark_initial_rms_err_db,benchmark_initial_esr,"
-                   L"benchmark_max_err_db,benchmark_rms_err_db,benchmark_esr\n";
-            csv << L"selection," << result.initialPp << L"," << result.initialPn << L"," << result.initialKp << L"," << result.initialKn << L","
-                << result.pp << L"," << result.pn << L"," << result.kp << L"," << result.kn << L","
-                << result.initialMaxDynamicsErrorDb << L"," << result.initialRmsDynamicsErrorDb << L"," << result.initialSpectralEsr << L","
-                << result.optimizedMaxDynamicsErrorDb << L"," << result.optimizedRmsDynamicsErrorDb << L"," << result.optimizedSpectralEsr << L","
-                << result.benchmarkInitialMaxDynamicsErrorDb << L"," << result.benchmarkInitialRmsDynamicsErrorDb << L"," << result.benchmarkInitialSpectralEsr << L","
-                << result.benchmarkMaxDynamicsErrorDb << L"," << result.benchmarkRmsDynamicsErrorDb << L"," << result.benchmarkSpectralEsr << L"\n";
-            std::wcout << L"\npk initial=" << result.initialPp << L"/" << result.initialPn << L"/" << result.initialKp << L"/" << result.initialKn
-                       << L"  pk optimized=" << result.pp << L"/" << result.pn << L"/" << result.kp << L"/" << result.kn << L"\n";
-            std::wcout << L"selection: initial maxErr=" << result.initialMaxDynamicsErrorDb << L" rmsErr=" << result.initialRmsDynamicsErrorDb
-                       << L" esr=" << result.initialSpectralEsr << L"\n";
-            std::wcout << L"selection: optimized maxErr=" << result.optimizedMaxDynamicsErrorDb << L" rmsErr=" << result.optimizedRmsDynamicsErrorDb
-                       << L" esr=" << result.optimizedSpectralEsr << L"\n";
-            std::wcout << L"benchmark: initial maxErr=" << result.benchmarkInitialMaxDynamicsErrorDb << L" rmsErr=" << result.benchmarkInitialRmsDynamicsErrorDb
-                       << L" esr=" << result.benchmarkInitialSpectralEsr << L"\n";
-            std::wcout << L"benchmark: optimized maxErr=" << result.benchmarkMaxDynamicsErrorDb << L" rmsErr=" << result.benchmarkRmsDynamicsErrorDb
-                       << L" esr=" << result.benchmarkSpectralEsr << L"\n";
-            std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
-            exitCode = 0;
-        } else {
-            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
-            std::wofstream errFile(outputCsv.wstring() + L".err");
-            errFile << ntc::fromUtf8(error) << L"\n";
-            exitCode = 1;
-        }
-    }
-    LocalFree(argv);
-    return handled;
-}
-
-// Headless entry point: NamToClo.exe --pk-dynamics-audition <nam> <playingClip.wav>
-//   <trainClip.wav> <selectionClip.wav> <benchmarkClip.wav> <lambda> <outputDir>
-// Listening-test export: renders playingClipWav (real musical dynamics, not the
-// synthetic level staircase) through Full A2 / the as-shipped conversion / the
-// Step 2 P/K-optimized candidate, so the measured dynamics-error improvement can
-// be checked by ear. See ntc::runPkDynamicsAudition's doc comment.
-bool runHeadlessPkDynamicsAuditionIfRequested(int& exitCode) {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return false;
-    bool handled = false;
-    if (argc >= 9 && std::wstring(argv[1]) == L"--pk-dynamics-audition") {
-        handled = true;
-        AllocConsole();
-        FILE* dummy = nullptr;
-        freopen_s(&dummy, "CONOUT$", "w", stdout);
-        const fs::path inputNam = argv[2];
-        const fs::path playingClip = argv[3];
-        const fs::path trainClip = argv[4];
-        const fs::path selectionClip = argv[5];
-        const fs::path benchmarkClip = argv[6];
-        const double lambda = std::wcstod(argv[7], nullptr);
-        const fs::path outputDir = argv[8];
-        std::wcout << L"P/K dynamics audition: " << inputNam.wstring() << L" x " << playingClip.wstring() << L"\n";
-        std::string error;
-        if (ntc::runPkDynamicsAudition(inputNam, playingClip, trainClip, selectionClip, benchmarkClip, lambda, outputDir, error,
-                                        [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
-            std::wcout << L"\nWrote " << outputDir.wstring() << L"\\{full_a2,baseline_gp5,optimized_gp5}.wav\n";
-            exitCode = 0;
-        } else {
-            std::wcout << L"Failed: " << ntc::fromUtf8(error) << L"\n";
-            std::error_code oec;
-            fs::create_directories(outputDir, oec);
-            std::wofstream errFile(outputDir.wstring() + L"\\audition.err");
-            errFile << ntc::fromUtf8(error) << L"\n";
-            exitCode = 1;
-        }
-    }
-    LocalFree(argv);
-    return handled;
-}
 // Headless entry point: NamToClo.exe --official-benchmark <nam> <officialSnapClo>
 //   <diClipWav> <outputCsv> <heldOutClip1> [heldOutClip2] ...
 // Definitive official-vs-ours benchmark (resources/GP50_SnapTone_Conversion_
@@ -3223,20 +3101,12 @@ bool runHeadlessPkDynamicsAuditionIfRequested(int& exitCode) {
 // against our own conversion of the same NAM, both judged against Full A2.
 // See ntc::runOfficialSnaptoneBenchmark's doc comment.
 //
-// NamToClo.exe --official-benchmark <nam> <officialSnapClo> <diClipWav>
-//   <outputCsv> <trainClip|-> <selectionClip|-> <lambda> <heldOutClip1> [...]
-// trainClip/selectionClip may be "-" to skip the optional Step 2
-// dynamics-aware P/K search comparison (BenchmarkResult::optimizedComputed
-// stays false); when both are real clips, the search runs against our own
-// conversion (diClipWav itself serves as its disjoint benchmark clip) and
-// the resulting optimized candidate is scored against the same official
-// file and Full A2 reference as the shipped candidate.
 bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) return false;
     bool handled = false;
-    if (argc >= 10 && std::wstring(argv[1]) == L"--official-benchmark") {
+    if (argc >= 7 && std::wstring(argv[1]) == L"--official-benchmark") {
         handled = true;
         AllocConsole();
         FILE* dummy = nullptr;
@@ -3245,42 +3115,29 @@ bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
         const fs::path officialSnapClo = argv[3];
         const fs::path diClipWav = argv[4];
         const fs::path outputCsv = argv[5];
-        const std::wstring trainArg = argv[6];
-        const std::wstring selectionArg = argv[7];
-        const fs::path trainClip = (trainArg == L"-") ? fs::path{} : fs::path(trainArg);
-        const fs::path selectionClip = (selectionArg == L"-") ? fs::path{} : fs::path(selectionArg);
-        const double lambda = std::wcstod(argv[8], nullptr);
         std::vector<fs::path> heldOutClips;
-        for (int i = 9; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
+        for (int i = 6; i < argc; ++i) heldOutClips.emplace_back(argv[i]);
         std::wcout << L"Official benchmark: " << inputNam.wstring() << L" vs " << officialSnapClo.wstring() << L"\n";
         ntc::BenchmarkResult result;
         std::string error;
         if (ntc::runOfficialSnaptoneBenchmark(inputNam, officialSnapClo, diClipWav, heldOutClips, result, error,
-                                               [](const std::wstring& s) { std::wcout << s << L"\n"; },
-                                               trainClip, selectionClip, lambda)) {
+                                               [](const std::wstring& s) { std::wcout << s << L"\n"; })) {
             std::wofstream csv(outputCsv);
-            csv << L"section,level_db_or_clip,full_a2_relative_db,official_relative_db,ours_relative_db,optimized_relative_db,b_only_relative_db,"
-                   L"official_relative_error_db,ours_relative_error_db,optimized_relative_error_db,b_only_relative_error_db,"
-                   L"official_esr,ours_esr,optimized_esr,b_only_esr\n";
+            csv << L"section,level_db_or_clip,full_a2_relative_db,official_relative_db,ours_relative_db,"
+                   L"official_relative_error_db,ours_relative_error_db,official_esr,ours_esr\n";
             for (const auto& p : result.levels) {
                 csv << L"level," << p.levelDb << L"," << p.fullA2RelativeDb << L"," << p.officialRelativeDb << L","
-                    << p.oursRelativeDb << L"," << p.optimizedRelativeDb << L"," << p.bOnlyRelativeDb << L","
-                    << p.officialRelativeErrorDb << L"," << p.oursRelativeErrorDb << L"," << p.optimizedRelativeErrorDb << L","
-                    << p.bOnlyRelativeErrorDb << L",,,,\n";
+                    << p.oursRelativeDb << L"," << p.officialRelativeErrorDb << L"," << p.oursRelativeErrorDb << L",,\n";
             }
             for (const auto& h : result.heldOut) {
-                csv << L"held_out," << h.clipName << L",,,,,,,,,," << h.officialEsr << L"," << h.oursEsr << L"," << h.optimizedEsr
-                    << L"," << h.bOnlyEsr << L"\n";
+                csv << L"held_out," << h.clipName << L",,,,,," << h.officialEsr << L"," << h.oursEsr << L"\n";
             }
-            csv << L"summary,dynamics_max_err_db," << result.officialMaxRelativeErrorDb << L"," << result.oursMaxRelativeErrorDb
-                << L"," << result.optimizedMaxRelativeErrorDb << L"," << result.bOnlyMaxRelativeErrorDb << L",,,,,,,\n";
-            csv << L"summary,dynamics_rms_err_db," << result.officialRmsRelativeErrorDb << L"," << result.oursRmsRelativeErrorDb
-                << L"," << result.optimizedRmsRelativeErrorDb << L"," << result.bOnlyRmsRelativeErrorDb << L",,,,,,,\n";
-            csv << L"summary,mean_held_out_esr," << result.officialMeanHeldOutEsr << L"," << result.oursMeanHeldOutEsr
-                << L"," << result.optimizedMeanHeldOutEsr << L"," << result.bOnlyMeanHeldOutEsr << L",,,,,,,\n";
+            csv << L"summary,dynamics_max_err_db," << result.officialMaxRelativeErrorDb << L"," << result.oursMaxRelativeErrorDb << L",,,,,\n";
+            csv << L"summary,dynamics_rms_err_db," << result.officialRmsRelativeErrorDb << L"," << result.oursRmsRelativeErrorDb << L",,,,,\n";
+            csv << L"summary,mean_held_out_esr," << result.officialMeanHeldOutEsr << L"," << result.oursMeanHeldOutEsr << L",,,,,\n";
             csv << L"summary,absolute_zero_db_level," << result.fullA2AbsoluteZeroDb << L"," << result.officialAbsoluteZeroDb
-                << L"," << result.oursAbsoluteZeroDb << L",,,,,,,,\n";
-            csv << L"summary,ours_vs_official_absolute_offset_db," << result.oursVsOfficialAbsoluteOffsetDb << L",,,,,,,,,,\n";
+                << L"," << result.oursAbsoluteZeroDb << L",,,,\n";
+            csv << L"summary,ours_vs_official_absolute_offset_db," << result.oursVsOfficialAbsoluteOffsetDb << L",,,,,,\n";
 
             std::wcout << L"\nAbsolute output level at 0dB input:\n";
             std::wcout << L"  Full A2:  " << result.fullA2AbsoluteZeroDb << L" dBFS\n";
@@ -3289,20 +3146,10 @@ bool runHeadlessOfficialBenchmarkIfRequested(int& exitCode) {
             std::wcout << L"\nDynamics (six-level sweep vs Full A2):\n";
             std::wcout << L"  official:  max=" << result.officialMaxRelativeErrorDb << L"dB rms=" << result.officialRmsRelativeErrorDb << L"dB\n";
             std::wcout << L"  ours:      max=" << result.oursMaxRelativeErrorDb << L"dB rms=" << result.oursRmsRelativeErrorDb << L"dB\n";
-            if (result.bOnlyComputed)
-                std::wcout << L"  B-only:    max=" << result.bOnlyMaxRelativeErrorDb << L"dB rms=" << result.bOnlyRmsRelativeErrorDb << L"dB\n";
-            if (result.optimizedComputed)
-                std::wcout << L"  optimized: max=" << result.optimizedMaxRelativeErrorDb << L"dB rms=" << result.optimizedRmsRelativeErrorDb << L"dB\n";
             std::wcout << L"\nHeld-out real playing (mean ESR vs Full A2, lower is better):\n";
             std::wcout << L"  official:  " << result.officialMeanHeldOutEsr << L"\n";
             std::wcout << L"  ours:      " << result.oursMeanHeldOutEsr << L"\n";
-            if (result.bOnlyComputed)
-                std::wcout << L"  B-only:    " << result.bOnlyMeanHeldOutEsr << L"\n";
-            if (result.optimizedComputed)
-                std::wcout << L"  optimized: " << result.optimizedMeanHeldOutEsr << L"\n";
             std::wcout << L"\npk (ours): pp=" << result.pkPp << L" pn=" << result.pkPn << L" kp=" << result.pkKp << L" kn=" << result.pkKn << L"\n";
-            if (result.optimizedComputed)
-                std::wcout << L"pk (optimized): pp=" << result.optimizedPp << L" pn=" << result.optimizedPn << L" kp=" << result.optimizedKp << L" kn=" << result.optimizedKn << L"\n";
             std::wcout << L"\nWrote " << outputCsv.wstring() << L"\n";
             exitCode = 0;
         } else {
@@ -3420,7 +3267,7 @@ void writeValetonComparisonResults(const fs::path& outputDir, const std::wstring
 }
 
 // "CoreRevert" pass (2026-09-01): compares the Valeton-style baseline,
-// target-production, and current-experimental GP-5/GP-50 candidates -- see
+// generic, and production GP-5/GP-50 candidates -- see
 // ntc::runValetonComparisonExperiment's doc comment in native_converter.hpp.
 bool runHeadlessValetonComparisonIfRequested(int& exitCode) {
     int argc = 0;
@@ -4020,12 +3867,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessKSweepIfRequested(exitCode)) {
-        return exitCode;
-    }
-    if (int exitCode = 0; runHeadlessPkDynamicsSearchIfRequested(exitCode)) {
-        return exitCode;
-    }
-    if (int exitCode = 0; runHeadlessPkDynamicsAuditionIfRequested(exitCode)) {
         return exitCode;
     }
     if (int exitCode = 0; runHeadlessOfficialBenchmarkIfRequested(exitCode)) {

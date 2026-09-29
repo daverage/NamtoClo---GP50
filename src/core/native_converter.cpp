@@ -362,7 +362,7 @@ std::vector<float> alignLeft(const std::vector<float>& x,std::size_t n){std::vec
 
 // External-linkage wrapper around the anonymous-namespace resampleR8Brain24()
 // above, so corrective_ir.cpp (a separate translation unit) can auto-convert
-// a Corrective IR WAV to the 44.1kHz the CLO correction path requires instead
+// a Cab IR WAV to the 44.1kHz the CLO correction path requires instead
 // of duplicating r8brain setup code or rejecting the file outright.
 std::vector<float> resampleForCorrectiveIr(const std::vector<float>& in, double inRate, double outRate) {
     return resampleR8Brain24(in, inRate, outRate);
@@ -561,13 +561,6 @@ namespace {
 
 struct AP{float a=0,s=0;float p(float x){const float y=s+a*x;s=x-a*y;return y;}};
 struct Poly{std::vector<AP>a,b;float d=0;Poly(std::initializer_list<float>x,std::initializer_list<float>y){for(float v:x)a.push_back({v,0});for(float v:y)b.push_back({v,0});}float r(std::vector<AP>&v,float x){for(auto&s:v)x=s.p(x);return x;}void up(float x,float&e,float&o){e=r(a,x);o=r(b,x);}float down(float e,float o){const float x=r(a,e),y=r(b,o),z=.5f*(x+d);d=y;return z;}};
-
-void fft(std::vector<std::complex<double>>& a,bool inv){
-    const std::size_t n=a.size();
-    for(std::size_t i=1,j=0;i<n;++i){std::size_t bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;if(i<j)std::swap(a[i],a[j]);}
-    for(std::size_t len=2;len<=n;len<<=1){const double ang=(inv?2:-2)*kPi/static_cast<double>(len);const std::complex<double> wl(std::cos(ang),std::sin(ang));for(std::size_t i=0;i<n;i+=len){std::complex<double>w(1,0);for(std::size_t j=0;j<len/2;++j){auto u=a[i+j],v=a[i+j+len/2]*w;a[i+j]=u+v;a[i+j+len/2]=u-v;w*=wl;}}}
-    if(inv)for(auto&v:a)v/=static_cast<double>(n);
-}
 
 // 0x553aa0 / 0x55b2e0 / 0x55b460 / 0x55b9a0: exact trainer FIR engine.
 // GP-200.exe partitions FIRs into 64-sample blocks and uses a 128-point
@@ -1716,7 +1709,7 @@ std::size_t findOnset(const std::vector<float>& x,float threshold=0.01f){
     return 0;
 }
 
-// Convolves 44.1kHz-domain Block B with the corrective IR and RMS-normalizes back to
+// Convolves 44.1kHz-domain Block B with the cab IR and RMS-normalizes back to
 // the pre-correction level, then applies postCorrectionDb -- the exact same math
 // applyCorrectiveIrToClo() (corrective_ir.cpp) uses on the 2048-tap GP-200 Block B,
 // sized here to whatever length the caller's B actually is (the GP-5/GP-50 512 taps).
@@ -1725,7 +1718,7 @@ bool applyCorrectiveIrToB44(std::vector<float>& b44,const std::vector<float>& co
     if(correctiveIr.empty()||b44.empty())return true;
     std::vector<double> ir;ir.reserve(correctiveIr.size());
     for(float s:correctiveIr){
-        if(!std::isfinite(s)){error="Corrective IR contains a non-finite sample.";return false;}
+        if(!std::isfinite(s)){error="Cab IR contains a non-finite sample.";return false;}
         ir.push_back(static_cast<double>(s));
     }
     const std::size_t n=b44.size();
@@ -1740,14 +1733,14 @@ bool applyCorrectiveIrToB44(std::vector<float>& b44,const std::vector<float>& co
     auto rmsOf=[](const std::vector<double>&v){long double s=0.0L;for(double x:v)s+=static_cast<long double>(x)*x;return std::sqrt(static_cast<double>(s/static_cast<long double>(v.size())));};
     const double originalRms=rmsOf(original),convolvedRms=rmsOf(corrected);
     if(!(originalRms>1e-20)){error="GP-5/GP-50 Block B is silent or invalid.";return false;}
-    if(!(convolvedRms>1e-20)){error="Corrective IR produced a silent GP-5/GP-50 Block B.";return false;}
+    if(!(convolvedRms>1e-20)){error="Cab IR produced a silent GP-5/GP-50 Block B.";return false;}
     const double rmsGain=originalRms/convolvedRms;
     const double finalGain=rmsGain*std::pow(10.0,postCorrectionDb/20.0);
-    if(!std::isfinite(finalGain)){error="Corrective IR normalization produced an invalid gain.";return false;}
+    if(!std::isfinite(finalGain)){error="Cab IR normalization produced an invalid gain.";return false;}
     for(std::size_t i=0;i<n;++i){
         const double scaled=corrected[i]*finalGain;
         if(!std::isfinite(scaled)||scaled>static_cast<double>(std::numeric_limits<float>::max())||scaled<-static_cast<double>(std::numeric_limits<float>::max())){
-            error="Corrective IR produced an out-of-range GP-5/GP-50 Block B value.";return false;
+            error="Cab IR produced an out-of-range GP-5/GP-50 Block B value.";return false;
         }
         b44[i]=static_cast<float>(scaled);
     }
@@ -1770,10 +1763,9 @@ bool serializeGp5Compact(const fs::path&path,const Model&m,double trainerRate,st
     auto A44=resampleFirOfficial(m.A,trainerRate,128);
     std::vector<float> B44;
     if(overrideB44){
-        // Already-finished replacement B (e.g. from solveBlockBLeastSquares),
-        // computed against an already-serialized CLO that had correctiveIr
-        // baked in if applicable -- fully replaces what resampling+Corrective
-        // IR+Tone Match would otherwise contribute below, so skip all of it.
+        // Already-finished replacement B (Tone Match solve, level match and any
+        // Cab IR already applied by the caller) -- fully replaces what
+        // resampling+Cab IR+Tone Match would otherwise contribute below.
         if(overrideB44->size()!=kGp5BTaps){error="overrideB44 has the wrong tap count.";return false;}
         B44=*overrideB44;
     }else{
@@ -1852,9 +1844,8 @@ fs::path firstClipWithPrefix(const fs::path& dir,const std::wstring& prefix){
 }
 
 // The second (alphabetically) bundled clip for a bucket, when one exists --
-// used only by the optional dynamics-aware P/K search gate below as a
-// disjoint selection clip alongside firstClipWithPrefix's train clip. Empty
-// if the bucket has only one bundled clip.
+// used as the disjoint selection reference alongside firstClipWithPrefix's
+// fitting clip. Empty if the bucket has only one bundled clip.
 fs::path secondClipWithPrefix(const fs::path& dir,const std::wstring& prefix){
     std::error_code ec;
     std::vector<fs::path> matches;
@@ -1877,9 +1868,8 @@ AmpGainBucket classifyGainBucket(float kp,float kn){
     // The original High boundary here was 260, with named-amp examples (Green Day
     // Insomniac ~185, Bogner Ecstasy Blue ~339, Metallica Black Album ~347) that are
     // far higher than any kp/kn this function is actually called with today. Those
-    // reference numbers look like they were measured against the (now off-by-default,
-    // see NativeConverterConfig::dynamicsAwareFitting) dynamics-aware P/K search's
-    // widened steepness, not the plain analytic fit classifyGainBucket sees in the
+    // reference numbers look like they were measured against a (since removed)
+    // dynamics-aware P/K search's widened steepness, not the plain analytic fit classifyGainBucket sees in the
     // default pipeline -- with a 260 threshold, Auto's High bucket (high_metalcore.wav/
     // high_thrash.wav) was unreachable in practice: a 2026-09 sweep across 16 varied
     // NAM captures -- including amps explicitly named/voiced as extreme (a "HG"-labeled
@@ -1946,31 +1936,6 @@ bool writeMonoFloat32Wav(const fs::path&path,const std::vector<float>&samples,st
 }
 
 
-std::vector<float> applyCorrectiveIrToToneTarget(const std::vector<float>& input,
-                                                   const std::vector<float>& correctiveIr,
-                                                   double finalGain){
-    if(input.empty()||correctiveIr.empty())return input;
-    const std::size_t irCount=std::min<std::size_t>(correctiveIr.size(),kB);
-    constexpr std::size_t fftSize=4096;
-    constexpr std::size_t blockSize=fftSize-kB+1;
-    std::vector<std::complex<double>> H(fftSize);
-    for(std::size_t i=0;i<irCount;++i)H[i]=static_cast<double>(correctiveIr[i])*finalGain;
-    fft(H,false);
-    std::vector<float> output(input.size(),0.0f);
-    std::vector<std::complex<double>> X(fftSize);
-    for(std::size_t pos=0;pos<input.size();pos+=blockSize){
-        std::fill(X.begin(),X.end(),std::complex<double>{});
-        const std::size_t take=std::min(blockSize,input.size()-pos);
-        for(std::size_t i=0;i<take;++i)X[i]=input[pos+i];
-        fft(X,false);
-        for(std::size_t i=0;i<fftSize;++i)X[i]*=H[i];
-        fft(X,true);
-        const std::size_t produced=std::min<std::size_t>(take+irCount-1,input.size()-pos);
-        for(std::size_t i=0;i<produced;++i)output[pos+i]+=static_cast<float>(X[i].real());
-    }
-    return output;
-}
-
 std::vector<float> prepareToneTarget44100(const std::vector<float>&renderedWithGuard,double sourceRate){
     const std::size_t n70=static_cast<std::size_t>(static_cast<float>(sourceRate)*70.0f);
     std::vector<float> source70(n70,0.0f);
@@ -2008,8 +1973,7 @@ bool renderClipThroughNam(const fs::path& namPath,const fs::path& inputWav,const
 
 namespace {
 // Forward declarations: defined later in this file (near runKSweepExperiment),
-// needed here for the GP-5/GP-50 multi-level Tone Match candidate and the
-// dynamics-aware search gate below.
+// needed here for the GP-5/GP-50 multi-level Tone Match candidate.
 bool buildLevelClips(const fs::path& fullModelPath,const fs::path& diClipWav,
                      std::vector<MultiLevelClip>& out,std::string& error,
                      const StatusCallback& status,const std::wstring& logPrefix);
@@ -2070,18 +2034,14 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
     const fs::path original2048=work/L"native_original_2048.clo";if(!serialize2048(original2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
 
-    fs::path sourceForOutput=original2048;
-    fs::path corrected2048;
+    // The Cab IR (e.g. an embedded cab) is a finishing step: it is loaded and
+    // validated here, but only convolved into the FINAL Block B after conversion and
+    // Tone Match have finished, so it never influences fitting or candidate selection.
     CorrectiveIrStats correctiveStats;
     std::vector<float> correctiveIr;
     if(correction.enabled){
-        if(correction.wav.empty()){r.error="Select a Corrective IR WAV file.";fs::remove_all(work,ec);return r;}
-        report(status,L"Applying Corrective IR...");
-        corrected2048=work/L"native_2048_corrected.clo";
-        if(!loadCorrectiveIrSamples(correction.wav,correctiveIr,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
-        if(!applyCorrectiveIrToClo(original2048,correctiveIr,corrected2048,correctiveStats,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
-        report(status,L"Corrective IR applied: linear convolution, RMS match, -6 dB post gain. RMS gain "+std::to_wstring(correctiveStats.rmsGainDb)+L" dB; total "+std::to_wstring(correctiveStats.totalGainDb)+L" dB.");
-        sourceForOutput=corrected2048;
+        if(correction.wav.empty()){r.error="Select a Cab IR WAV file.";fs::remove_all(work,ec);return r;}
+        if(!loadCorrectiveIrSamples(correction.wav,correctiveIr,error)){r.error=error.empty()?"Cab IR failed.":error;fs::remove_all(work,ec);return r;}
     }
 
     std::optional<Model> gp5Chosen;
@@ -2108,9 +2068,9 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         gp5Chosen=gp5UsedDirectFit?std::move(m5):std::move(truncated);
         {std::wostringstream os;os<<L"GP-5/GP-50: direct-fit loss "<<r.gp5DirectFitLoss<<L", truncated-512 loss "<<gp5TruncatedLoss
             <<L" -- using "<<(gp5UsedDirectFit?L"direct-fit":L"truncated")<<L" (lower is better).";report(status,os.str());}
-        // Serialization is deferred until after Corrective IR / Tone Match below so
-        // both can be applied to this Block B too, instead of the GP-5/GP-50 file
-        // silently skipping whatever correction the GP-200 output got.
+        // Serialization is deferred until after Tone Match below so Tone Match and
+        // then the Cab IR can be applied to this Block B too, instead of the
+        // GP-5/GP-50 file silently skipping what the GP-200 output got.
     }
 
     fs::path toneMatched2048;
@@ -2129,14 +2089,8 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
             refineTarget44100=prepareToneTarget44100(refineRendered,refineRate);
         }
 
-        fs::path toneMatchInputClo=original2048;
-        if(correction.enabled){
-            const double finalGain=correctiveStats.rmsGain*std::pow(10.0,correctiveStats.postGainDb/20.0);
-            report(status,L"Tone Match + Corrective IR: applying the same Corrective IR to the NAM target...");
-            refineTarget44100=applyCorrectiveIrToToneTarget(refineTarget44100,correctiveIr,finalGain);
-            toneMatchInputClo=corrected2048;
-            report(status,L"Tone Match: NAM + Corrective IR vs CLO + Corrective IR.");
-        }else if(!refine.referenceWav.empty()){
+        const fs::path toneMatchInputClo=original2048;
+        if(!refine.referenceWav.empty()){
             report(status,L"Tone Match: same refinement stimulus through NAM Full vs original native CLO.");
         }else{
             report(status,L"Tone Match: original conversion stimulus through NAM Full vs original native CLO.");
@@ -2201,27 +2155,21 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     std::vector<float> gp5DirectSolveB44;
     bool gp5DirectSolveWon=false;
     bool gp5MultiLevelSolveWon=false;
-    bool gp5DynamicsSearchWon=false;
     std::vector<float> gp5FinalB44;
     bool gp5FinalB44Valid=false;
     if(gp5Chosen&&refine.enabled){
         report(status,L"GP-5/GP-50: performing device-specific Tone Match...");
         const fs::path gp5PreToneMatchClo=work/L"gp5_512_pre_tonematch.clo";
         std::string gp5Error;
-        if(!serializeGp5Compact(gp5PreToneMatchClo,*gp5Chosen,sr,gp5Error,correctiveIr,
-                                correction.enabled?correctiveStats.postGainDb:-6.0)){
+        if(!serializeGp5Compact(gp5PreToneMatchClo,*gp5Chosen,sr,gp5Error)){
             report(status,L"GP-5/GP-50 Tone Match skipped: could not prepare analysis CLO ("+std::wstring(gp5Error.begin(),gp5Error.end())+L").");
         }else{
-            // Rebuild the exact 44.1kHz device-domain Block B that gp5PreToneMatchClo
-            // holds (chosen model + Corrective IR, matching the analysis signal chain).
+            // Rebuild the exact 44.1kHz device-domain Block B that gp5PreToneMatchClo holds.
             auto bScaled=gp5Chosen->B;for(auto&v:bScaled)v*=4.0f;
             auto B44Pre=resampleFirOfficial(bScaled,sr,512);
-            std::string applyErr;
-            bool preOk=true;
-            if(correction.enabled) preOk=applyCorrectiveIrToB44(B44Pre,correctiveIr,correctiveStats.postGainDb,applyErr);
 
             std::vector<float> analysisInput,analysisTarget;std::string readErr;
-            if(preOk&&loadClipAsMono44100(refineStimulusPath,analysisInput,readErr)
+            if(loadClipAsMono44100(refineStimulusPath,analysisInput,readErr)
                      &&loadClipAsMono44100(refineTargetWavPath,analysisTarget,readErr)){
                 auto A44=resampleFirOfficial(gp5Chosen->A,sr,128);
                 Model preM;preM.pre=gp5Chosen->pre;preM.post=gp5Chosen->post;preM.pk=gp5Chosen->pk;preM.A=A44;preM.B=B44Pre;
@@ -2338,99 +2286,9 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     report(status,L"GP-5/GP-50: no separate selection reference available; using fitting reference for candidate selection.");
                 }
 
-                // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2"):
-                // optional and gated, per NativeConverterConfig::dynamicsAwareFitting's
-                // doc comment -- only runs the expensive P/K coordinate-descent search
-                // (~120s measured) when the already-chosen candidate's OWN measured
-                // dynamics-tracking error against Full A2 exceeds
-                // dynamicsSearchThresholdDb, using the six-level sweep already built
-                // above (gp5LevelClips) so this costs one more render pass, not a
-                // fresh Full A2 render. Needs a second bundled reference clip from the
-                // same gain bucket as a disjoint selection clip for the search's
-                // round-acceptance gate -- skipped (no search) if the reference clip
-                // wasn't a bundled one (Custom mode) or its bucket has only one clip.
-                if(trainer.dynamicsAwareFitting&&!gp5LevelClips.empty()){
-                    const std::vector<float>& winningB44=gp5DirectSolveWon?gp5DirectSolveB44:B44Pre;
-                    std::size_t zeroIdx=0;double bestDist=std::numeric_limits<double>::max();
-                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
-                        const double d=std::abs(gp5LevelClips[i].levelDb);
-                        if(d<bestDist){bestDist=d;zeroIdx=i;}
-                    }
-                    std::vector<double> renderedDb(gp5LevelClips.size()),targetDb(gp5LevelClips.size());
-                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
-                        std::vector<float> rendered;std::string stepErr;
-                        if(renderCloWithOverrideOnSignal(gp5PreToneMatchClo,gp5Chosen->pk.pp,gp5Chosen->pk.pn,gp5Chosen->pk.kp,gp5Chosen->pk.kn,
-                                                         winningB44,gp5LevelClips[i].input44100,rendered,stepErr))
-                            renderedDb[i]=rmsDb(rendered);
-                        targetDb[i]=rmsDb(gp5LevelClips[i].target44100);
-                    }
-                    double sumSq=0.0;
-                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
-                        const double err=(renderedDb[i]-renderedDb[zeroIdx])-(targetDb[i]-targetDb[zeroIdx]);
-                        sumSq+=err*err;
-                    }
-                    const double measuredDynamicsRmsDb=std::sqrt(sumSq/static_cast<double>(gp5LevelClips.size()));
-                    r.gp5MeasuredDynamicsRmsDb=measuredDynamicsRmsDb;
-                    report(status,L"GP-5/GP-50: measured dynamics-tracking RMS error "+std::to_wstring(measuredDynamicsRmsDb)+L"dB (threshold "+std::to_wstring(trainer.dynamicsSearchThresholdDb)+L"dB).");
-
-                    if(measuredDynamicsRmsDb>trainer.dynamicsSearchThresholdDb){
-                        std::wstring bucketPrefix;
-                        switch(refine.referenceMode){
-                            case ToneMatchReferenceMode::Bass: bucketPrefix=L"bass_"; break;
-                            case ToneMatchReferenceMode::Clean: bucketPrefix=L"clean_"; break;
-                            case ToneMatchReferenceMode::Moderate: bucketPrefix=L"moderate_"; break;
-                            case ToneMatchReferenceMode::High: bucketPrefix=L"high_"; break;
-                            case ToneMatchReferenceMode::Auto:
-                                switch(classifyGainBucket(gp5Chosen->pk.kp,gp5Chosen->pk.kn)){
-                                    case AmpGainBucket::Clean: bucketPrefix=L"clean_"; break;
-                                    case AmpGainBucket::Moderate: bucketPrefix=L"moderate_"; break;
-                                    case AmpGainBucket::High: bucketPrefix=L"high_"; break;
-                                }
-                                break;
-                            default: break; // Custom/Default: no bundled sibling clip to use
-                        }
-                        fs::path selectionClipPath;
-                        if(!bucketPrefix.empty()){
-                            const fs::path clipsDir=resolveReferenceClipsDir();
-                            if(!clipsDir.empty())selectionClipPath=secondClipWithPrefix(clipsDir,bucketPrefix);
-                        }
-                        if(selectionClipPath.empty()){
-                            report(status,L"GP-5/GP-50: dynamics error exceeds threshold, but no second bundled reference clip is available for the search's selection gate -- skipping the P/K search.");
-                        }else{
-                            report(status,L"GP-5/GP-50: dynamics error exceeds threshold -- running Step 2 P/K search...");
-                            std::vector<MultiLevelClip> selectionClips;std::string selError;
-                            if(buildLevelClips(modelPath,selectionClipPath,selectionClips,selError,status,L"GP-5/GP-50 dynamics search (selection)")){
-                                std::string searchError;
-                                auto search=ntc::searchPkForDynamics(gp5PreToneMatchClo,gp5LevelClips,selectionClips,gp5LevelClips,0.3,searchError,status);
-                                os<<L", P/K search: selection dynamics rms "<<search.initialRmsDynamicsErrorDb<<L" -> "<<search.optimizedRmsDynamicsErrorDb;
-                                // Accept using the search's OWN acceptance signal (a genuine,
-                                // already-verified improvement in dynamics tracking on the
-                                // disjoint selection clip -- searchPkForDynamics only keeps a
-                                // round that clears both this AND its internal ESR/safety-floor
-                                // checks), NOT evaluateModelLoss's single-level spectral-
-                                // magnitude Tone Match loss -- that metric is blind to dynamics
-                                // improvements by design (CLAUDE.md's "22.7 CLOSED as a
-                                // selection method" -- an earlier version of this gate made
-                                // exactly this mistake and silently discarded every search win).
-                                if(search.ok&&search.optimizedRmsDynamicsErrorDb<search.initialRmsDynamicsErrorDb){
-                                    Model searchM=preM;searchM.pk.pp=search.pp;searchM.pk.pn=search.pn;searchM.pk.kp=search.kp;searchM.pk.kn=search.kn;searchM.B=search.b;
-                                    bestLoss=evaluateModelLoss(searchM,analysisInput,analysisTarget,44100.0);
-                                    gp5DirectSolveB44=search.b;
-                                    gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;gp5DynamicsSearchWon=true;
-                                    gp5Chosen->pk.pp=search.pp;gp5Chosen->pk.pn=search.pn;gp5Chosen->pk.kp=search.kp;gp5Chosen->pk.kn=search.kn;
-                                }else if(!search.ok){
-                                    report(status,L"GP-5/GP-50: P/K search failed ("+std::wstring(searchError.begin(),searchError.end())+L").");
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // Final output-level match: every candidate above was selected by
-                // evaluateModelLoss (a spectral-ratio loss) or, for the Step 2 search,
-                // a zero-anchored dynamics-tracking error -- both are blind to a
-                // constant absolute-gain offset (the zero-anchoring specifically
-                // subtracts it out by design, see BenchmarkResult's doc comment).
+                // evaluateModelLoss (a spectral-ratio loss), which is blind to a
+                // constant absolute-gain offset.
                 // Originally matched to the NAM's own raw render (Full A2) on the Tone
                 // Match reference clip, but real usage (2026-09-15, see CLAUDE.md) showed
                 // that undershoots badly: the plain (non-Tone-Match) conversion is
@@ -2462,8 +2320,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     }
                 }
 
-                if(gp5DynamicsSearchWon){os<<L" -- using Step 2 P/K search.";r.gp5ToneMatchMethod=L"Step 2 P/K search";}
-                else if(gp5MultiLevelSolveWon){os<<L" -- using multi-level B solve.";r.gp5ToneMatchMethod=L"multi-level B solve";}
+                if(gp5MultiLevelSolveWon){os<<L" -- using multi-level B solve.";r.gp5ToneMatchMethod=L"multi-level B solve";}
                 else if(gp5DirectSolveWon){os<<L" -- using direct B solve.";r.gp5ToneMatchMethod=L"direct B solve";}
                 else{os<<L" -- not applying (baseline wins).";r.gp5ToneMatchMethod=L"none";}
                 report(status,os.str());
@@ -2472,43 +2329,53 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     }
 
     if(gp5Chosen){
-        const bool gp5ToneMatchApplied=gp5DirectSolveWon||gp5MultiLevelSolveWon||gp5DynamicsSearchWon;
+        const bool gp5ToneMatchApplied=gp5DirectSolveWon||gp5MultiLevelSolveWon;
         r.gp5gp50Compact=uniqueOutput(outputDirectory,inputNam.stem().wstring(),
             gp5ToneMatchApplied?L"_NATIVE_GP5GP50_512_TONEMATCH.clo":L"_NATIVE_GP5GP50_512.clo");
-        // Corrective IR still layers onto this Block B as before (unless the direct
-        // solve won, in which case it's already baked in -- see serializeGp5Compact's
-        // overrideB44 handling).
         // Prefer the final level-matched B whenever it was computed (any Tone Match
         // candidate, including "baseline wins" -- the level-match step still runs
         // and can correct a baseline that's already quieter than Full A2). Falls
-        // back to the pre-level-match construction only when Tone Match didn't run
-        // at all (no reference clip to match against).
-        const bool serializeOk=gp5FinalB44Valid
-            ?serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,{},0.0,{},0.0,&gp5FinalB44)
-            :(gp5DirectSolveWon
-                ?serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,{},0.0,{},0.0,&gp5DirectSolveB44)
-                :serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,
-                                     correction.enabled?correctiveStats.postGainDb:-6.0));
+        // back to the untouched Block B only when Tone Match didn't run at all.
+        // The Cab IR is convolved in last, on top of whichever B won.
+        bool serializeOk=false;
+        std::vector<float> gp5OutB44;
+        if(gp5FinalB44Valid)gp5OutB44=gp5FinalB44;
+        else if(gp5DirectSolveWon)gp5OutB44=gp5DirectSolveB44;
+        if(!gp5OutB44.empty()){
+            std::string irErr;
+            if(correction.enabled&&!applyCorrectiveIrToB44(gp5OutB44,correctiveIr,correctiveStats.postGainDb,irErr)){
+                r.error=irErr.empty()?"Cab IR failed.":irErr;fs::remove_all(work,ec);return r;
+            }
+            serializeOk=serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,{},0.0,{},0.0,&gp5OutB44);
+        }else{
+            serializeOk=serializeGp5Compact(r.gp5gp50Compact,*gp5Chosen,sr,error,correctiveIr,correctiveStats.postGainDb);
+        }
         if(!serializeOk){
             r.error=error;fs::remove_all(work,ec);return r;
         }
         {std::wostringstream os;os<<L"GP-5/GP-50 CLO written using "<<(gp5UsedDirectFit?L"direct-fit":L"truncated")
-            <<(correction.enabled?L", Corrective IR applied":L"")
-            <<(gp5DynamicsSearchWon?L", device-specific Tone Match applied (Step 2 P/K search)":
-               (gp5MultiLevelSolveWon?L", device-specific Tone Match applied (multi-level B solve)":
+            <<(correction.enabled?L", Cab IR applied":L"")
+            <<(gp5MultiLevelSolveWon?L", device-specific Tone Match applied (multi-level B solve)":
                (gp5DirectSolveWon?L", device-specific Tone Match applied (direct B solve)":
-               (refine.enabled?L", Tone Match not applied":L""))))
+               (refine.enabled?L", Tone Match not applied":L"")))
             <<L".";report(status,os.str());}
     }
 
+    fs::path gp200Source=refine.enabled?toneMatched2048:original2048;
+    if(correction.enabled){
+        report(status,L"Applying Cab IR to the finished conversion...");
+        const fs::path corrected2048=work/L"native_2048_corrected.clo";
+        if(!applyCorrectiveIrToClo(gp200Source,correctiveIr,corrected2048,correctiveStats,error)){r.error=error.empty()?"Cab IR failed.":error;fs::remove_all(work,ec);return r;}
+        report(status,L"Cab IR applied: linear convolution, RMS match, -6 dB post gain. RMS gain "+std::to_wstring(correctiveStats.rmsGainDb)+L" dB; total "+std::to_wstring(correctiveStats.totalGainDb)+L" dB.");
+        gp200Source=corrected2048;
+    }
     if(refine.enabled){
         report(status,L"Generating Tone Match GP-200 1024 CLO...");
         r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024_TONEMATCH.clo");
-        if(!makeGp200CompactClo(toneMatched2048,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
     }else{
         r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");
-        if(!makeGp200CompactClo(sourceForOutput,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
     }
+    if(!makeGp200CompactClo(gp200Source,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
     fs::remove_all(work,ec);r.ok=true;report(status,L"Conversion complete.");return r;
 }
 
@@ -2887,7 +2754,7 @@ double rmsDb(const std::vector<float>& x){
     return rms>1e-30?20.0*std::log10(rms):-std::numeric_limits<double>::infinity();
 }
 
-// Shared by runKSweepExperiment and runPkDynamicsSearchExperiment: builds
+// Used by runKSweepExperiment and the multi-level Tone Match candidate: builds
 // the {-24,-18,-12,-6,0,+6} dB MultiLevelClip set for one DI clip against
 // fullModelPath (Full A2), resampling each level's target to 44.1kHz so it's
 // directly usable by clo_refiner.hpp's 44.1kHz-domain solvers.
@@ -3060,124 +2927,6 @@ bool runKSweepExperiment(const fs::path& inputNam,const fs::path& diClipWav,
     return true;
 }
 
-// Dynamics-aware fitting, Step 2 -- see clo_refiner.hpp's searchPkForDynamics()
-// doc comment and CLAUDE.md's Step 1 writeup. Converts inputNam once, then
-// builds three DISJOINT level-clip sets (train/selection/benchmark, each its
-// own DI clip) so the search's round-acceptance gate never sees the same
-// signal it optimizes against, and the final benchmark numbers are honestly
-// held out end to end.
-bool runPkDynamicsSearchExperiment(const fs::path& inputNam,
-                                   const fs::path& trainDiClipWav,
-                                   const fs::path& selectionDiClipWav,
-                                   const fs::path& benchmarkDiClipWav,
-                                   double lambda,
-                                   PkDynamicsResult& outResult,
-                                   std::string& error,
-                                   const StatusCallback& status){
-    outResult=PkDynamicsResult{};
-    std::error_code ec;
-    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_pk_dynamics_"+inputNam.stem().wstring());
-    fs::remove_all(work,ec);fs::create_directories(work,ec);
-    if(ec){error="Cannot create work directory.";return false;}
-
-    fs::path fullModelPath;
-    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
-
-    report(status,L"P/K dynamics search: converting "+inputNam.filename().wstring()+L" (production settings)...");
-    NativeConverterConfig converter;
-    CloRefineConfig refine;refine.enabled=true;
-    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
-    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
-        error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
-        fs::remove_all(work,ec);return false;
-    }
-
-    std::vector<MultiLevelClip> trainClips,selectionClips,benchmarkClips;
-    const bool built=
-        buildLevelClips(fullModelPath,trainDiClipWav,trainClips,error,status,L"P/K dynamics search (train)")&&
-        buildLevelClips(fullModelPath,selectionDiClipWav,selectionClips,error,status,L"P/K dynamics search (selection)")&&
-        buildLevelClips(fullModelPath,benchmarkDiClipWav,benchmarkClips,error,status,L"P/K dynamics search (benchmark)");
-    if(!built){fs::remove_all(work,ec);return false;}
-
-    outResult=ntc::searchPkForDynamics(conversion.gp5gp50Compact,trainClips,selectionClips,benchmarkClips,lambda,error,status);
-    fs::remove_all(work,ec);
-    return outResult.ok;
-}
-
-// Listening-test export -- see the doc comment in native_converter.hpp for
-// why this exists (the search's measured numbers alone don't prove an
-// audible difference). Reuses the same conversion + search as
-// runPkDynamicsSearchExperiment, then renders a real musical clip (not the
-// synthetic level staircase) through Full A2 / baseline / optimized.
-bool runPkDynamicsAudition(const fs::path& inputNam,
-                           const fs::path& playingClipWav,
-                           const fs::path& trainDiClipWav,
-                           const fs::path& selectionDiClipWav,
-                           const fs::path& benchmarkDiClipWav,
-                           double lambda,
-                           const fs::path& outputDirectory,
-                           std::string& error,
-                           const StatusCallback& status){
-    std::error_code ec;
-    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_pk_audition_"+inputNam.stem().wstring());
-    fs::remove_all(work,ec);fs::create_directories(work,ec);
-    if(ec){error="Cannot create work directory.";return false;}
-
-    fs::path fullModelPath;
-    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
-
-    report(status,L"P/K audition: converting "+inputNam.filename().wstring()+L" (production settings)...");
-    NativeConverterConfig converter;
-    CloRefineConfig refine;refine.enabled=true;
-    auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
-    if(!conversion.ok||conversion.gp5gp50Compact.empty()){
-        error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
-        fs::remove_all(work,ec);return false;
-    }
-
-    std::vector<MultiLevelClip> trainClips,selectionClips,benchmarkClips;
-    const bool built=
-        buildLevelClips(fullModelPath,trainDiClipWav,trainClips,error,status,L"P/K audition (train)")&&
-        buildLevelClips(fullModelPath,selectionDiClipWav,selectionClips,error,status,L"P/K audition (selection)")&&
-        buildLevelClips(fullModelPath,benchmarkDiClipWav,benchmarkClips,error,status,L"P/K audition (benchmark)");
-    if(!built){fs::remove_all(work,ec);return false;}
-
-    report(status,L"P/K audition: running Step 2 search...");
-    auto search=ntc::searchPkForDynamics(conversion.gp5gp50Compact,trainClips,selectionClips,benchmarkClips,lambda,error,status);
-    if(!search.ok){fs::remove_all(work,ec);return false;}
-
-    report(status,L"P/K audition: rendering "+playingClipWav.filename().wstring()+L"...");
-    std::vector<float> dry;
-    if(!loadClipAsMono44100(playingClipWav,dry,error)){fs::remove_all(work,ec);return false;}
-
-    std::vector<float> fullA2Input,fullA2Output;double fullA2Rate=44100.0;std::string stepError;
-    if(!renderNamOnSignal(fullModelPath,dry,fullA2Input,fullA2Output,fullA2Rate,stepError)){
-        error="Full A2 render failed: "+stepError;fs::remove_all(work,ec);return false;
-    }
-    auto fullA2At44100=resampleR8Brain24(fullA2Output,fullA2Rate,44100.0);
-
-    std::vector<float> baselineOutput;
-    if(!renderCloOnSignal(conversion.gp5gp50Compact,dry,baselineOutput,error)){fs::remove_all(work,ec);return false;}
-
-    std::vector<float> optimizedOutput;
-    if(!renderCloWithOverrideOnSignal(conversion.gp5gp50Compact,search.pp,search.pn,search.kp,search.kn,search.b,
-                                      dry,optimizedOutput,error)){fs::remove_all(work,ec);return false;}
-
-    fs::remove_all(work,ec);
-
-    std::error_code oec;
-    fs::create_directories(outputDirectory,oec);
-    if(!writeMono44100Wav(outputDirectory/L"full_a2.wav",fullA2At44100,error))return false;
-    if(!writeMono44100Wav(outputDirectory/L"baseline_gp5.wav",baselineOutput,error))return false;
-    if(!writeMono44100Wav(outputDirectory/L"optimized_gp5.wav",optimizedOutput,error))return false;
-
-    report(status,L"P/K audition: pk initial="+std::to_wstring(search.initialPp)+L"/"+std::to_wstring(search.initialPn)+L"/"
-        +std::to_wstring(search.initialKp)+L"/"+std::to_wstring(search.initialKn)
-        +L"  optimized="+std::to_wstring(search.pp)+L"/"+std::to_wstring(search.pn)+L"/"
-        +std::to_wstring(search.kp)+L"/"+std::to_wstring(search.kn));
-    return true;
-}
-
 // See native_converter.hpp's doc comment: verifies the multi-level Tone
 // Match candidate wired into convertNamToClo's GP-5/GP-50 path directly
 // against Full A2, since every official-vs-ours benchmark result was
@@ -3311,10 +3060,7 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
                                   const std::vector<fs::path>& heldOutClips,
                                   BenchmarkResult& out,
                                   std::string& error,
-                                  const StatusCallback& status,
-                                  const fs::path& trainDiClipWav,
-                                  const fs::path& selectionDiClipWav,
-                                  double optimizationLambda){
+                                  const StatusCallback& status){
     out=BenchmarkResult{};
     std::error_code ec;
     const fs::path work=fs::temp_directory_path(ec)/(L"ntc_official_benchmark_"+inputNam.stem().wstring());
@@ -3345,51 +3091,6 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
     if(out.oursClo.empty()){
         error="Conversion did not produce a matching-architecture candidate for the official file's B tap count ("+std::to_string(officialBTaps)+").";
         fs::remove_all(work,ec);return false;
-    }
-
-    // Optional Step 2 dynamics-aware P/K search (see CLAUDE.md's Step 2
-    // section) against our own conversion, scored the same way as
-    // official/ours below. diClipWav itself is used as the disjoint
-    // benchmark clip for the search's round-acceptance gate -- it's never
-    // used to fit or select the optimized candidate, only to score the
-    // shipped/official candidates below, matching the discipline every
-    // other search in this codebase uses (train/selection/benchmark all
-    // disjoint).
-    PkDynamicsResult search;
-    std::vector<float> bOnlyB; // B-only candidate: shipped P/K frozen, B solved jointly across trainClips
-    bool bOnlyOk=false;
-    const bool wantOptimize=!trainDiClipWav.empty()&&!selectionDiClipWav.empty();
-    if(wantOptimize){
-        report(status,L"Official benchmark: running Step 2 P/K dynamics search...");
-        std::vector<MultiLevelClip> trainClips,selectionClips,benchmarkClips;
-        std::string searchError;
-        const bool built=
-            buildLevelClips(fullModelPath,trainDiClipWav,trainClips,searchError,status,L"Official benchmark optimize (train)")&&
-            buildLevelClips(fullModelPath,selectionDiClipWav,selectionClips,searchError,status,L"Official benchmark optimize (selection)")&&
-            buildLevelClips(fullModelPath,diClipWav,benchmarkClips,searchError,status,L"Official benchmark optimize (benchmark)");
-        if(built){
-            search=ntc::searchPkForDynamics(out.oursClo,trainClips,selectionClips,benchmarkClips,optimizationLambda,searchError,status);
-            if(!search.ok) report(status,L"Official benchmark: Step 2 search failed ("+std::wstring(searchError.begin(),searchError.end())+L"), continuing without an optimized candidate.");
-
-            // Isolate the direct-B-solve mechanism from the P/K search: same
-            // trainClips, same joint multi-level solve, but P/K frozen at
-            // the shipped value (kMultiplier=1.0 -- sweepKAndSolveSharedB
-            // reuses the model's own kp/kn unchanged).
-            report(status,L"Official benchmark: solving B-only (shipped P/K, no search) candidate...");
-            std::vector<KSweepCandidate> bOnlyCandidates;
-            std::string bOnlyError;
-            if(sweepKAndSolveSharedB(out.oursClo,{1.0},trainClips,bOnlyCandidates,bOnlyError,status)&&!bOnlyCandidates.empty()&&!bOnlyCandidates.front().b.empty()){
-                bOnlyB=bOnlyCandidates.front().b;
-                bOnlyOk=true;
-            } else {
-                report(status,L"Official benchmark: B-only solve failed ("+std::wstring(bOnlyError.begin(),bOnlyError.end())+L"), continuing without a B-only candidate.");
-            }
-        } else {
-            report(status,L"Official benchmark: could not build optimize clip sets ("+std::wstring(searchError.begin(),searchError.end())+L"), continuing without an optimized candidate.");
-        }
-        out.optimizedComputed=search.ok;
-        if(search.ok){out.optimizedPp=search.pp;out.optimizedPn=search.pn;out.optimizedKp=search.kp;out.optimizedKn=search.kn;}
-        out.bOnlyComputed=bOnlyOk;
     }
 
     std::vector<float> dry;
@@ -3424,16 +3125,6 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         p.fullA2RelativeDb=rmsDb(fullA2Output);
         p.officialRelativeDb=rmsDb(officialOutput);
         p.oursRelativeDb=rmsDb(oursOutput);
-        if(search.ok){
-            std::vector<float> optimizedOutput;
-            if(renderCloWithOverrideOnSignal(out.oursClo,search.pp,search.pn,search.kp,search.kn,search.b,scaled,optimizedOutput,stepError))
-                p.optimizedRelativeDb=rmsDb(optimizedOutput);
-        }
-        if(bOnlyOk){
-            std::vector<float> bOnlyOutput;
-            if(renderCloWithOverrideOnSignal(out.oursClo,out.pkPp,out.pkPn,out.pkKp,out.pkKn,bOnlyB,scaled,bOnlyOutput,stepError))
-                p.bOnlyRelativeDb=rmsDb(bOnlyOutput);
-        }
         out.levels.push_back(p);
     }
     if(out.levels.empty()){error="No level clips rendered successfully.";fs::remove_all(work,ec);return false;}
@@ -3442,11 +3133,9 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         [](const BenchmarkLevelPoint&p){return std::abs(p.levelDb)<1e-9;});
     if(zeroIt!=out.levels.end()){
         const double fullA2Zero=zeroIt->fullA2RelativeDb,officialZero=zeroIt->officialRelativeDb,oursZero=zeroIt->oursRelativeDb;
-        const double optimizedZero=zeroIt->optimizedRelativeDb;
-        const double bOnlyZero=zeroIt->bOnlyRelativeDb;
         out.fullA2AbsoluteZeroDb=fullA2Zero;out.officialAbsoluteZeroDb=officialZero;out.oursAbsoluteZeroDb=oursZero;
         out.oursVsOfficialAbsoluteOffsetDb=oursZero-officialZero;
-        double officialSumSq=0.0,oursSumSq=0.0,optimizedSumSq=0.0,bOnlySumSq=0.0;
+        double officialSumSq=0.0,oursSumSq=0.0;
         for(auto&p:out.levels){
             p.fullA2RelativeDb-=fullA2Zero;
             p.officialRelativeDb-=officialZero;
@@ -3457,30 +3146,16 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
             out.oursMaxRelativeErrorDb=std::max(out.oursMaxRelativeErrorDb,std::abs(p.oursRelativeErrorDb));
             officialSumSq+=p.officialRelativeErrorDb*p.officialRelativeErrorDb;
             oursSumSq+=p.oursRelativeErrorDb*p.oursRelativeErrorDb;
-            if(search.ok){
-                p.optimizedRelativeDb-=optimizedZero;
-                p.optimizedRelativeErrorDb=p.optimizedRelativeDb-p.fullA2RelativeDb;
-                out.optimizedMaxRelativeErrorDb=std::max(out.optimizedMaxRelativeErrorDb,std::abs(p.optimizedRelativeErrorDb));
-                optimizedSumSq+=p.optimizedRelativeErrorDb*p.optimizedRelativeErrorDb;
-            }
-            if(bOnlyOk){
-                p.bOnlyRelativeDb-=bOnlyZero;
-                p.bOnlyRelativeErrorDb=p.bOnlyRelativeDb-p.fullA2RelativeDb;
-                out.bOnlyMaxRelativeErrorDb=std::max(out.bOnlyMaxRelativeErrorDb,std::abs(p.bOnlyRelativeErrorDb));
-                bOnlySumSq+=p.bOnlyRelativeErrorDb*p.bOnlyRelativeErrorDb;
-            }
         }
         out.officialRmsRelativeErrorDb=std::sqrt(officialSumSq/static_cast<double>(out.levels.size()));
         out.oursRmsRelativeErrorDb=std::sqrt(oursSumSq/static_cast<double>(out.levels.size()));
-        if(search.ok) out.optimizedRmsRelativeErrorDb=std::sqrt(optimizedSumSq/static_cast<double>(out.levels.size()));
-        if(bOnlyOk) out.bOnlyRmsRelativeErrorDb=std::sqrt(bOnlySumSq/static_cast<double>(out.levels.size()));
         {std::wostringstream os;os<<L"Official benchmark: absolute output level at 0dB input -- Full A2 "<<out.fullA2AbsoluteZeroDb
             <<L" dBFS, official "<<out.officialAbsoluteZeroDb<<L" dBFS, ours "<<out.oursAbsoluteZeroDb
             <<L" dBFS (ours is "<<out.oursVsOfficialAbsoluteOffsetDb<<L" dB relative to official).";
             report(status,os.str());}
     }
 
-    double officialEsrSum=0.0,oursEsrSum=0.0,optimizedEsrSum=0.0,bOnlyEsrSum=0.0;std::size_t heldOutCount=0;
+    double officialEsrSum=0.0,oursEsrSum=0.0;std::size_t heldOutCount=0;
     for(const auto& clipPath:heldOutClips){
         report(status,L"Official benchmark: held-out clip "+clipPath.filename().wstring()+L"...");
         std::vector<float> clipDry;
@@ -3507,24 +3182,12 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
         hp.clipName=clipPath.filename().wstring();
         hp.officialEsr=levelResponseEsr(officialOutput,fullA2At44100);
         hp.oursEsr=levelResponseEsr(oursOutput,fullA2At44100);
-        if(search.ok){
-            std::vector<float> optimizedOutput;
-            if(renderCloWithOverrideOnSignal(out.oursClo,search.pp,search.pn,search.kp,search.kn,search.b,clipDry,optimizedOutput,stepError))
-                hp.optimizedEsr=levelResponseEsr(optimizedOutput,fullA2At44100);
-        }
-        if(bOnlyOk){
-            std::vector<float> bOnlyOutput;
-            if(renderCloWithOverrideOnSignal(out.oursClo,out.pkPp,out.pkPn,out.pkKp,out.pkKn,bOnlyB,clipDry,bOnlyOutput,stepError))
-                hp.bOnlyEsr=levelResponseEsr(bOnlyOutput,fullA2At44100);
-        }
         out.heldOut.push_back(hp);
-        officialEsrSum+=hp.officialEsr;oursEsrSum+=hp.oursEsr;optimizedEsrSum+=hp.optimizedEsr;bOnlyEsrSum+=hp.bOnlyEsr;++heldOutCount;
+        officialEsrSum+=hp.officialEsr;oursEsrSum+=hp.oursEsr;++heldOutCount;
     }
     if(heldOutCount>0){
         out.officialMeanHeldOutEsr=officialEsrSum/static_cast<double>(heldOutCount);
         out.oursMeanHeldOutEsr=oursEsrSum/static_cast<double>(heldOutCount);
-        if(search.ok) out.optimizedMeanHeldOutEsr=optimizedEsrSum/static_cast<double>(heldOutCount);
-        if(bOnlyOk) out.bOnlyMeanHeldOutEsr=bOnlyEsrSum/static_cast<double>(heldOutCount);
     }
 
     fs::remove_all(work,ec);
@@ -3809,7 +3472,7 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
     std::vector<float> dry;
     if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
 
-    struct CandidateSpec{const wchar_t*label;bool gp5DirectFit;bool refineEnabled;bool dynamicsAware;ToneMatchReferenceMode refMode;};
+    struct CandidateSpec{const wchar_t*label;bool gp5DirectFit;bool refineEnabled;ToneMatchReferenceMode refMode;};
     // gp5DirectFit stays true for every candidate here: it's convertNamToClo's
     // always-on, per-NAM dynamic pick between the direct-at-512-taps fit and
     // truncating the 2048-tap fit (whichever scores lower), not something this
@@ -3817,23 +3480,21 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
     // gp5gp50Compact output at all) to be populated. What varies between
     // candidates is only whether Tone Match runs (which is what can apply our
     // direct B512 least-squares solve, gp5DirectFit's own truncation choice
-    // aside), which reference audio it targets, and whether the dynamics-aware
-    // P/K search can reopen P/K within it. "generic" (2026-09-02, see CLAUDE.md)
+    // aside) and which reference audio it targets. "generic" (2026-09-02, see CLAUDE.md)
     // answers the session's original second question directly: does Auto mode's
     // gain-bucket-matched real playing clip (what "production" has used all
     // along) actually beat Default mode's plain synthetic stimulus tail as a
     // Tone Match target, or is genre/character matching not adding anything?
     static const CandidateSpec specs[]={
-        {L"valeton",true,false,false,ToneMatchReferenceMode::Default},
-        {L"generic",true,true,false,ToneMatchReferenceMode::Default},
-        {L"production",true,true,false,ToneMatchReferenceMode::Auto},
-        {L"experimental",true,true,true,ToneMatchReferenceMode::Auto},
+        {L"valeton",true,false,ToneMatchReferenceMode::Default},
+        {L"generic",true,true,ToneMatchReferenceMode::Default},
+        {L"production",true,true,ToneMatchReferenceMode::Auto},
     };
     for(const auto& spec:specs){
         ValetonComparisonResult r;r.label=spec.label;
         report(status,L"Valeton comparison: converting candidate \""+r.label+L"\"...");
 
-        NativeConverterConfig converter;converter.gp5DirectFit=spec.gp5DirectFit;converter.dynamicsAwareFitting=spec.dynamicsAware;
+        NativeConverterConfig converter;converter.gp5DirectFit=spec.gp5DirectFit;
         CloRefineConfig refine;refine.enabled=spec.refineEnabled;
         if(spec.refineEnabled)refine.referenceMode=spec.refMode;
 
@@ -3975,7 +3636,7 @@ bool runMultiClipB512Experiment(const fs::path& inputNam,
     if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
 
     report(status,L"Multi-clip B512: converting production candidate...");
-    NativeConverterConfig converter; // gp5DirectFit=true, dynamicsAwareFitting=false (defaults)
+    NativeConverterConfig converter;
     CloRefineConfig refine;refine.enabled=true;refine.referenceMode=ToneMatchReferenceMode::Auto;
     auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
     if(!conversion.ok||conversion.gp5gp50Compact.empty()){
@@ -4052,7 +3713,7 @@ bool runFrequencyWeightedB512Experiment(const fs::path& inputNam,
     if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
 
     report(status,L"Frequency-weighted B512: converting production candidate...");
-    NativeConverterConfig converter; // gp5DirectFit=true, dynamicsAwareFitting=false (defaults)
+    NativeConverterConfig converter;
     CloRefineConfig refine;refine.enabled=true;refine.referenceMode=ToneMatchReferenceMode::Auto;
     auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
     if(!conversion.ok||conversion.gp5gp50Compact.empty()){
@@ -4209,7 +3870,7 @@ bool runEqMatchExperiment(const fs::path& inputNam,
 
     report(status,toneMatchEnabled?L"EQ Match: converting production candidate (Tone Match on, Auto)...":
                                     L"EQ Match: converting baseline candidate (Tone Match off)...");
-    NativeConverterConfig converter; // gp5DirectFit=true, dynamicsAwareFitting=false (defaults)
+    NativeConverterConfig converter;
     CloRefineConfig refine;refine.enabled=toneMatchEnabled;refine.referenceMode=ToneMatchReferenceMode::Auto;
     auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
     if(!conversion.ok||conversion.gp5gp50Compact.empty()){

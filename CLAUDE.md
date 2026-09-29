@@ -99,12 +99,12 @@ Everything in `src/core` is platform-neutral except two narrow seams, each with 
 
 ### Conversion pipeline
 
-**Order** (`stimulus.cpp` → `native_converter.cpp` → `corrective_ir.cpp` → `clo_refiner.cpp`), described in detail in `QUALITY.md`:
+**Order** (`stimulus.cpp` → `native_converter.cpp` → `clo_refiner.cpp` → `corrective_ir.cpp`), described in detail in `QUALITY.md`:
 
 1. **stimulus.cpp**: builds 70-second mono PCM16/44.1kHz stimulus from `nam_input_wav.wav` (first 50s fixed) + original tail or user-supplied "Recorded Audio" for final 20s.
 2. **native_converter.cpp**: reverse-engineered NAM→CLO algorithm. Renders stimulus through NAM model, resamples with r8brain, reconstructs GP-200 1024-tap CLO byte format. Comments cite exact disassembly addresses — preserve these references, they're load-bearing documentation.
-3. **corrective_ir.cpp**: optional post-processing. Convolves user-selected IR WAV into CLO, with RMS normalization. Auto-resamples IR to 44.1kHz if needed.
-4. **clo_refiner.cpp**: optional "Tone Match" refinement. Fits Block B against target render (NAM rendered through stimulus, or real reference clip). For GP-5/GP-50, direct/multi-level Block B least-squares solve is verified as production win.
+3. **clo_refiner.cpp**: optional "Tone Match" refinement. Fits Block B against target render (NAM rendered through stimulus, or real reference clip). For GP-5/GP-50, direct/multi-level Block B least-squares solve is verified as production win.
+4. **corrective_ir.cpp**: optional, always LAST. Convolves the user-selected IR (e.g. a cab) into the final Block B, with RMS normalization, after conversion and Tone Match. It must never influence fitting or candidate selection. Auto-resamples IR to 44.1kHz if needed.
 
 Output: `<name>_NATIVE_GP200_1024.clo`, or `<name>_NATIVE_GP200_1024_TONEMATCH.clo` when Tone Match enabled.
 
@@ -146,7 +146,7 @@ See `PRIORITY_1_BENCHMARK.md` for:
 
 See `QUALITY.md` for:
 - Detailed analysis of what's shipping for GP-5/GP-50 and why.
-- Tried and rejected approaches (EQ Match, dynamics-aware P/K search, alternative stimulus).
+- Tried and rejected approaches (EQ Match, dynamics-aware P/K search [removed 2026-09-29], alternative stimulus).
 - Known limitations (harmonic asymmetry on hard-driven amps) and why they exist.
 - Algorithm comparison to the official converter (what's identical, what's new).
 

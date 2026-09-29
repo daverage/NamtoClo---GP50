@@ -40,17 +40,10 @@ struct ConversionResult {
 
     // Which GP-5/GP-50 device-specific Tone Match candidate actually won (see
     // convertNamToClo's GP-5/GP-50 Tone Match block): "none", "correction-IR",
-    // "direct B solve", "multi-level B solve", or "Step 2 P/K search". Empty
+    // "direct B solve", or "multi-level B solve". Empty
     // when GP-5/GP-50 Tone Match didn't run at all (no gp5Chosen, or Tone
     // Match disabled).
     std::wstring gp5ToneMatchMethod;
-    // The dynamics-aware fitting gate's own measurement (see
-    // NativeConverterConfig::dynamicsAwareFitting) of the already-chosen
-    // candidate's dynamics-tracking RMS error against Full A2, in dB. -1 when
-    // not computed (no reference clip available, or dynamicsAwareFitting was
-    // off). Meaningful even when the Step 2 search didn't end up winning --
-    // shows whether the gate considered running it and why it did/didn't.
-    double gp5MeasuredDynamicsRmsDb = -1.0;
     // Final output-level correction (dB) applied to the winning GP-5/GP-50
     // Block B so its 0dB-reference output RMS matches Full A2's, after
     // whichever Tone Match candidate above was chosen -- see convertNamToClo's
@@ -119,50 +112,6 @@ struct NativeConverterConfig {
     // real hardware actually ships. Kept as a runtime option regardless, since the
     // held-out-validation win above is real and independent of which framing is right.
     bool gp5DirectFit = true;
-
-    // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2" --
-    // full P/K coordinate-descent search). EXPERIMENTAL / DIAGNOSTIC ONLY --
-    // defaults to false as of the 2026-09-01 "CoreRevert" pass. Real hardware
-    // listening found that letting this gate reopen and move Pp/Pn/Kp/Kn away
-    // from the frozen Valeton-style fitPk() result produces a behavioral
-    // regression: converted patches end up substantially quieter than the
-    // official SnapTone conversion, and rolling off guitar volume mostly just
-    // makes them quieter rather than cleaning up the distortion the way the
-    // official conversion does. The six-level zero-anchored RMS metric this
-    // gate optimizes against can improve while that metric is blind to
-    // exactly this failure mode. Kept in the codebase as an experiment/
-    // diagnostic tool (see the headless --pk-dynamics-search /
-    // --pk-dynamics-audition CLI flags and searchPkForDynamics() itself,
-    // clo_refiner.hpp) but must not run by default. When true and a Tone
-    // Match reference clip is available (refine.enabled &&
-    // refine.referenceWav non-empty, i.e. Tone Match reference mode isn't
-    // Default/Custom-without-a-clip), convertNamToClo first cheaply measures
-    // the winning GP-5/GP-50 Tone Match candidate's own dynamics-tracking
-    // error against Full A2 (reusing the six-level sweep already built for
-    // the multi-level B-solve candidate -- no extra Full A2 renders). Only
-    // when that measured RMS relative error exceeds dynamicsSearchThresholdDb
-    // does it run the full P/K search and ship the result if it beats the
-    // already-chosen candidate on a disjoint selection clip. The threshold
-    // calibration notes below are retained as historical context from when
-    // this was production behavior, not a recommendation to re-enable it.
-    bool dynamicsAwareFitting = false;
-    // Threshold recalibrated (2026-08-31) against the ACTUAL measurement
-    // this gate performs in production: the already-chosen candidate (i.e.
-    // AFTER the cheap multi-level B solve above has already run and
-    // possibly helped), scored against whichever bundled reference_clips
-    // WAV the fitted gain bucket resolves to -- not the pre-correction
-    // baseline, and not the same DI clip CLAUDE.md's other measurements
-    // used, so this number is not directly comparable to those. 4 real
-    // production-path data points measured at this exact methodology:
-    // Fender Super Reverb (clean) 0.134dB -- correctly skips; Fortin
-    // Meshuggah 0.516dB -- borderline, chosen to trigger; Bogner Uberschall
-    // 1.344dB and JCM800 HighGain 2.504dB -- both clearly trigger and both
-    // verified to find and ship a large genuine dynamics improvement
-    // (Bogner selection rms 3.48->1.21dB, JCM800 3.64->0.80dB). 0.4dB
-    // catches Meshuggah while keeping clear margin under Bogner/JCM800 and
-    // over Fender. Still a small sample (4 amps) -- revisit if a larger
-    // corpus measured this same way shows a different boundary is needed.
-    double dynamicsSearchThresholdDb = 0.4;
 };
 
 ConversionResult convertNamToClo(const fs::path& inputNam,
@@ -422,44 +371,6 @@ bool runKSweepExperiment(const fs::path& inputNam,
                          std::string& error,
                          const StatusCallback& status = {});
 
-// Dynamics-aware fitting, Step 2 (see CLAUDE.md -- Step 1 confirmed causality
-// but rejected a single shared Kp/Kn multiplier; this is the per-NAM full
-// P/K search that follows from it). Converts inputNam via convertNamToClo
-// (production settings), builds three DISJOINT 6-level clip sets from
-// trainDiClipWav/selectionDiClipWav/benchmarkDiClipWav, and runs
-// ntc::searchPkForDynamics (clo_refiner.hpp) with the given lambda
-// (weight on rmsDynamicsErrorDb relative to spectral ESR in the combined
-// score). Comparative/measurement only -- does not modify or replace
-// inputNam's actual shipped conversion.
-bool runPkDynamicsSearchExperiment(const fs::path& inputNam,
-                                   const fs::path& trainDiClipWav,
-                                   const fs::path& selectionDiClipWav,
-                                   const fs::path& benchmarkDiClipWav,
-                                   double lambda,
-                                   PkDynamicsResult& outResult,
-                                   std::string& error,
-                                   const StatusCallback& status = {});
-
-// Listening-test export (not a measurement): runs the same production
-// conversion + Step 2 P/K dynamics search as runPkDynamicsSearchExperiment
-// above, then renders playingClipWav -- a real musical clip with its own
-// natural dynamics, not the synthetic {-24..+6}dB staircase the search
-// itself trains/scores on -- through three paths: Full A2 (ground truth),
-// the as-shipped GP-5/GP-50 conversion, and the Step 2 P/K-optimized
-// candidate (unshipped). Writes full_a2.wav / baseline_gp5.wav /
-// optimized_gp5.wav to outputDirectory so the actual audible difference (if
-// any) can be checked by ear -- see CLAUDE.md's Step 2 section for why the
-// measured numbers alone aren't sufficient proof of an audible improvement.
-bool runPkDynamicsAudition(const fs::path& inputNam,
-                           const fs::path& playingClipWav,
-                           const fs::path& trainDiClipWav,
-                           const fs::path& selectionDiClipWav,
-                           const fs::path& benchmarkDiClipWav,
-                           double lambda,
-                           const fs::path& outputDirectory,
-                           std::string& error,
-                           const StatusCallback& status = {});
-
 // Direct verification of the multi-level B-solve Tone Match candidate wired
 // into convertNamToClo's GP-5/GP-50 (true 512-tap compact) path -- every
 // official-vs-ours benchmark result above was inadvertently scored against
@@ -510,20 +421,11 @@ struct BenchmarkLevelPoint {
     double fullA2RelativeDb = 0.0, officialRelativeDb = 0.0, oursRelativeDb = 0.0;
     double officialRelativeErrorDb = 0.0; // officialRelativeDb - fullA2RelativeDb
     double oursRelativeErrorDb = 0.0;     // oursRelativeDb - fullA2RelativeDb
-    // Populated only when optimization (trainDiClipWav/selectionDiClipWav) was requested and succeeded.
-    double optimizedRelativeDb = 0.0, optimizedRelativeErrorDb = 0.0;
-    // Populated only when optimization succeeded: a B-only candidate (P/K frozen at the
-    // shipped values, Block B solved jointly across trainDiClipWav's levels the same way
-    // Step 2's search solves B per P/K candidate) -- isolates how much of "optimized"'s
-    // win is the direct B-solve mechanism alone, vs. the P/K search on top of it.
-    double bOnlyRelativeDb = 0.0, bOnlyRelativeErrorDb = 0.0;
 };
 struct BenchmarkHeldOutPoint {
     std::wstring clipName;
     double officialEsr = 0.0; // waveform error-to-signal ratio vs Full A2 (levelResponseEsr)
     double oursEsr = 0.0;
-    double optimizedEsr = 0.0; // populated only when optimization succeeded
-    double bOnlyEsr = 0.0;     // populated only when optimization succeeded
 };
 struct BenchmarkResult {
     bool ok = false;
@@ -552,54 +454,21 @@ struct BenchmarkResult {
     std::vector<BenchmarkHeldOutPoint> heldOut;
     double officialMeanHeldOutEsr = 0.0, oursMeanHeldOutEsr = 0.0;
 
-    // Step 2 dynamics-aware P/K search (see CLAUDE.md's Step 2 section),
-    // run against our own conversion and scored the SAME way as official/
-    // ours above -- true only when trainDiClipWav/selectionDiClipWav were
-    // both supplied to runOfficialSnaptoneBenchmark and the search
-    // succeeded. Answers the question the plain official-vs-shipped
-    // comparison above cannot: does our unshipped dynamics-aware candidate
-    // actually beat the official file, not just our own shipped baseline?
-    bool optimizedComputed = false;
-    float optimizedPp = 0.0f, optimizedPn = 0.0f, optimizedKp = 0.0f, optimizedKn = 0.0f;
-    double optimizedMaxRelativeErrorDb = 0.0, optimizedRmsRelativeErrorDb = 0.0;
-    double optimizedMeanHeldOutEsr = 0.0;
-
-    // B-only candidate: shipped P/K frozen, Block B solved jointly across
-    // trainDiClipWav's six levels (ntc::sweepKAndSolveSharedB with
-    // kMultiplier=1.0 -- P/K unchanged, same solve mechanism Step 2 uses
-    // per P/K candidate). Isolates how much of optimizedComputed's win is
-    // the direct B-solve alone vs. the P/K search on top of it. True only
-    // when optimizedComputed is also true (built from the same train clips).
-    bool bOnlyComputed = false;
-    double bOnlyMaxRelativeErrorDb = 0.0, bOnlyRmsRelativeErrorDb = 0.0;
-    double bOnlyMeanHeldOutEsr = 0.0;
 };
 
-// trainDiClipWav/selectionDiClipWav are optional (pass empty paths to skip):
-// when both are supplied, also runs Step 2's searchPkForDynamics against our
-// own conversion (using diClipWav itself as the disjoint benchmark clip for
-// the search's round-acceptance gate, matching the discipline every other
-// search in this codebase uses) and scores the resulting optimized candidate
-// against the SAME official file and Full A2 reference as the shipped
-// candidate -- see BenchmarkResult::optimizedComputed.
 bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
                                   const fs::path& officialSnapClo,
                                   const fs::path& diClipWav,
                                   const std::vector<fs::path>& heldOutClips,
                                   BenchmarkResult& out,
                                   std::string& error,
-                                  const StatusCallback& status = {},
-                                  const fs::path& trainDiClipWav = {},
-                                  const fs::path& selectionDiClipWav = {},
-                                  double optimizationLambda = 0.3);
+                                  const StatusCallback& status = {});
 
-// "CoreRevert" pass (2026-09-01, see CLAUDE.md): compares three internal
-// GP-5/GP-50 candidates built from the SAME NAM, to check whether restoring
-// Valeton-style P/K/A fitting -- while keeping only the direct B512 solve --
-// recovers correct guitar-volume cleanup without losing the B512 win.
+// "CoreRevert" pass (2026-09-01, see CLAUDE.md): compares internal GP-5/GP-50
+// candidates built from the SAME NAM.
 //   "valeton"      -- Tone Match disabled entirely, so none of Tone Match's B
 //                      candidates (including our direct B512 least-squares
-//                      solve) or the dynamics-aware P/K search ever run. What
+//                      solve) ever runs. What
 //                      ships is exactly convertNamToClo's always-on fitPk()/
 //                      fitAB() result, with B taken from its existing dynamic
 //                      pick between direct-at-512-taps and truncating the
@@ -612,12 +481,8 @@ bool runOfficialSnaptoneBenchmark(const fs::path& inputNam,
 //                      512-tap official SnapTone file to fit against.
 //   "production"    -- Tone Match enabled (Auto reference mode, matching the
 //                      GUI's default), so the B512 solve competes and can
-//                      ship; dynamicsAwareFitting=false so P/K stays frozen
-//                      at the Valeton-style fitPk() result. Production AFTER
-//                      this pass.
-//   "experimental"  -- same as "production" but dynamicsAwareFitting=true, so
-//                      the P/K search can reopen and move P/K. Production
-//                      BEFORE this pass -- comparison only, not shipped.
+//                      ship; P/K stays frozen at the Valeton-style fitPk()
+//                      result.
 struct ValetonComparisonLevelPoint {
     double levelDb = 0.0;
     double fullA2AbsoluteRmsDb = 0.0;
@@ -652,7 +517,7 @@ struct ValetonComparisonBandEnergy {
 struct ValetonComparisonResult {
     bool ok = false;
     std::string error;
-    std::wstring label; // "valeton" | "production" | "experimental"
+    std::wstring label; // "valeton" | "generic" | "production"
     float pkPp = 0.0f, pkPn = 0.0f, pkKp = 0.0f, pkKn = 0.0f;
     std::vector<ValetonComparisonLevelPoint> levels; // {0,-3,-6,-9,-12,-18,-24} dB
     double meanAbsoluteGainErrorDb = 0.0;
@@ -667,14 +532,13 @@ struct ValetonComparisonResult {
     ValetonComparisonBandEnergy fullA2MeanBandEnergyPercent;
 };
 
-// Builds and scores four candidates for inputNam against diClipWav (rendered at the seven
+// Builds and scores three candidates for inputNam against diClipWav (rendered at the seven
 // levels) and heldOutClips (spectral fidelity only, at 0dB): "valeton" (Tone Match off,
 // the Valeton-style baseline), "generic" (Tone Match on, Default reference -- the plain
 // synthetic stimulus tail, not a real playing clip), "production" (Tone Match on, Auto
 // reference -- the gain-bucket-matched bundled clip production actually ships, added
 // 2026-09-02 to directly answer whether genre/character-matched Tone Match reference audio
-// beats a generic one), and "experimental" (same as production but with the dynamics-aware
-// P/K search re-enabled, comparison only). Always writes exactly 4 entries into out, in
+// beats a generic one). Always writes exactly 3 entries into out, in
 // that order -- check .ok per entry, since one candidate's conversion can fail
 // independently of the others.
 bool runValetonComparisonExperiment(const fs::path& inputNam,

@@ -23,7 +23,7 @@ struct CorrectiveIrStats {
 };
 
 
-// Decode the 44.1 kHz mono corrective IR using the same WAV rules as the CLO
+// Decode the 44.1 kHz mono cab IR using the same WAV rules as the CLO
 // correction path. The returned samples are not normalized or gain-scaled.
 bool loadCorrectiveIrSamples(const fs::path& correctiveWav,
                              std::vector<float>& correctiveIr,

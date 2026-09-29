@@ -53,7 +53,7 @@ std::uint64_t readLe64(const std::uint8_t* p) {
 bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        error = "Cannot open Corrective IR WAV: " + pathToUtf8(path);
+        error = "Cannot open Cab IR WAV: " + pathToUtf8(path);
         return false;
     }
 
@@ -62,7 +62,7 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
     if (in.gcount() != static_cast<std::streamsize>(riff.size())
         || std::memcmp(riff.data(), "RIFF", 4) != 0
         || std::memcmp(riff.data() + 8, "WAVE", 4) != 0) {
-        error = "Corrective IR is not a valid RIFF/WAVE file: " + pathToUtf8(path);
+        error = "Cab IR is not a valid RIFF/WAVE file: " + pathToUtf8(path);
         return false;
     }
 
@@ -73,7 +73,7 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
         in.read(reinterpret_cast<char*>(chunkHeader.data()), static_cast<std::streamsize>(chunkHeader.size()));
         if (in.gcount() == 0) break;
         if (in.gcount() != static_cast<std::streamsize>(chunkHeader.size())) {
-            error = "Truncated Corrective IR WAV chunk header.";
+            error = "Truncated Cab IR WAV chunk header.";
             return false;
         }
 
@@ -83,13 +83,13 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
 
         if (isFmt) {
             if (chunkSize < 16) {
-                error = "Invalid fmt chunk in Corrective IR WAV.";
+                error = "Invalid fmt chunk in Cab IR WAV.";
                 return false;
             }
             std::vector<std::uint8_t> fmt(chunkSize);
             in.read(reinterpret_cast<char*>(fmt.data()), static_cast<std::streamsize>(fmt.size()));
             if (in.gcount() != static_cast<std::streamsize>(fmt.size())) {
-                error = "Truncated fmt chunk in Corrective IR WAV.";
+                error = "Truncated fmt chunk in Cab IR WAV.";
                 return false;
             }
 
@@ -101,7 +101,7 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
 
             if (wav.format == kWaveFormatExtensible) {
                 if (fmt.size() < 40 || readLe16(fmt.data() + 16) < 22) {
-                    error = "Unsupported WAVE_FORMAT_EXTENSIBLE header in Corrective IR WAV.";
+                    error = "Unsupported WAVE_FORMAT_EXTENSIBLE header in Cab IR WAV.";
                     return false;
                 }
                 wav.format = readLe16(fmt.data() + 24);
@@ -112,7 +112,7 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
             if (!wav.data.empty()) {
                 in.read(reinterpret_cast<char*>(wav.data.data()), static_cast<std::streamsize>(wav.data.size()));
                 if (in.gcount() != static_cast<std::streamsize>(wav.data.size())) {
-                    error = "Truncated data chunk in Corrective IR WAV.";
+                    error = "Truncated data chunk in Cab IR WAV.";
                     return false;
                 }
             }
@@ -120,7 +120,7 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
         } else {
             in.seekg(static_cast<std::streamoff>(chunkSize), std::ios::cur);
             if (!in) {
-                error = "Invalid chunk size in Corrective IR WAV.";
+                error = "Invalid chunk size in Cab IR WAV.";
                 return false;
             }
         }
@@ -129,11 +129,11 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
     }
 
     if (!haveFmt || !haveData) {
-        error = "Corrective IR WAV is missing fmt or data chunk.";
+        error = "Cab IR WAV is missing fmt or data chunk.";
         return false;
     }
     if (wav.channels == 0 || wav.channels > 2 || wav.sampleRate == 0 || wav.blockAlign == 0) {
-        error = "Corrective IR WAV must be mono or stereo.";
+        error = "Cab IR WAV must be mono or stereo.";
         return false;
     }
     // Sample rate is no longer rejected here -- decodeCorrectiveIr() below
@@ -141,7 +141,7 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
     // using the same r8brain resampler the rest of the conversion pipeline
     // uses. Only structural validity is checked at this stage.
     if (wav.data.empty() || (wav.data.size() % wav.blockAlign) != 0u) {
-        error = "Corrective IR WAV contains no complete audio frames.";
+        error = "Cab IR WAV contains no complete audio frames.";
         return false;
     }
     return true;
@@ -204,20 +204,20 @@ bool decodeCorrectiveIr(const fs::path& path, std::vector<double>& mono, std::st
     const bool supportedFloat = wav.format == kWaveFormatIeeeFloat
         && (wav.bitsPerSample == 32 || wav.bitsPerSample == 64);
     if (!supportedPcm && !supportedFloat) {
-        error = "Unsupported Corrective IR WAV encoding. Use PCM 8/16/24/32-bit or float 32/64-bit.";
+        error = "Unsupported Cab IR WAV encoding. Use PCM 8/16/24/32-bit or float 32/64-bit.";
         return false;
     }
 
     const std::uint16_t bytesPerSample = static_cast<std::uint16_t>((wav.bitsPerSample + 7u) / 8u);
     const std::uint16_t minimumBlockAlign = static_cast<std::uint16_t>(bytesPerSample * wav.channels);
     if (bytesPerSample == 0 || wav.blockAlign < minimumBlockAlign) {
-        error = "Invalid block alignment in Corrective IR WAV.";
+        error = "Invalid block alignment in Cab IR WAV.";
         return false;
     }
 
     const std::size_t frames = wav.data.size() / wav.blockAlign;
     if (frames == 0) {
-        error = "Corrective IR WAV is empty.";
+        error = "Cab IR WAV is empty.";
         return false;
     }
 
@@ -230,7 +230,7 @@ bool decodeCorrectiveIr(const fs::path& path, std::vector<double>& mono, std::st
             const double sample = decodeSample(framePtr + static_cast<std::size_t>(channel) * bytesPerSample,
                                                wav.format, wav.bitsPerSample, ok);
             if (!ok) {
-                error = "Unsupported sample format in Corrective IR WAV.";
+                error = "Unsupported sample format in Cab IR WAV.";
                 return false;
             }
             sum += sample;
@@ -240,7 +240,7 @@ bool decodeCorrectiveIr(const fs::path& path, std::vector<double>& mono, std::st
 
     if (wav.sampleRate != kExpectedSampleRate) {
         // Auto-convert to the 44.1kHz the CLO correction path requires,
-        // rather than rejecting an otherwise-valid Corrective IR just
+        // rather than rejecting an otherwise-valid Cab IR just
         // because it was exported at 48kHz/96kHz/etc. Round-tripping
         // through float here (resampleForCorrectiveIr's native precision)
         // is negligible for a short correction IR.
@@ -284,7 +284,7 @@ bool loadCorrectiveIrSamples(const fs::path& correctiveWav,
         if (!std::isfinite(sample)
             || sample > static_cast<double>(std::numeric_limits<float>::max())
             || sample < -static_cast<double>(std::numeric_limits<float>::max())) {
-            error = "Corrective IR WAV contains an invalid sample.";
+            error = "Cab IR WAV contains an invalid sample.";
             correctiveIr.clear();
             return false;
         }
@@ -320,14 +320,14 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
     }
 
     if (correctiveIr.empty()) {
-        error = "Corrective IR has no samples.";
+        error = "Cab IR has no samples.";
         return false;
     }
     std::vector<double> ir;
     ir.reserve(correctiveIr.size());
     for (const float sample : correctiveIr) {
         if (!std::isfinite(sample)) {
-            error = "Corrective IR contains a non-finite sample.";
+            error = "Cab IR contains a non-finite sample.";
             return false;
         }
         ir.push_back(static_cast<double>(sample));
@@ -361,7 +361,7 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
         return false;
     }
     if (!std::isfinite(stats.convolvedRms) || stats.convolvedRms <= 1e-20) {
-        error = "Corrective IR produced a silent Block B.";
+        error = "Cab IR produced a silent Block B.";
         return false;
     }
 
@@ -373,7 +373,7 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
     stats.totalGainDb = stats.rmsGainDb + postCorrectionDb;
 
     if (!std::isfinite(finalGain)) {
-        error = "Corrective IR normalization produced an invalid gain.";
+        error = "Cab IR normalization produced an invalid gain.";
         return false;
     }
 
@@ -382,7 +382,7 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
         if (!std::isfinite(scaled)
             || scaled > static_cast<double>(std::numeric_limits<float>::max())
             || scaled < -static_cast<double>(std::numeric_limits<float>::max())) {
-            error = "Corrective IR produced an out-of-range Block B value.";
+            error = "Cab IR produced an out-of-range Block B value.";
             return false;
         }
         const float value = static_cast<float>(scaled);

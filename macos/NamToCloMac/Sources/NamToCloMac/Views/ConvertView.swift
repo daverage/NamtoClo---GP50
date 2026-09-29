@@ -161,7 +161,7 @@ struct ConvertView: View {
                 }
 
                 HStack {
-                    Text("Corrective IR").frame(width: 220, alignment: .leading)
+                    Text("Embed cab IR").frame(width: 220, alignment: .leading)
                     if let url = appState.correctiveIrURL {
                         Text(url.lastPathComponent).lineLimit(1).truncationMode(.middle)
                         Button("Clear") { appState.correctiveIrURL = nil }

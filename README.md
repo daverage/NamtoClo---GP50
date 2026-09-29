@@ -38,7 +38,7 @@ The current implementation intentionally exposes only **SnapTone 51-80**, the ra
 3. Open **Convert to CLO**.
 4. Select a `.nam` file or a folder containing `.nam` files.
 5. Select the output folder.
-6. Leave the optional processing disabled for a standard conversion, or configure **Tail / Reamp**, **Corrective IR** and/or **Tone Match** as described below.
+6. Leave the optional processing disabled for a standard conversion, or configure **Tail / Reamp**, **Cab IR** and/or **Tone Match** as described below.
 7. Press **Convert**.
 
 The repository includes the required `nam_input_wav.wav`. The supplied file is a 70-second, 44.1 kHz, 16-bit PCM WAV. The application adapts it internally to the mono stimulus used by the converter.
@@ -142,18 +142,19 @@ The source file itself is not modified.
 
 ---
 
-## Corrective IR
+## Cab IR
 
-Enable **Apply corrective IR** to apply a corrective impulse-response WAV to the normal CLO result.
+Enable **Embed cab IR** to convolve a cab impulse-response WAV into the finished CLO.
 
-1. Tick **Apply corrective IR**.
+1. Tick **Embed cab IR**.
 2. Press **Browse WAV...**.
-3. Select the corrective IR.
+3. Select the cab IR.
 4. Convert normally.
 
-The corrective stage is applied after the native NAM-to-CLO conversion and before both
-final CLOs are written -- it now reaches the GP-5/GP-50 512-tap output as well as the
-GP-200 1024-tap CLO, not only the latter.
+The corrective stage is the **last** step: it is applied to the finished conversion (after
+Tone Match, if enabled) and reaches both the GP-5/GP-50 512-tap output and the GP-200
+1024-tap CLO. It is meant for embedding something like a cab in the CLO, not for making the
+conversion sound more like the NAM, so it never takes part in fitting or Tone Match choices.
 
 The generated filenames remain:
 
@@ -162,62 +163,18 @@ The generated filenames remain:
 <name>_NATIVE_GP5GP50_512.clo
 ```
 
-### Corrective IR and Tone Match together
+### Cab IR and Tone Match together
 
-When both options are enabled, the normal native conversion is completed first. The selected Corrective IR is then applied to the native CLO, and the same effective Corrective IR (including the CLO-side RMS normalization and post gain) is applied to the NAM render used as the Tone Match target. Tone Match therefore compares **NAM + Corrective IR** against **CLO + Corrective IR**, and refines the already-corrected CLO.
-
-Using only Corrective IR or only Tone Match keeps the same behavior as before.
-
----
-
-## Tone Match
-
-Enable **Apply Tone Match (slow)** when you want the converter to perform the additional CLO refinement stage.
-
-Tone Match is intentionally slower than the standard conversion.
-
-When enabled, the normal GP-200 CLO is not exported; the result is:
-
-```text
-<name>_NATIVE_GP200_1024_TONEMATCH.clo
-```
-
-The GP-5/GP-50 512-tap CLO (`<name>_NATIVE_GP5GP50_512.clo`) is still produced, and now
-also receives the same Tone Match correction. That correction is the same filter fit
-against the GP-200 2048-tap CLO's own render, reapplied to the GP-5/GP-50 Block B -- an
-approximation, not a from-scratch analysis at the 512-tap length, but it means Tone
-Match is no longer silently skipped for GP-5/GP-50 output.
-
-### Reference audio mode
-
-Tone Match refines the CLO against a target render, and **Reference audio** selects what that target is. The dropdown offers seven options; **Auto (recommended)** is selected by default:
-
-```text
-Default (standard stimulus)
-Auto (recommended)
-Clean
-Moderate
-High Gain
-Bass
-Custom WAV...
-```
-
-- **Default (standard stimulus)** — no reference WAV; the target is the original conversion stimulus rendered through the NAM. This is the original, pre-fork behavior.
-- **Auto (recommended)** — the converter classifies the NAM's fitted gain shaper into a gain bucket and automatically picks one of the four bundled reference clips below to match. If classification or clip resolution fails, it falls back to Default.
-- **Clean / Moderate / High Gain / Bass** — use one specific bundled reference clip directly, bypassing automatic classification. These clips ship with the application (`resources/reference_clips/`) and are installed next to the executable.
-- **Custom WAV...** — enables **Browse WAV...**, letting you pick your own reference file. Only the **first 20 seconds** of the selected file are used; the converter combines that reference with the fixed 50-second stimulus and renders the same test through the NAM before refining the CLO.
-
-For any reference WAV (bundled or custom), the audio is adapted automatically in the same way as Recorded Audio: channel conversion, sample-rate adaptation, trimming and padding are handled by the application.
+When both options are enabled, the conversion and Tone Match run exactly as they would without the IR, against the plain NAM. The Cab IR is then convolved into the final Block B (with the same RMS normalization and post gain as usual), so Tone Match's fit and level are unaffected by it.
 
 ### GP-5/GP-50 Tone Match method
 
 Whenever Tone Match has a real reference clip to work with (any mode except **Default**), the GP-5/GP-50 512-tap output is fit using whichever of the following measures best against that reference, not a single fixed method:
 
-- a corrective-IR convolution (the older approach, kept as a fallback candidate);
 - a direct least-squares solve of Block B against the reference at a single operating point;
 - a multi-level solve of Block B jointly across a six-point gain sweep (`-24` to `+6` dB) of the reference clip, which better preserves how the amp responds to playing dynamics, not just tone at one volume.
 
-An experimental **dynamics-aware gain-shaper search** exists internally (off by default, no GUI control) that tries to close a measured dynamics-tracking gap on high/extreme-gain amps by adjusting the gain-shaper curve itself. It is **not** part of the default conversion: real hardware listening found it made converted patches quieter without cleaning up distortion the way a real amp does, even though it looked like an improvement on this project's own automated metrics. It remains available for research use via headless CLI flags but is not recommended and not exposed in the GUI.
+An experimental **dynamics-aware gain-shaper search** (adjusting the gain-shaper curve to close a measured dynamics-tracking gap) was tried and **removed**. It improved this project's own dynamics metric but degraded tone on most amps, and real hardware listening found it made patches quieter without cleaning up distortion. See `QUALITY.md` for the test results.
 
 After a conversion, the result dialog reports which Tone Match method was applied to the GP-5/GP-50 output.
 
@@ -578,7 +535,7 @@ on GP-5/GP-50 conversion quality and confirming GP-50 hardware support end-to-en
   result. The converter automatically compares both approaches per NAM file and keeps
   whichever measures better, producing `<name>_NATIVE_GP5GP50_512.clo` alongside the
   GP-200 output on every conversion.
-- **Corrective IR and Tone Match now reach the GP-5/GP-50 output.** Previously both only
+- **Cab IR and Tone Match now reach the GP-5/GP-50 output.** Previously both only
   applied to the GP-200 1024-tap CLO; the GP-5/GP-50 file silently missed them.
 - **Multi-level Block B solve for GP-5/GP-50.** The Tone Match step now also tries
   solving Block B jointly across a six-point gain sweep of the reference clip, verified
@@ -621,17 +578,17 @@ on GP-5/GP-50 conversion quality and confirming GP-50 hardware support end-to-en
   plain conversion's own output level. Both the GP-200 and GP-5/GP-50 paths now match
   Tone Match's level to the plain conversion, so this step only ever corrects tone, never
   overall loudness.
-- **A previously-experimental dynamics-aware P/K search was permanently disabled.** It
+- **A previously-experimental dynamics-aware P/K search was removed.** It
   looked like a win on this project's own automated metrics but made converted patches
   audibly quieter without cleaning up distortion the way a real amp does, confirmed by
-  real hardware listening. Removed as a default; the direct/multi-level Block B solve
-  (the two real, verified wins) ship unchanged.
+  real hardware listening and by a 9-amp forced-on re-test. The direct/multi-level Block B
+  solve (the two real, verified wins) ship unchanged.
 - **Confirmed against the real device firmware, not just inferred.** Disassembly of the
   official macOS companion app's native conversion engine confirmed this project's
   reconstruction of the oversampled amp-shaper nonlinearity (allpass filter coefficients
   and up/down-sampling stage order) is bit-for-bit identical to the real algorithm, and
   that the GP-5/GP-50 512-tap fit is natively fit at that budget on real hardware too,
-  not derived by truncating a larger fit. Tone Match and Corrective IR remain this
+  not derived by truncating a larger fit. Tone Match and Cab IR remain this
   project's own additions on top of that faithful core — the official converter has no
   equivalent mechanism for either. See `CLAUDE.md` for the full writeup.
 
