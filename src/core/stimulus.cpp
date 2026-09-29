@@ -15,7 +15,6 @@ namespace {
 
 constexpr std::uint32_t kExpectedSampleRate = 44100;
 constexpr std::uint16_t kExpectedBitsPerSample = 16;
-constexpr std::uint16_t kExpectedSourceChannels = 1;
 constexpr std::uint64_t kBaseFrames = 50ull * kExpectedSampleRate;
 constexpr std::uint64_t kTailFrames = 20ull * kExpectedSampleRate;
 constexpr std::size_t kSoundClonePaddingFrames = 600;
@@ -167,34 +166,6 @@ bool readWaveFile(const fs::path& path, WavData& wav, std::string& error) {
     return true;
 }
 
-bool readPcm16Mono44100(const fs::path& path,
-                        std::uint64_t expectedFrames,
-                        Pcm16MonoWav& wav,
-                        std::string& error) {
-    WavData source;
-    if (!readWaveFile(path, source, error)) return false;
-
-    if (source.format != kWaveFormatPcm || source.channels != kExpectedSourceChannels
-        || source.sampleRate != kExpectedSampleRate || source.bitsPerSample != kExpectedBitsPerSample
-        || source.blockAlign != 2) {
-        error = "Expected mono PCM16 44.1 kHz WAV: " + pathToUtf8(path);
-        return false;
-    }
-
-    const std::uint64_t frames = source.data.size() / source.blockAlign;
-    if (frames != expectedFrames) {
-        error = "Unexpected duration for " + pathToUtf8(path)
-              + ". Expected exactly " + std::to_string(expectedFrames)
-              + " samples, got " + std::to_string(frames) + ".";
-        return false;
-    }
-
-    wav.samples.resize(static_cast<std::size_t>(frames));
-    for (std::size_t i = 0; i < wav.samples.size(); ++i) {
-        wav.samples[i] = static_cast<std::int16_t>(readLe16(source.data.data() + i * 2));
-    }
-    return true;
-}
 
 double decodeSample(const std::uint8_t* p,
                     const std::uint16_t format,

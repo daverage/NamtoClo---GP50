@@ -120,10 +120,6 @@ struct NativeConverterConfig {
     // held-out-validation win above is real and independent of which framing is right.
     bool gp5DirectFit = true;
 
-    // Priority 3 Phase 1: re-pick the Tone Match B candidate by majority of per-level
-    // wins across the 6-level sweep. false = pick by the fitting-level loss only.
-    bool multiLevelSelection = true;
-
     // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2" --
     // full P/K coordinate-descent search). EXPERIMENTAL / DIAGNOSTIC ONLY --
     // defaults to false as of the 2026-09-01 "CoreRevert" pass. Real hardware
@@ -711,19 +707,6 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
 // several amps. Default 1.0/1.0 reproduces every existing call site's unity-gain behavior
 // exactly; pass cloPlayerGainControlToLinear(50.0f)/cloPlayerVolumeControlToLinear(50.0f)
 // (exposed below) to test the CloPlayer-default operating point instead.
-// Feature ablation on the GP-5/GP-50 Tone Match pipeline, all scored with the same
-// Full A2 methodology as runValetonComparisonExperiment. Always writes 4 entries:
-//   "no-tonematch"  Tone Match off
-//   "legacy"        Tone Match on, fitting-level selection only, no P/K search
-//   "phase1"        legacy + multi-level majority selection (current production)
-//   "phase3"        phase1 + gated dynamics-aware P/K search
-bool runPhaseAblation(const fs::path& inputNam,
-                      const fs::path& diClipWav,
-                      const std::vector<fs::path>& heldOutClips,
-                      std::vector<ValetonComparisonResult>& out,
-                      std::string& error,
-                      const StatusCallback& status = {});
-
 bool runOfficialCandidateComparison(const fs::path& inputNam,
                                     const fs::path& officialClo,
                                     const fs::path& diClipWav,

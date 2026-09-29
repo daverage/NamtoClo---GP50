@@ -6,8 +6,7 @@
 
 #include <cerrno>
 #include <cstring>
-#include <codecvt>
-#include <locale>
+#include <cstdint>
 #include <vector>
 
 namespace ntc {
@@ -17,32 +16,60 @@ namespace ntc {
 // Unicode string (round-tripped through toUtf8/fromUtf8, or literal ASCII),
 // never as UTF-16 code units, so UTF-8 <-> UTF-32 is a safe substitution for
 // the Windows UTF-8 <-> UTF-16 behavior these functions used to provide.
-//
-// std::wstring_convert is deprecated in C++17 but remains available in both
-// libc++ and libstdc++ with no replacement in the standard library; using it
-// here (rather than hand-rolling UTF-8/UTF-32 conversion) keeps this file
-// small and matches how the codebase already tolerates deprecated-but-only
-// option APIs (see r8brain-free-src usage elsewhere).
-namespace {
-using Utf8Utf32Cvt = std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t>;
-} // namespace
+// Invalid input yields an empty string, matching the Windows implementation.
 
 std::string toUtf8(const std::wstring& value) {
-    if (value.empty()) return {};
-    try {
-        return Utf8Utf32Cvt().to_bytes(value);
-    } catch (const std::range_error&) {
-        return {};
+    std::string out;
+    out.reserve(value.size());
+    for (const wchar_t wc : value) {
+        const std::uint32_t cp = static_cast<std::uint32_t>(wc);
+        if (cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return {};
+        if (cp < 0x80u) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800u) {
+            out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        } else if (cp < 0x10000u) {
+            out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        } else {
+            out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        }
     }
+    return out;
 }
 
 std::wstring fromUtf8(const std::string& value) {
-    if (value.empty()) return {};
-    try {
-        return Utf8Utf32Cvt().from_bytes(value);
-    } catch (const std::range_error&) {
-        return {};
+    std::wstring out;
+    out.reserve(value.size());
+    std::size_t i = 0;
+    const std::size_t n = value.size();
+    while (i < n) {
+        const std::uint32_t b0 = static_cast<unsigned char>(value[i]);
+        std::uint32_t cp = 0;
+        std::size_t extra = 0;
+        std::uint32_t minCp = 0;
+        if (b0 < 0x80u) { cp = b0; }
+        else if ((b0 & 0xE0u) == 0xC0u) { cp = b0 & 0x1Fu; extra = 1; minCp = 0x80u; }
+        else if ((b0 & 0xF0u) == 0xE0u) { cp = b0 & 0x0Fu; extra = 2; minCp = 0x800u; }
+        else if ((b0 & 0xF8u) == 0xF0u) { cp = b0 & 0x07u; extra = 3; minCp = 0x10000u; }
+        else return {};
+        if (i + extra >= n) return {};
+        for (std::size_t k = 1; k <= extra; ++k) {
+            const std::uint32_t bk = static_cast<unsigned char>(value[i + k]);
+            if ((bk & 0xC0u) != 0x80u) return {};
+            cp = (cp << 6) | (bk & 0x3Fu);
+        }
+        if (extra != 0 && cp < minCp) return {};
+        if (cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return {};
+        out.push_back(static_cast<wchar_t>(cp));
+        i += extra + 1;
     }
+    return out;
 }
 
 fs::path executablePath() {

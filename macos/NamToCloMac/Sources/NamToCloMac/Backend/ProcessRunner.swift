@@ -8,7 +8,8 @@ import Foundation
 /// with `--json`, which makes `namtoclo` emit newline-delimited JSON (NDJSON)
 /// on stdout and free-form diagnostics on stderr (see src/cli/main.cpp's file
 /// header comment for the exact contract).
-final class ProcessRunner {
+// `process` is only read/written on `queue`, so cross-thread capture is safe.
+final class ProcessRunner: @unchecked Sendable {
     struct RunError: Error, LocalizedError {
         let message: String
         var errorDescription: String? { message }

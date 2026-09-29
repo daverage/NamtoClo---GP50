@@ -205,12 +205,6 @@ void renderPreB(const Model& base,const std::vector<float>& aout,float pp,float 
     }
 }
 
-double fitScale(const std::vector<float>& candidate,const std::vector<float>& target){
-    const std::size_t n=std::min(candidate.size(),target.size());
-    long double cc=0.0L,ct=0.0L;
-    for(std::size_t i=0;i<n;++i){ cc+=static_cast<long double>(candidate[i])*candidate[i]; ct+=static_cast<long double>(candidate[i])*target[i]; }
-    return cc>1e-30L?static_cast<double>(ct/cc):1.0;
-}
 
 std::vector<float> hannWindow(std::size_t n){
     std::vector<float> w(n);
@@ -1118,25 +1112,6 @@ bool writeMono44100Wav(const fs::path& path, const std::vector<float>& samples, 
         out.write(reinterpret_cast<const char*>(&pcm), 2);
     }
     return true;
-}
-
-double computeCompressionError(const std::vector<double>& referenceOutputLevels,
-                                const std::vector<double>& modelOutputLevels) {
-    if (referenceOutputLevels.size() != modelOutputLevels.size() || referenceOutputLevels.empty()) {
-        return std::numeric_limits<double>::max();
-    }
-    // Zero-anchored: a constant level offset is not a compression error (final level
-    // match handles absolute gain), so subtract the mean difference before the RMS.
-    const std::size_t n = referenceOutputLevels.size();
-    double meanDiff = 0.0;
-    for (std::size_t i = 0; i < n; ++i) meanDiff += referenceOutputLevels[i] - modelOutputLevels[i];
-    meanDiff /= static_cast<double>(n);
-    double sumSqError = 0.0;
-    for (std::size_t i = 0; i < n; ++i) {
-        const double error = referenceOutputLevels[i] - modelOutputLevels[i] - meanDiff;
-        sumSqError += error * error;
-    }
-    return std::sqrt(sumSqError / referenceOutputLevels.size());
 }
 
 } // namespace ntc

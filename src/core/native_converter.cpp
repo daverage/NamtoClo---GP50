@@ -562,19 +562,11 @@ namespace {
 struct AP{float a=0,s=0;float p(float x){const float y=s+a*x;s=x-a*y;return y;}};
 struct Poly{std::vector<AP>a,b;float d=0;Poly(std::initializer_list<float>x,std::initializer_list<float>y){for(float v:x)a.push_back({v,0});for(float v:y)b.push_back({v,0});}float r(std::vector<AP>&v,float x){for(auto&s:v)x=s.p(x);return x;}void up(float x,float&e,float&o){e=r(a,x);o=r(b,x);}float down(float e,float o){const float x=r(a,e),y=r(b,o),z=.5f*(x+d);d=y;return z;}};
 
-bool powerOfTwo(std::size_t n){return n && !(n&(n-1));}
 void fft(std::vector<std::complex<double>>& a,bool inv){
     const std::size_t n=a.size();
     for(std::size_t i=1,j=0;i<n;++i){std::size_t bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;if(i<j)std::swap(a[i],a[j]);}
     for(std::size_t len=2;len<=n;len<<=1){const double ang=(inv?2:-2)*kPi/static_cast<double>(len);const std::complex<double> wl(std::cos(ang),std::sin(ang));for(std::size_t i=0;i<n;i+=len){std::complex<double>w(1,0);for(std::size_t j=0;j<len/2;++j){auto u=a[i+j],v=a[i+j+len/2]*w;a[i+j]=u+v;a[i+j+len/2]=u-v;w*=wl;}}}
     if(inv)for(auto&v:a)v/=static_cast<double>(n);
-}
-void transformAny(std::vector<std::complex<double>>& a,bool inv){
-    if(powerOfTwo(a.size())){fft(a,inv);return;}
-    const std::size_t n=a.size(); std::vector<std::complex<double>> o(n);
-    const double sign=inv?1.0:-1.0;
-    for(std::size_t k=0;k<n;++k){std::complex<long double> sum(0,0);for(std::size_t j=0;j<n;++j){const long double ph=sign*2.0L*static_cast<long double>(kPi)*static_cast<long double>(j)*static_cast<long double>(k)/static_cast<long double>(n);const std::complex<long double>w(std::cos(ph),std::sin(ph));sum+=std::complex<long double>(a[j].real(),a[j].imag())*w;}if(inv)sum/=static_cast<long double>(n);o[k]={static_cast<double>(sum.real()),static_cast<double>(sum.imag())};}
-    a.swap(o);
 }
 
 // 0x553aa0 / 0x55b2e0 / 0x55b460 / 0x55b9a0: exact trainer FIR engine.
@@ -605,7 +597,6 @@ constexpr std::array<std::int16_t,128> kOfficialFft128SinQ15 = {
 inline float officialSin128(std::size_t idx) {
     return static_cast<float>(kOfficialFft128SinQ15[idx & 127u]) * 3.0517578125e-05f;
 }
-inline float officialCos128(std::size_t idx) { return officialSin128((idx + 32u) & 127u); }
 
 // Literal radix-2 data flow corresponding to 0x55b9a0 after its bit-reversal
 // permutation. Direction 1 is inverse in the EXE; inverse divides every
@@ -693,14 +684,6 @@ void fft128Official(std::array<ComplexF,128>& a, bool inverse) {
         const float divisor=static_cast<float>(N);
         for(auto&v:a){v.re/=divisor;v.im/=divisor;}
     }
-}
-inline ComplexF mulOfficial(ComplexF a, ComplexF b){
-    const float p0=a.re*b.re;
-    const float p1=a.im*b.im;
-    const float re=p0-p1;
-    const float p2=a.re*b.im;
-    const float p3=a.im*b.re;
-    return {re,p2+p3};
 }
 
 struct FirPlan{
@@ -876,7 +859,6 @@ void energiesFinalBOfficial(const std::vector<float>&target,const std::vector<fl
     }
     for(;i<n;++i){float v=target[i];et+=v*v;v=model[i];em+=v*v;}
 }
-std::vector<double> fftFrequencyGrid(double sr){std::vector<double>f(kBins);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<double>(k)*(sr*0.5)/static_cast<double>(kBins-1);return f;}
 std::vector<float> fftFrequencyGridF(double sr){
     // Trainer ctor 0x5539a8 calls 0x4225b0 for the N/2+1 frequency grid.
     const float fs=static_cast<float>(sr);
@@ -889,9 +871,7 @@ std::vector<float> fftFrequencyGridF(double sr){
     f[kBins-1]=ny;
     return f;
 }
-std::vector<double> linspace(double a,double b,std::size_t n){std::vector<double>v(n);if(!n)return v;if(n==1){v[0]=a;return v;}for(std::size_t i=0;i<n;++i)v[i]=a+(b-a)*static_cast<double>(i)/static_cast<double>(n-1);v.front()=a;v.back()=b;return v;}
 
-void fftF(std::vector<std::complex<float>>& a,bool inv);
 
 // 0x423180 wraps Takuya Ooura's double FFT4G rdft().  GP-200.exe first
 // converts the folded float frame to double, calls rdft(N,+1), then rounds the
@@ -978,7 +958,6 @@ std::vector<float> ratioSpectrumF(const std::vector<float>& model,const std::vec
     return r;
 }
 
-std::vector<double> ratioSpectrum(const std::vector<float>& model,const std::vector<float>& target,double sr){const auto r=ratioSpectrumF(model,target,sr);return std::vector<double>(r.begin(),r.end());}
 
 float hzToMelF(float hz){
     // 0x554f00 helpers: all scalar arithmetic is float up to the precise
@@ -993,8 +972,6 @@ float melToHzF(float mel){
     const float p=precisePowF(10.0f,e);
     return (p-1.0f)*700.0f;
 }
-double hzToMel(double hz){return static_cast<double>(hzToMelF(static_cast<float>(hz)));}
-double melToHz(double mel){return static_cast<double>(melToHzF(static_cast<float>(mel)));}
 
 // 0x4225b0.  This is intentionally incremental rather than evaluating the
 // closed-form expression for every point: every addss rounds before the next
@@ -1050,22 +1027,7 @@ std::vector<float> interpolateOfficialF(const std::vector<float>&srcX,
     }
     return out;
 }
-float interpOfficialF(const std::vector<float>&srcX,const std::vector<float>&srcY,float q){
-    const std::vector<float> queries{q};
-    return interpolateOfficialF(srcX,srcY,queries)[0];
-}
 
-// Retained only for non-trainer utility code.  Trainer reconstruction below
-// uses 0x553c60 exactly via interpolateOfficialF().
-float interpLinearF(const std::vector<float>&x,const std::vector<float>&y,float q){
-    if(x.empty()||y.empty())return 0.0f;
-    if(q<=x.front())return y.front();if(q>=x.back())return y.back();
-    const auto it=std::lower_bound(x.begin(),x.end(),q);
-    const std::size_t b=static_cast<std::size_t>(it-x.begin()),a=b-1;
-    const float dx=x[b]-x[a];if(std::abs(dx)<1e-30f)return y[a];
-    const float t=(q-x[a])/dx;return y[a]+(y[b]-y[a])*t;
-}
-double interpLinear(const std::vector<double>&x,const std::vector<double>&y,double q){if(x.empty()||y.empty())return 0.0;if(q<=x.front())return y.front();if(q>=x.back())return y.back();const auto it=std::lower_bound(x.begin(),x.end(),q);const std::size_t b=static_cast<std::size_t>(it-x.begin()),a=b-1;const double dx=x[b]-x[a];if(std::abs(dx)<1e-30)return y[a];const double t=(q-x[a])/dx;return y[a]+(y[b]-y[a])*t;}
 
 // 0x555460, reproduced literally.  Kernel construction and accumulation are
 // double.  The raw kernel is normalized to a sum of 1,000,000; an even input
@@ -1126,10 +1088,6 @@ std::vector<float> gaussianSmoothExactF(const std::vector<float>&v,std::size_t k
     }
     return out;
 }
-std::vector<double> gaussianSmoothExact(const std::vector<double>&v,std::size_t n){
-    std::vector<float>x(v.size());for(std::size_t i=0;i<v.size();++i)x[i]=static_cast<float>(v[i]);
-    const auto y=gaussianSmoothExactF(x,n);return std::vector<double>(y.begin(),y.end());
-}
 
 struct ConditionedMagnitude{std::vector<double>freq,mag;};
 struct ConditionedMagnitudeF{std::vector<float>freq,mag;};
@@ -1181,7 +1139,6 @@ ConditionedMagnitudeF conditionMagnitudeF(const std::vector<float>&srcFreq,const
     }
     return out;
 }
-ConditionedMagnitude conditionMagnitude(const std::vector<double>&srcFreq,const std::vector<double>&srcMag,std::size_t destCount){const std::size_t n=std::min(srcFreq.size(),srcMag.size());std::vector<float>f(n),m(n);for(std::size_t i=0;i<n;++i){f[i]=static_cast<float>(srcFreq[i]);m[i]=static_cast<float>(srcMag[i]);}auto cf=conditionMagnitudeF(f,m,destCount);ConditionedMagnitude o;o.freq.assign(cf.freq.begin(),cf.freq.end());o.mag.assign(cf.mag.begin(),cf.mag.end());return o;}
 
 void lowSmoothASequentialF(std::vector<float>&m,double sr){
     if(m.size()<2)return;
@@ -1197,7 +1154,6 @@ void lowSmoothASequentialF(std::vector<float>&m,double sr){
     for(std::size_t i=1;i<lim&&i+1<n;++i)
         m[i]=preciseSqrtF(m[i]*preciseSqrtF(m[i-1]*m[i+1]));
 }
-void lowSmoothASequential(std::vector<double>&m,double sr){std::vector<float>x(m.begin(),m.end());lowSmoothASequentialF(x,sr);m.assign(x.begin(),x.end());}
 
 struct TrigTableF { std::vector<float> c,s; };
 TrigTableF makeDirectTrigOfficial(std::size_t n){
@@ -1304,7 +1260,6 @@ std::vector<float> minimumPhaseF(const std::vector<float>&positive,std::size_t t
     return h;
 }
 
-std::vector<float> minimumPhase(const std::vector<double>&positive,std::size_t taps){std::vector<float>x(positive.size());for(std::size_t i=0;i<positive.size();++i)x[i]=static_cast<float>(positive[i]);return minimumPhaseF(x,taps);}
 
 
 // Main trainer setup (0x55a261..0x55a311) initializes the exponent
@@ -1346,7 +1301,6 @@ float lossFromRatioF(const std::vector<float>&r,double sr){
     return sum*0.001953125f; // exact 1/512 constant at 0x21fe604
 }
 
-double lossFromRatio(const std::vector<double>&r,double sr){std::vector<float>x(r.begin(),r.end());return static_cast<double>(lossFromRatioF(x,sr));}
 
 void regularizeInitialCurveF(std::vector<float>&v,const std::vector<float>&reference){
     if(v.empty()||reference.empty())return;
@@ -1367,7 +1321,6 @@ void regularizeInitialCurveF(std::vector<float>&v,const std::vector<float>&refer
         }
     }
 }
-void regularizeInitialCurve(std::vector<double>&v,const std::vector<double>&reference){std::vector<float>x(v.begin(),v.end()),r(reference.begin(),reference.end());regularizeInitialCurveF(x,r);v.assign(x.begin(),x.end());}
 
 struct FactorState{std::vector<float>a,b;};
 FactorState initialFactorState(const Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr){
@@ -1532,7 +1485,7 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     for(std::size_t i=0;i<L;++i){xmC[i]={xm[i],0.0f};ytC[i]={yt[i],0.0f};}
     const auto modelDft=directDftOfficial(xmC,false,trig);
     const auto targetDft=directDftOfficial(ytC,false,trig);
-    const float fs=static_cast<float>(sr),Lf=static_cast<float>(L);
+    const float fs=static_cast<float>(sr);
     for(std::size_t k=0;k<posN;++k){
         const float mr=modelDft[k].re,mi=modelDft[k].im;
         const float tr=targetDft[k].re,ti=targetDft[k].im;
@@ -2283,15 +2236,11 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     if(lossDirect<bestLoss){bestLoss=lossDirect;gp5DirectSolveB44=directB;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;}
                 }
 
-                std::vector<MultiLevelClip> gp5LevelClips;std::vector<KSweepCandidate> mlCandidates;
-                // Build multi-level clips for Priority 3 Phase 1 evaluation.
-                // Use selection reference if available, otherwise use the fitting reference or default stimulus.
-                fs::path levelClipsSource=!refine.referenceWav.empty()?refine.referenceWav:refineStimulusPath;
-                std::string levelError;
-                if(buildLevelClips(modelPath,levelClipsSource,gp5LevelClips,levelError,status,L"GP-5/GP-50 multi-level Tone Match")){
-                    // Create multi-level candidate from sweepKAndSolveSharedB (only if we have referenceWav)
-                    if(!refine.referenceWav.empty()){
-                        std::string mlError;
+                std::vector<MultiLevelClip> gp5LevelClips;
+                if(!refine.referenceWav.empty()){
+                    std::string levelError;
+                    if(buildLevelClips(modelPath,refine.referenceWav,gp5LevelClips,levelError,status,L"GP-5/GP-50 multi-level Tone Match")){
+                        std::vector<KSweepCandidate> mlCandidates;std::string mlError;
                         // A small {0.85,1.0,1.15} K-multiplier grid was tried here (2026-09-15)
                         // instead of the fixed 1.0 below -- sweepKAndSolveSharedB already supports
                         // it, and the full research grid remains diagnostic-only via
@@ -2308,46 +2257,6 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                             os<<L", multi-level B solve="<<lossMultiLevel;
                             if(lossMultiLevel<bestLoss){bestLoss=lossMultiLevel;gp5DirectSolveB44=mlCandidates.front().b;gp5DirectSolveWon=true;gp5MultiLevelSolveWon=true;}
                         }
-                    }
-
-                    // Priority 3 Phase 1: Multi-level candidate evaluation
-                    // Evaluate all three candidates (no-correction, direct B solve, multi-level B solve)
-                    // across the 6-level sweep, not just at the fitting stimulus level.
-                    // Pick the candidate that wins majority of levels.
-                    if(trainer.multiLevelSelection){
-                    std::vector<std::vector<float>> noCorrRendered(gp5LevelClips.size()),directRendered(gp5LevelClips.size()),mlRendered(gp5LevelClips.size());
-                    std::vector<double> noCorrLosses(gp5LevelClips.size()),directLosses(gp5LevelClips.size()),mlLosses(gp5LevelClips.size());
-                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
-                        if(renderCloWithOverrideOnSignal(gp5PreToneMatchClo,preM.pk.pp,preM.pk.pn,preM.pk.kp,preM.pk.kn,
-                                                         B44Pre,gp5LevelClips[i].input44100,noCorrRendered[i],levelError)){
-                            noCorrLosses[i]=evaluateModelLoss(preM,gp5LevelClips[i].input44100,gp5LevelClips[i].target44100,44100.0);
-                        }else noCorrLosses[i]=std::numeric_limits<double>::max();
-                        if(gp5DirectSolveWon&&renderCloWithOverrideOnSignal(gp5PreToneMatchClo,preM.pk.pp,preM.pk.pn,preM.pk.kp,preM.pk.kn,
-                                                         gp5DirectSolveB44,gp5LevelClips[i].input44100,directRendered[i],levelError)){
-                            Model directM=preM;directM.B=gp5DirectSolveB44;
-                            directLosses[i]=evaluateModelLoss(directM,gp5LevelClips[i].input44100,gp5LevelClips[i].target44100,44100.0);
-                        }else directLosses[i]=std::numeric_limits<double>::max();
-                        if(gp5MultiLevelSolveWon&&mlCandidates.size()>0&&renderCloWithOverrideOnSignal(gp5PreToneMatchClo,preM.pk.pp,preM.pk.pn,preM.pk.kp,preM.pk.kn,
-                                                         mlCandidates.front().b,gp5LevelClips[i].input44100,mlRendered[i],levelError)){
-                            Model mlM=preM;mlM.B=mlCandidates.front().b;
-                            mlLosses[i]=evaluateModelLoss(mlM,gp5LevelClips[i].input44100,gp5LevelClips[i].target44100,44100.0);
-                        }else mlLosses[i]=std::numeric_limits<double>::max();
-                    }
-                    int noCorrWins=0,directWins=0,mlWins=0;
-                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
-                        double minLoss=std::min({noCorrLosses[i],directLosses[i],mlLosses[i]});
-                        if(noCorrLosses[i]==minLoss)++noCorrWins;
-                        if(directLosses[i]==minLoss)++directWins;
-                        if(mlLosses[i]==minLoss)++mlWins;
-                    }
-                    if(directWins>noCorrWins){
-                        gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;
-                    }else if(mlWins>noCorrWins&&mlWins>directWins){
-                        gp5DirectSolveWon=true;gp5MultiLevelSolveWon=true;
-                    }else{
-                        gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5DirectSolveB44.clear();
-                    }
-                    os<<L" [multi-level: no-correction="<<noCorrWins<<", direct="<<directWins<<", ml="<<mlWins<<" wins]";
                     }
                 }
 
@@ -2429,16 +2338,24 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     report(status,L"GP-5/GP-50: no separate selection reference available; using fitting reference for candidate selection.");
                 }
 
-                // Priority 3 Phase 3: Dynamics-aware fitting with compression-error gating
-                // (CLAUDE.md's "Dynamics-aware fitting, Step 2"):
-                // Re-enabled with better gating based on multi-level compression error,
-                // instead of the original zero-anchored RMS metrics that made amps quieter.
-                // Only runs P/K search if base candidate has >1.5 dB compression error,
-                // and only accepts improvement if: error improves >50%, spectral <10%
-                // regress, and output level within ±2 dB. Using six-level sweep
-                // (gp5LevelClips) already built above for efficiency.
+                // Dynamics-aware fitting (CLAUDE.md's "Dynamics-aware fitting, Step 2"):
+                // optional and gated, per NativeConverterConfig::dynamicsAwareFitting's
+                // doc comment -- only runs the expensive P/K coordinate-descent search
+                // (~120s measured) when the already-chosen candidate's OWN measured
+                // dynamics-tracking error against Full A2 exceeds
+                // dynamicsSearchThresholdDb, using the six-level sweep already built
+                // above (gp5LevelClips) so this costs one more render pass, not a
+                // fresh Full A2 render. Needs a second bundled reference clip from the
+                // same gain bucket as a disjoint selection clip for the search's
+                // round-acceptance gate -- skipped (no search) if the reference clip
+                // wasn't a bundled one (Custom mode) or its bucket has only one clip.
                 if(trainer.dynamicsAwareFitting&&!gp5LevelClips.empty()){
                     const std::vector<float>& winningB44=gp5DirectSolveWon?gp5DirectSolveB44:B44Pre;
+                    std::size_t zeroIdx=0;double bestDist=std::numeric_limits<double>::max();
+                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
+                        const double d=std::abs(gp5LevelClips[i].levelDb);
+                        if(d<bestDist){bestDist=d;zeroIdx=i;}
+                    }
                     std::vector<double> renderedDb(gp5LevelClips.size()),targetDb(gp5LevelClips.size());
                     for(std::size_t i=0;i<gp5LevelClips.size();++i){
                         std::vector<float> rendered;std::string stepErr;
@@ -2447,12 +2364,16 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                             renderedDb[i]=rmsDb(rendered);
                         targetDb[i]=rmsDb(gp5LevelClips[i].target44100);
                     }
+                    double sumSq=0.0;
+                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
+                        const double err=(renderedDb[i]-renderedDb[zeroIdx])-(targetDb[i]-targetDb[zeroIdx]);
+                        sumSq+=err*err;
+                    }
+                    const double measuredDynamicsRmsDb=std::sqrt(sumSq/static_cast<double>(gp5LevelClips.size()));
+                    r.gp5MeasuredDynamicsRmsDb=measuredDynamicsRmsDb;
+                    report(status,L"GP-5/GP-50: measured dynamics-tracking RMS error "+std::to_wstring(measuredDynamicsRmsDb)+L"dB (threshold "+std::to_wstring(trainer.dynamicsSearchThresholdDb)+L"dB).");
 
-                    // Priority 3 Phase 3 Gate 1: Compression error measurement
-                    double baselineCompressionError=computeCompressionError(targetDb,renderedDb);
-                    report(status,L"GP-5/GP-50: measured compression error "+std::to_wstring(baselineCompressionError)+L"dB (gate: >1.5dB to enable P/K search).");
-
-                    if(baselineCompressionError>1.5){
+                    if(measuredDynamicsRmsDb>trainer.dynamicsSearchThresholdDb){
                         std::wstring bucketPrefix;
                         switch(refine.referenceMode){
                             case ToneMatchReferenceMode::Bass: bucketPrefix=L"bass_"; break;
@@ -2476,57 +2397,27 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                         if(selectionClipPath.empty()){
                             report(status,L"GP-5/GP-50: dynamics error exceeds threshold, but no second bundled reference clip is available for the search's selection gate -- skipping the P/K search.");
                         }else{
-                            report(status,L"GP-5/GP-50: compression error >1.5dB -- running Phase 3 P/K search...");
+                            report(status,L"GP-5/GP-50: dynamics error exceeds threshold -- running Step 2 P/K search...");
                             std::vector<MultiLevelClip> selectionClips;std::string selError;
                             if(buildLevelClips(modelPath,selectionClipPath,selectionClips,selError,status,L"GP-5/GP-50 dynamics search (selection)")){
                                 std::string searchError;
                                 auto search=ntc::searchPkForDynamics(gp5PreToneMatchClo,gp5LevelClips,selectionClips,gp5LevelClips,0.3,searchError,status);
-
-                                if(search.ok){
-                                    // Priority 3 Phase 3 Gates 2-4: Acceptance criteria
-                                    // Measure P/K result's compression error
-                                    std::vector<double> pkRenderedDb(gp5LevelClips.size()),pkTargetDb(gp5LevelClips.size());
-                                    for(std::size_t i=0;i<gp5LevelClips.size();++i){
-                                        std::vector<float> pkRendered;std::string pkErr;
-                                        if(renderCloWithOverrideOnSignal(gp5PreToneMatchClo,search.pp,search.pn,search.kp,search.kn,
-                                                                         search.b,gp5LevelClips[i].input44100,pkRendered,pkErr))
-                                            pkRenderedDb[i]=rmsDb(pkRendered);
-                                        pkTargetDb[i]=rmsDb(gp5LevelClips[i].target44100);
-                                    }
-                                    double pkCompressionError=computeCompressionError(pkTargetDb,pkRenderedDb);
-
-                                    // Gate 2: >50% compression error improvement
-                                    double compressionImprovement=(baselineCompressionError>0)?((baselineCompressionError-pkCompressionError)/baselineCompressionError):0.0;
-
-                                    // Gate 3: spectral loss doesn't regress >10%
-                                    Model pkM=preM;pkM.pk.pp=search.pp;pkM.pk.pn=search.pn;pkM.pk.kp=search.kp;pkM.pk.kn=search.kn;pkM.B=search.b;
-                                    double pkLoss=evaluateModelLoss(pkM,analysisInput,analysisTarget,44100.0);
-                                    double spectralRegression=(bestLoss>0)?((pkLoss-bestLoss)/bestLoss):0.0;
-
-                                    // Gate 4: output level within ±2 dB at the 0 dB level clip (rmsDb already returns dB)
-                                    std::size_t zeroIdx=0;
-                                    for(std::size_t i=1;i<gp5LevelClips.size();++i)
-                                        if(std::abs(gp5LevelClips[i].levelDb)<std::abs(gp5LevelClips[zeroIdx].levelDb))zeroIdx=i;
-                                    double levelDiffDb=pkRenderedDb[zeroIdx]-renderedDb[zeroIdx];
-                                    bool levelOk=std::abs(levelDiffDb)<2.0;
-
-                                    os<<L", P/K search: compression "<<baselineCompressionError<<L"dB -> "<<pkCompressionError<<L"dB ("<<(compressionImprovement*100.0)<<L"% improvement)";
-                                    os<<L", spectral "<<bestLoss<<L" -> "<<pkLoss<<L" ("<<(spectralRegression*100.0)<<L"% regress)";
-                                    os<<L", level "<<levelDiffDb<<L"dB";
-
-                                    if(compressionImprovement>0.5&&spectralRegression<0.1&&levelOk){
-                                        report(status,L"GP-5/GP-50: P/K search accepted (compression improved, spectral stable, level ok).");
-                                        bestLoss=pkLoss;
-                                        gp5DirectSolveB44=search.b;
-                                        gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;gp5DynamicsSearchWon=true;
-                                        gp5Chosen->pk.pp=search.pp;gp5Chosen->pk.pn=search.pn;gp5Chosen->pk.kp=search.kp;gp5Chosen->pk.kn=search.kn;
-                                    }else{
-                                        std::wstring reason=L"";
-                                        if(compressionImprovement<=0.5)reason+=L"compression <50% improvement; ";
-                                        if(spectralRegression>=0.1)reason+=L"spectral regressed >10%; ";
-                                        if(!levelOk)reason+=L"level change >2dB";
-                                        report(status,L"GP-5/GP-50: P/K search rejected ("+reason+L").");
-                                    }
+                                os<<L", P/K search: selection dynamics rms "<<search.initialRmsDynamicsErrorDb<<L" -> "<<search.optimizedRmsDynamicsErrorDb;
+                                // Accept using the search's OWN acceptance signal (a genuine,
+                                // already-verified improvement in dynamics tracking on the
+                                // disjoint selection clip -- searchPkForDynamics only keeps a
+                                // round that clears both this AND its internal ESR/safety-floor
+                                // checks), NOT evaluateModelLoss's single-level spectral-
+                                // magnitude Tone Match loss -- that metric is blind to dynamics
+                                // improvements by design (CLAUDE.md's "22.7 CLOSED as a
+                                // selection method" -- an earlier version of this gate made
+                                // exactly this mistake and silently discarded every search win).
+                                if(search.ok&&search.optimizedRmsDynamicsErrorDb<search.initialRmsDynamicsErrorDb){
+                                    Model searchM=preM;searchM.pk.pp=search.pp;searchM.pk.pn=search.pn;searchM.pk.kp=search.kp;searchM.pk.kn=search.kn;searchM.B=search.b;
+                                    bestLoss=evaluateModelLoss(searchM,analysisInput,analysisTarget,44100.0);
+                                    gp5DirectSolveB44=search.b;
+                                    gp5DirectSolveWon=true;gp5MultiLevelSolveWon=false;gp5DynamicsSearchWon=true;
+                                    gp5Chosen->pk.pp=search.pp;gp5Chosen->pk.pn=search.pn;gp5Chosen->pk.kp=search.kp;gp5Chosen->pk.kn=search.kn;
                                 }else if(!search.ok){
                                     report(status,L"GP-5/GP-50: P/K search failed ("+std::wstring(searchError.begin(),searchError.end())+L").");
                                 }
@@ -3961,55 +3852,6 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
         out.push_back(r);
     }
 
-    fs::remove_all(work,ec);
-    return true;
-}
-
-// See native_converter.hpp's doc comment.
-bool runPhaseAblation(const fs::path& inputNam,
-                      const fs::path& diClipWav,
-                      const std::vector<fs::path>& heldOutClips,
-                      std::vector<ValetonComparisonResult>& out,
-                      std::string& error,
-                      const StatusCallback& status){
-    out.clear();
-    std::error_code ec;
-    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_phase_ablation_"+inputNam.stem().wstring());
-    fs::remove_all(work,ec);fs::create_directories(work,ec);
-    if(ec){error="Cannot create work directory.";return false;}
-
-    fs::path fullModelPath;
-    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
-    std::vector<float> dry;
-    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
-
-    struct Spec{const wchar_t*label;bool toneMatch;bool multiLevel;bool dynamics;};
-    static const Spec specs[]={
-        {L"no-tonematch",false,true,false},
-        {L"legacy",true,false,false},
-        {L"phase1",true,true,false},
-        {L"phase3",true,true,true},
-    };
-    for(const auto& spec:specs){
-        ValetonComparisonResult r;r.label=spec.label;
-        report(status,L"Phase ablation: converting \""+r.label+L"\"...");
-        NativeConverterConfig converter;converter.gp5DirectFit=true;
-        converter.multiLevelSelection=spec.multiLevel;converter.dynamicsAwareFitting=spec.dynamics;
-        CloRefineConfig refine;refine.enabled=spec.toneMatch;
-        if(spec.toneMatch)refine.referenceMode=ToneMatchReferenceMode::Auto;
-        auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
-        if(!conversion.ok||conversion.gp5gp50Compact.empty()){
-            r.error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
-            out.push_back(r);continue;
-        }
-        r.pkPp=conversion.pkPp;r.pkPn=conversion.pkPn;r.pkKp=conversion.pkKp;r.pkKn=conversion.pkKn;
-        const fs::path candidateClo=conversion.gp5gp50Compact;
-        CandidateRenderFn renderFn=[candidateClo](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
-            return renderCloOnSignal(candidateClo,in,outv,err);
-        };
-        r.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,renderFn,dry,heldOutClips,r);
-        out.push_back(r);
-    }
     fs::remove_all(work,ec);
     return true;
 }
