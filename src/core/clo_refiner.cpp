@@ -1125,9 +1125,15 @@ double computeCompressionError(const std::vector<double>& referenceOutputLevels,
     if (referenceOutputLevels.size() != modelOutputLevels.size() || referenceOutputLevels.empty()) {
         return std::numeric_limits<double>::max();
     }
+    // Zero-anchored: a constant level offset is not a compression error (final level
+    // match handles absolute gain), so subtract the mean difference before the RMS.
+    const std::size_t n = referenceOutputLevels.size();
+    double meanDiff = 0.0;
+    for (std::size_t i = 0; i < n; ++i) meanDiff += referenceOutputLevels[i] - modelOutputLevels[i];
+    meanDiff /= static_cast<double>(n);
     double sumSqError = 0.0;
-    for (std::size_t i = 0; i < referenceOutputLevels.size(); ++i) {
-        const double error = referenceOutputLevels[i] - modelOutputLevels[i];
+    for (std::size_t i = 0; i < n; ++i) {
+        const double error = referenceOutputLevels[i] - modelOutputLevels[i] - meanDiff;
         sumSqError += error * error;
     }
     return std::sqrt(sumSqError / referenceOutputLevels.size());

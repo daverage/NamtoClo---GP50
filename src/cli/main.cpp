@@ -76,7 +76,7 @@ void printUsage() {
         "                        (GP-200 fixed 10-slot upload: AMP1-5 -> slot 0-4, DIST1-5 -> slot 5-9)\n"
         "  namtoclo clo-info <file.clo> [--json]\n"
         "  namtoclo eq-match-batch <corpusDir> <outputDir> [--clips-dir <dir>]\n"
-        "  namtoclo pk-compare <a.nam> [b.nam ...] [--clips-dir <dir>] [--output <csv>]\n"
+        "  namtoclo ablate <a.nam> [b.nam ...] [--clips-dir <dir>] [--output <csv>]\n"
         "                          (research tool -- see ntc::runEqMatchExperiment; corpusDir must\n"
         "                          contain development/ and selection/ subfolders of *.nam files,\n"
         "                          e.g. the NamtoCloNAMCorpus layout)\n"
@@ -722,12 +722,12 @@ int cmdEqMatchBatch(const Args& a) {
     return failures == totalRuns ? 1 : 0;
 }
 
-// Automated Phase 3 quality check: converts each NAM with the dynamics-aware P/K search
-// off ("production") and on ("experimental"), renders both against Full A2 at 7 levels,
-// and fails if P/K-on is quieter or spectrally worse than P/K-off.
-int cmdPkCompare(const Args& a) {
+// Automated feature ablation: converts each NAM four ways (Tone Match off, legacy Tone
+// Match, +Phase 1 multi-level selection, +Phase 3 P/K search), scores each against Full A2,
+// and gives a KEEP / NEUTRAL / BIN verdict per feature aggregated across all amps.
+int cmdAblate(const Args& a) {
     if (a.positional.empty()) {
-        std::cerr << "pk-compare: missing <nam> file(s)\n";
+        std::cerr << "ablate: missing <nam> file(s)\n";
         return 2;
     }
     fs::path clipsDir = a.clipsDir.empty() ? fs::path{} : fs::path(a.clipsDir);
@@ -742,78 +742,91 @@ int cmdPkCompare(const Args& a) {
     };
     for (const fs::path& p : { diClip, heldOut[0], heldOut[1], heldOut[2], heldOut[3] }) {
         if (!fs::exists(p)) {
-            std::cerr << "pk-compare: reference clip not found: " << p.string() << "\n";
+            std::cerr << "ablate: reference clip not found: " << p.string() << "\n";
             return 2;
         }
     }
 
-    std::ofstream csv;
-    if (!a.output.empty()) {
-        csv.open(a.output);
-        csv << "nam,pk_moved,mean_gain_err_off,mean_gain_err_on,worst_level_delta_db,spectral_off,spectral_on,"
-               "rms_rel_err_off,rms_rel_err_on,heldout_esr_off,heldout_esr_on,verdict\n";
-    }
-
-    int fails = 0, errors = 0, applied = 0;
+    struct Row { std::string nam; std::vector<ntc::ValetonComparisonResult> r; };
+    std::vector<Row> rows;
+    int errors = 0;
     for (const std::string& namStr : a.positional) {
         const fs::path nam = namStr;
         std::cout << "\n=== " << nam.filename().string() << " ===\n";
-        std::vector<ntc::ValetonComparisonResult> results;
+        Row row{nam.filename().string(), {}};
         std::string error;
-        const bool ok = ntc::runValetonComparisonExperiment(nam, diClip, heldOut, results, error,
-                                                             [](const std::wstring& s) { std::cout << ntc::toUtf8(s) << "\n"; });
-        const ntc::ValetonComparisonResult *off = nullptr, *on = nullptr;
-        for (const auto& r : results) {
-            if (r.label == L"production") off = &r;
-            if (r.label == L"experimental") on = &r;
-        }
-        if (!ok || !off || !on || !off->ok || !on->ok) {
+        const bool ok = ntc::runPhaseAblation(nam, diClip, heldOut, row.r, error,
+                                              [](const std::wstring& s) { std::cout << ntc::toUtf8(s) << "\n"; });
+        bool complete = ok && row.r.size() == 4;
+        for (const auto& r : row.r) complete = complete && r.ok;
+        if (!complete) {
             std::cout << "ERROR: " << (error.empty() ? "candidate conversion failed" : error) << "\n";
-            if (csv) csv << nam.filename().string() << ",,,,,,,,,,,ERROR\n";
             ++errors;
             continue;
         }
-
-        const bool pkMoved = off->pkPp != on->pkPp || off->pkPn != on->pkPn || off->pkKp != on->pkKp || off->pkKn != on->pkKn;
-        if (pkMoved) ++applied;
-        std::cout << "P/K search result: " << (pkMoved ? "ACCEPTED (P/K changed)" : "not applied (output identical to P/K off)") << "\n";
-        std::printf("%8s %10s %10s %10s %10s %10s\n", "level", "fullA2", "off_err", "on_err", "delta", "rel_on-off");
-        double worstDelta = 0.0;
-        for (std::size_t i = 0; i < off->levels.size() && i < on->levels.size(); ++i) {
-            const auto& lo = off->levels[i];
-            const auto& ln = on->levels[i];
-            const double delta = ln.absoluteGainErrorDb - lo.absoluteGainErrorDb; // negative = P/K-on is quieter
-            if (delta < worstDelta) worstDelta = delta;
-            std::printf("%8.0f %10.2f %10.2f %10.2f %+10.2f %+10.2f\n", ln.levelDb, lo.fullA2AbsoluteRmsDb,
-                        lo.absoluteGainErrorDb, ln.absoluteGainErrorDb, delta, ln.relativeErrorDb - lo.relativeErrorDb);
+        std::printf("%-13s %9s %9s %9s %9s %9s\n", "candidate", "gainErr", "shapeErr", "spectral", "heldESR", "P/K");
+        for (const auto& r : row.r) {
+            std::printf("%-13s %9.2f %9.2f %9.4f %9.4f  %.3f/%.3f\n", ntc::toUtf8(r.label).c_str(),
+                        r.meanAbsoluteGainErrorDb, r.rmsRelativeErrorDb, r.meanNormalizedSpectralLoss,
+                        r.meanHeldOutEsr, r.pkKp, r.pkKn);
         }
-        std::printf("mean gain error  off=%.2f  on=%.2f dB | rms relative-dynamics error  off=%.2f  on=%.2f dB\n",
-                    off->meanAbsoluteGainErrorDb, on->meanAbsoluteGainErrorDb, off->rmsRelativeErrorDb, on->rmsRelativeErrorDb);
-        std::printf("normalized spectral loss  off=%.4f  on=%.4f | held-out ESR  off=%.4f  on=%.4f\n",
-                    off->meanNormalizedSpectralLoss, on->meanNormalizedSpectralLoss, off->meanHeldOutEsr, on->meanHeldOutEsr);
-
-        std::vector<std::string> reasons;
-        if (worstDelta < -2.0) reasons.push_back("quieter than P/K-off by >2 dB at some level");
-        if (on->meanAbsoluteGainErrorDb < off->meanAbsoluteGainErrorDb - 1.0) reasons.push_back("mean level >1 dB quieter");
-        if (on->meanNormalizedSpectralLoss > off->meanNormalizedSpectralLoss * 1.10) reasons.push_back("spectral loss >10% worse");
-        if (on->meanHeldOutEsr > off->meanHeldOutEsr * 1.10) reasons.push_back("held-out ESR >10% worse");
-        if (pkMoved && on->rmsRelativeErrorDb > off->rmsRelativeErrorDb) reasons.push_back("P/K applied but dynamics error did not improve");
-
-        std::string verdict = reasons.empty() ? (pkMoved ? "PASS (improved/neutral)" : "PASS (P/K skipped)") : "FAIL";
-        std::cout << "VERDICT: " << verdict;
-        for (const auto& r : reasons) std::cout << "\n  - " << r;
-        std::cout << "\n";
-        if (!reasons.empty()) ++fails;
-        if (csv) {
-            csv << nam.filename().string() << "," << pkMoved << "," << off->meanAbsoluteGainErrorDb << ","
-                << on->meanAbsoluteGainErrorDb << "," << worstDelta << "," << off->meanNormalizedSpectralLoss << ","
-                << on->meanNormalizedSpectralLoss << "," << off->rmsRelativeErrorDb << "," << on->rmsRelativeErrorDb << ","
-                << off->meanHeldOutEsr << "," << on->meanHeldOutEsr << "," << (reasons.empty() ? "PASS" : "FAIL") << "\n";
-        }
+        rows.push_back(std::move(row));
     }
-    std::cout << "\npk-compare: " << a.positional.size() << " amp(s), " << fails << " fail, " << errors << " error; P/K applied on " << applied
-              << " (a pass with 0 applied only shows the gates rejected P/K, not that P/K is good)\n";
-    return (fails || errors) ? 1 : 0;
+    if (rows.empty()) return 1;
+
+    std::ofstream csv;
+    if (!a.output.empty()) {
+        csv.open(a.output);
+        csv << "nam,feature,d_heldout_esr_pct,d_spectral_pct,d_shape_db,d_level_db,worst_level_delta_db,changed\n";
+    }
+
+    struct Feature { const char* name; std::size_t from, to; };
+    const Feature features[] = {
+        {"Tone Match (legacy vs off)", 0, 1},
+        {"Phase 1 multi-level selection (vs legacy)", 1, 2},
+        {"Phase 3 P/K search (vs Phase 1)", 2, 3},
+    };
+    std::cout << "\n================ VERDICTS (" << rows.size() << " amps) ================\n";
+    for (const Feature& f : features) {
+        double sumEsr = 0, sumSpec = 0, sumShape = 0, sumLevel = 0;
+        int regress = 0, changed = 0;
+        std::vector<std::string> notes;
+        for (const Row& row : rows) {
+            const auto& o = row.r[f.from];
+            const auto& n = row.r[f.to];
+            const double dEsr = (o.meanHeldOutEsr > 0) ? (n.meanHeldOutEsr - o.meanHeldOutEsr) / o.meanHeldOutEsr * 100.0 : 0.0;
+            const double dSpec = (o.meanNormalizedSpectralLoss > 0) ? (n.meanNormalizedSpectralLoss - o.meanNormalizedSpectralLoss) / o.meanNormalizedSpectralLoss * 100.0 : 0.0;
+            const double dShape = n.rmsRelativeErrorDb - o.rmsRelativeErrorDb;
+            const double dLevel = n.meanAbsoluteGainErrorDb - o.meanAbsoluteGainErrorDb; // negative = quieter
+            double worst = 0.0;
+            for (std::size_t i = 0; i < o.levels.size() && i < n.levels.size(); ++i)
+                worst = std::min(worst, n.levels[i].absoluteGainErrorDb - o.levels[i].absoluteGainErrorDb);
+            const bool isChanged = std::abs(dEsr) > 1e-6 || std::abs(dLevel) > 1e-6 || std::abs(dSpec) > 1e-6;
+            std::vector<std::string> why;
+            if (dEsr > 10.0) why.push_back("held-out ESR >10% worse");
+            if (dSpec > 10.0) why.push_back("spectral >10% worse");
+            if (dLevel < -1.0 || worst < -2.0) why.push_back("quieter");
+            if (!why.empty()) {
+                ++regress;
+                std::string line = "  REGRESSION " + row.nam + ":";
+                for (const auto& w : why) line += " " + w + ";";
+                notes.push_back(line);
+            }
+            if (isChanged) ++changed;
+            sumEsr += dEsr; sumSpec += dSpec; sumShape += dShape; sumLevel += dLevel;
+            if (csv) csv << row.nam << "," << f.name << "," << dEsr << "," << dSpec << "," << dShape << "," << dLevel << "," << worst << "," << isChanged << "\n";
+        }
+        const double k = static_cast<double>(rows.size());
+        const double mEsr = sumEsr / k, mSpec = sumSpec / k;
+        std::string verdict;
+        if (regress > 0 || mEsr > 0.0) verdict = "BIN";
+        else if (changed > 0 && (mEsr <= -2.0 || mSpec <= -2.0)) verdict = "KEEP";
+        else verdict = "NEUTRAL (no measurable benefit -- bin for simplicity)";
+        std::printf("\n%s\n  changed output on %d/%zu amps | mean held-out ESR %+.1f%% | mean spectral %+.1f%% | mean shape err %+.2f dB | mean level %+.2f dB\n  -> %s\n",
+                    f.name, changed, rows.size(), mEsr, mSpec, sumShape / k, sumLevel / k, verdict.c_str());
+        for (const auto& n : notes) std::cout << n << "\n";
+    }
+    return errors ? 1 : 0;
 }
 
 #if defined(__APPLE__)
@@ -1090,7 +1103,7 @@ int main(int argc, char** argv) {
     if (command == "gp200-upload") return cmdGp200Upload(a);
     if (command == "clo-info") return cmdCloInfo(a);
     if (command == "eq-match-batch") return cmdEqMatchBatch(a);
-    if (command == "pk-compare") return cmdPkCompare(a);
+    if (command == "ablate") return cmdAblate(a);
     if (command == "--help" || command == "-h" || command == "help") {
         printUsage();
         return 0;

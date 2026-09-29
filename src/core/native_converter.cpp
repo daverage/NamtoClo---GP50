@@ -2314,6 +2314,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                     // Evaluate all three candidates (no-correction, direct B solve, multi-level B solve)
                     // across the 6-level sweep, not just at the fitting stimulus level.
                     // Pick the candidate that wins majority of levels.
+                    if(trainer.multiLevelSelection){
                     std::vector<std::vector<float>> noCorrRendered(gp5LevelClips.size()),directRendered(gp5LevelClips.size()),mlRendered(gp5LevelClips.size());
                     std::vector<double> noCorrLosses(gp5LevelClips.size()),directLosses(gp5LevelClips.size()),mlLosses(gp5LevelClips.size());
                     for(std::size_t i=0;i<gp5LevelClips.size();++i){
@@ -2347,6 +2348,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
                         gp5DirectSolveWon=false;gp5MultiLevelSolveWon=false;gp5DirectSolveB44.clear();
                     }
                     os<<L" [multi-level: no-correction="<<noCorrWins<<", direct="<<directWins<<", ml="<<mlWins<<" wins]";
+                    }
                 }
 
                 // Priority 2: Candidate selection based on separate reference clip.
@@ -3959,6 +3961,55 @@ bool runValetonComparisonExperiment(const fs::path& inputNam,
         out.push_back(r);
     }
 
+    fs::remove_all(work,ec);
+    return true;
+}
+
+// See native_converter.hpp's doc comment.
+bool runPhaseAblation(const fs::path& inputNam,
+                      const fs::path& diClipWav,
+                      const std::vector<fs::path>& heldOutClips,
+                      std::vector<ValetonComparisonResult>& out,
+                      std::string& error,
+                      const StatusCallback& status){
+    out.clear();
+    std::error_code ec;
+    const fs::path work=fs::temp_directory_path(ec)/(L"ntc_phase_ablation_"+inputNam.stem().wstring());
+    fs::remove_all(work,ec);fs::create_directories(work,ec);
+    if(ec){error="Cannot create work directory.";return false;}
+
+    fs::path fullModelPath;
+    if(!prepareFullA2(inputNam,work,fullModelPath,error,false)){fs::remove_all(work,ec);return false;}
+    std::vector<float> dry;
+    if(!loadClipAsMono44100(diClipWav,dry,error)){fs::remove_all(work,ec);return false;}
+
+    struct Spec{const wchar_t*label;bool toneMatch;bool multiLevel;bool dynamics;};
+    static const Spec specs[]={
+        {L"no-tonematch",false,true,false},
+        {L"legacy",true,false,false},
+        {L"phase1",true,true,false},
+        {L"phase3",true,true,true},
+    };
+    for(const auto& spec:specs){
+        ValetonComparisonResult r;r.label=spec.label;
+        report(status,L"Phase ablation: converting \""+r.label+L"\"...");
+        NativeConverterConfig converter;converter.gp5DirectFit=true;
+        converter.multiLevelSelection=spec.multiLevel;converter.dynamicsAwareFitting=spec.dynamics;
+        CloRefineConfig refine;refine.enabled=spec.toneMatch;
+        if(spec.toneMatch)refine.referenceMode=ToneMatchReferenceMode::Auto;
+        auto conversion=convertNamToClo(inputNam,work,StimulusConfig{},CorrectiveIrConfig{},refine,converter,status);
+        if(!conversion.ok||conversion.gp5gp50Compact.empty()){
+            r.error=conversion.error.empty()?"Conversion did not produce a GP-5/GP-50 output.":conversion.error;
+            out.push_back(r);continue;
+        }
+        r.pkPp=conversion.pkPp;r.pkPn=conversion.pkPn;r.pkKp=conversion.pkKp;r.pkKn=conversion.pkKn;
+        const fs::path candidateClo=conversion.gp5gp50Compact;
+        CandidateRenderFn renderFn=[candidateClo](const std::vector<float>& in,std::vector<float>& outv,std::string& err){
+            return renderCloOnSignal(candidateClo,in,outv,err);
+        };
+        r.ok=scoreGp5CandidateAgainstFullA2(fullModelPath,renderFn,dry,heldOutClips,r);
+        out.push_back(r);
+    }
     fs::remove_all(work,ec);
     return true;
 }
