@@ -20,6 +20,7 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <vector>
 
@@ -1815,14 +1816,23 @@ fs::path resolveT3kSweepClip(){
     if(fs::exists(dest,ec)&&!ec&&fs::file_size(dest,ec)>0&&!ec)return dest;
     fs::create_directories(cacheDir,ec);
     if(ec)return {};
-    const fs::path tmp=cacheDir/L"T3K-sweep-v3.wav.download";
+    // Per-run temp name: two conversions started together must not both write into
+    // one shared .download file (each curl truncates/appends the other's bytes and
+    // the cached result is corrupt). Whichever finishes first renames into place.
+    std::random_device rd;
+    const fs::path tmp=cacheDir/(L"T3K-sweep-v3.wav."+std::to_wstring(rd())+L".download");
     std::string tmpUtf8=pathToUtf8(tmp);
-    std::string cmd="curl -fsSL -o \""+tmpUtf8+"\" \"https://www.tone3000.com/T3K-sweep-v3.wav\"";
+    // The file is ~27 MB served from S3 (via a tone3000.com redirect) and can be slow,
+    // so there's no overall --max-time; instead abort a connection that never opens or
+    // a transfer that stalls below 2 KB/s for 60 s, rather than hanging the convert forever.
+    std::string cmd="curl -fsSL --connect-timeout 20 --speed-limit 2048 --speed-time 60 --retry 2 -o \""+tmpUtf8+"\" \"https://www.tone3000.com/T3K-sweep-v3.wav\"";
     const int rc=std::system(cmd.c_str());
-    fs::remove(dest,ec);
     if(rc!=0||!fs::exists(tmp,ec)||ec||fs::file_size(tmp,ec)==0){fs::remove(tmp,ec);return {};}
     fs::rename(tmp,dest,ec);
-    if(ec)return tmp; // still usable even if the rename itself failed
+    if(ec){
+        if(fs::exists(dest,ec)&&!ec){fs::remove(tmp,ec);return dest;} // another run won the race
+        return tmp; // still usable even if the rename itself failed
+    }
     return dest;
 }
 
@@ -2009,6 +2019,8 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
     // user-browsed refine.referenceWav as-is; Default leaves it empty (standard
     // stimulus tail, unchanged behavior).
     if(refine.enabled&&refine.referenceMode!=ToneMatchReferenceMode::Custom&&refine.referenceMode!=ToneMatchReferenceMode::Default){
+        if(refine.referenceMode==ToneMatchReferenceMode::T3kSweep)
+            report(status,L"Tone Match: locating T3K sweep (downloads ~27 MB on first use, can take several minutes)...");
         const fs::path namedClip=resolveNamedReferenceClip(refine.referenceMode,m.pk.kp,m.pk.kn);
         if(namedClip.empty()){
             report(status,L"Tone Match reference clip not found next to the executable (reference_clips folder) -- using the default stimulus instead.");

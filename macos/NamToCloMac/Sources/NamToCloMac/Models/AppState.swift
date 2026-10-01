@@ -7,7 +7,7 @@ import SwiftUI
 /// generated CLO) live only in memory, per this app's design notes.
 @MainActor
 final class AppState: ObservableObject {
-    static let appVersion = "3.0.0"
+    static let appVersion = "3.0.1"
     let backend: CLIBackend
 
     // Convert screen
